@@ -74,11 +74,12 @@ impl Config {
 
     pub fn summary(&self) -> String {
         format!(
-            "model={} | base_url={} | parallel={} | workspace={} | auth={} | mock={}",
+            "model={} | base_url={} | parallel={} | workspace={} | repo_dir={} | auth={} | mock={}",
             self.model,
             self.base_url,
             self.max_parallel,
             self.workspace_dir.display(),
+            self.repo_dir.display(),
             match &self.api_key {
                 Some(_) => "present",
                 None => "absent",
