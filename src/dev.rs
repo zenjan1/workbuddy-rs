@@ -280,9 +280,9 @@ pub async fn run_dev_loop(
             .or_else(|| opts.verify.clone())
             .unwrap_or_else(|| "echo no-verify".to_string());
 
-        // 规划(最多 2 次,防规划器抖动)
+        // 规划(最多 3 次,防规划器抖动)
         let mut plan = None;
-        for attempt in 1..=2 {
+        for attempt in 1..=3 {
             match planner::plan_dev_task(&llm, &goal).await {
                 Ok(p) => {
                     plan = Some(p);
@@ -293,8 +293,8 @@ pub async fn run_dev_loop(
         }
         let Some(plan) = plan else {
             failed.push(task.title.clone());
-            state.failed.push(task.title.clone());
-            state.history.push(format!("{} 规划失败,跳过", now_iso()));
+            state.failed.push(task_id.clone());
+            state.history.push(format!("{} 规划失败,跳过: {}", now_iso(), task.title));
             done_set.insert(task_id.clone());
             save_state(&cfg.repo_dir, &state)?;
             continue;
@@ -381,7 +381,7 @@ pub async fn run_dev_loop(
             let _ = std::process::Command::new("git")
                 .arg("-C")
                 .arg(&cfg.repo_dir)
-                .args(["clean", "-fd", "--", ":!.workbuddy"])
+                .args(["clean", "-fd", "-e", ".workbuddy"])
                 .status();
             failed.push(task.title.clone());
             state.failed.push(task_id.clone());

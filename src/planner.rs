@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use crate::agents;
 use crate::llm::Llm;
-use crate::plan::{Plan, MAX_STEPS};
+use crate::plan::{Plan, StepKind, MAX_STEPS};
+use crate::util::clip;
 
 pub const PLANNER_SYSTEM: &str = "你是 WorkBuddy 的总规划师(Planner),负责把用户目标拆解为可执行的多智能体协作计划。\n\
 只输出一个 JSON 对象(不要 markdown 代码块、不要任何额外文字),结构如下:\n\
@@ -52,7 +53,61 @@ pub async fn plan_dev_task(llm: &Arc<dyn Llm>, goal: &str) -> Result<Plan> {
         .replace("{catalog}", &agents::catalog_text());
     let user = format!("开发任务(在当前代码仓库中完成):\n{}\n\n请输出 JSON 计划。", goal);
     let raw = llm.chat(&system, &user).await?;
-    Plan::from_llm(goal, &raw)
+    let mut plan = Plan::from_llm(goal, &raw)?;
+    repair_dev_plan(&mut plan)?;
+    Ok(plan)
+}
+
+/// 容忍修复 dev 计划:模型偶发漏给 read/edit 步骤 path。
+/// - read 缺 path:尝试从 prompt 提取文件路径;提取不到则降级为 llm 步骤(read 本就只是上下文辅助);
+/// - edit 缺 path:必须能提取,否则报错触发重新规划。
+fn repair_dev_plan(plan: &mut Plan) -> Result<()> {
+    for s in plan.steps.iter_mut() {
+        if s.path.as_ref().is_some_and(|p| !p.trim().is_empty()) {
+            continue;
+        }
+        match s.kind {
+            StepKind::Read => match extract_path_from_prompt(&s.prompt) {
+                Some(p) => s.path = Some(p),
+                None => s.kind = StepKind::Llm,
+            },
+            StepKind::Edit => {
+                s.path = Some(extract_path_from_prompt(&s.prompt).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "edit 步骤 {} 缺少 path 且无法从 prompt 提取文件路径(名称: {})",
+                        s.id,
+                        clip(&s.name, 40)
+                    )
+                })?);
+            }
+            _ => {}
+        }
+    }
+    plan.validate()
+}
+
+/// 从自由文本中提取一个看起来像仓库文件路径的 token(含已知扩展名或含 '/')。
+fn extract_path_from_prompt(text: &str) -> Option<String> {
+    for tok in text
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '/' || c == '.' || c == '_' || c == '-'))
+    {
+        let mut t = tok.trim_matches('/').to_string();
+        while t.ends_with('.') || t.ends_with('-') {
+            t.pop();
+        }
+        if t.len() < 3 || t.is_empty() {
+            continue;
+        }
+        let known_ext = [
+            ".rs", ".toml", ".md", ".json", ".py", ".ts", ".js", ".lock", ".sh", ".yml", ".yaml",
+        ]
+        .iter()
+        .any(|e| t.ends_with(e));
+        if known_ext || (t.contains('/') && t.matches('/').count() <= 3) {
+            return Some(t);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -89,5 +144,63 @@ mod tests {
             .replace("{catalog}", &agents::catalog_text());
         assert!(!system.contains("{MAX_STEPS}"));
         assert!(!system.contains("{catalog}"));
+    }
+
+    #[test]
+    fn extract_path_from_prompt_finds_file_tokens() {
+        assert_eq!(
+            extract_path_from_prompt("先读 src/llm.rs 了解结构"),
+            Some("src/llm.rs".to_string())
+        );
+        assert_eq!(
+            extract_path_from_prompt("修改 README.md 增加一节"),
+            Some("README.md".to_string())
+        );
+        assert_eq!(
+            extract_path_from_prompt("在 Cargo.toml 里加依赖"),
+            Some("Cargo.toml".to_string())
+        );
+        assert_eq!(extract_path_from_prompt("做一个整体设计"), None);
+    }
+
+    /// 测试辅助:直接反序列化 Plan(不走 from_llm 的 validate),
+    /// 以便构造"缺 path"这种 from_llm 会拒绝的中间态来测试修复函数。
+    /// 入参可为完整对象或裸步骤数组。
+    fn raw_plan(json: &str) -> Plan {
+        let v: serde_json::Value = serde_json::from_str(json).unwrap();
+        let v = if v.is_array() {
+            serde_json::json!({"goal": "t", "steps": v})
+        } else {
+            v
+        };
+        serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn repair_dev_plan_heals_missing_path() {
+        // read 缺 path 但 prompt 含路径 → 补上
+        let raw = r#"[
+            {"id":1,"name":"读代码","agent":"coder","skill":"code-writing","prompt":"读 src/llm.rs 的结构","kind":"read","needs":[]},
+            {"id":2,"name":"总结","agent":"reviewer","skill":"final-review","prompt":"总结","kind":"llm","needs":[1]}
+        ]"#;
+        let mut p = raw_plan(raw);
+        assert!(p.steps[0].path.is_none());
+        repair_dev_plan(&mut p).unwrap();
+        assert_eq!(p.steps[0].path.as_deref(), Some("src/llm.rs"));
+
+        // read 缺 path 且提取不到 → 降级为 llm,计划仍合法
+        let raw2 = r#"[
+            {"id":1,"name":"分析","agent":"coder","skill":"code-writing","prompt":"分析整体架构风格","kind":"read","needs":[]}
+        ]"#;
+        let mut p2 = raw_plan(raw2);
+        repair_dev_plan(&mut p2).unwrap();
+        assert_eq!(p2.steps[0].kind, StepKind::Llm);
+
+        // edit 缺 path 且提取不到 → 报错(触发重新规划)
+        let raw3 = r#"[
+            {"id":1,"name":"改","agent":"coder","skill":"code-writing","prompt":"做一处修改","kind":"edit","needs":[]}
+        ]"#;
+        let mut p3 = raw_plan(raw3);
+        assert!(repair_dev_plan(&mut p3).is_err());
     }
 }
