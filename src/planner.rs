@@ -53,7 +53,7 @@ pub async fn plan_dev_task(llm: &Arc<dyn Llm>, goal: &str) -> Result<Plan> {
         .replace("{catalog}", &agents::catalog_text());
     let user = format!("开发任务(在当前代码仓库中完成):\n{}\n\n请输出 JSON 计划。", goal);
     let raw = llm.chat(&system, &user).await?;
-    let mut plan = Plan::from_llm(goal, &raw)?;
+    let mut plan = Plan::parse_from_llm(goal, &raw)?;
     repair_dev_plan(&mut plan)?;
     Ok(plan)
 }
@@ -62,6 +62,15 @@ pub async fn plan_dev_task(llm: &Arc<dyn Llm>, goal: &str) -> Result<Plan> {
 /// - read 缺 path:尝试从 prompt 提取文件路径;提取不到则降级为 llm 步骤(read 本就只是上下文辅助);
 /// - edit 缺 path:必须能提取,否则报错触发重新规划。
 fn repair_dev_plan(plan: &mut Plan) -> Result<()> {
+    // 未知专家回退:模型常把 kind 值(shell/read/edit)幻觉进 agent 字段,按类型映射到合适专家
+    for s in plan.steps.iter_mut() {
+        if crate::agents::by_id(&s.agent).is_none() {
+            s.agent = match s.kind {
+                StepKind::Llm => "reviewer".to_string(),
+                _ => "coder".to_string(),
+            };
+        }
+    }
     for s in plan.steps.iter_mut() {
         if s.path.as_ref().is_some_and(|p| !p.trim().is_empty()) {
             continue;
@@ -83,7 +92,68 @@ fn repair_dev_plan(plan: &mut Plan) -> Result<()> {
             _ => {}
         }
     }
+    // shell 缺 command:从 prompt/name 提取命令;提取不到则降级为 llm(该步骤仅产出文字)
+    for s in plan.steps.iter_mut() {
+        if s.kind != StepKind::Shell {
+            continue;
+        }
+        if s.command.as_ref().is_some_and(|c| !c.trim().is_empty()) {
+            continue;
+        }
+        let text = format!("{}\n{}", s.name, s.prompt);
+        if let Some(cmd) = extract_shell_command(&text) {
+            s.command = Some(cmd);
+        } else {
+            s.kind = StepKind::Llm;
+            s.command = None;
+        }
+    }
     plan.validate()
+}
+
+/// 从自由文本中提取一个 shell 命令:优先 `...` 或 "命令:" 之后的片段,
+/// 否则取以已知命令动词开头的 token 序列。
+fn extract_shell_command(text: &str) -> Option<String> {
+    // 1) 反引号包裹
+    if let Some(start) = text.find('`') {
+        if let Some(end) = text[start + 1..].find('`') {
+            let c = text[start + 1..start + 1 + end].trim();
+            if !c.is_empty() && c.chars().count() <= 120 {
+                return Some(c.to_string());
+            }
+        }
+    }
+    // 2) "命令: xxx" 形式
+    for marker in ["命令:", "命令:", "command:", "command:"] {
+        if let Some(i) = text.find(marker) {
+            let rest = text[i + marker.len()..].trim();
+            let line = rest.lines().next().unwrap_or("").trim().trim_end_matches('。').trim();
+            if !line.is_empty() && line.chars().count() <= 120 && !line.contains(' ') {
+                return Some(line.to_string());
+            }
+            if !line.is_empty() && line.chars().count() <= 120 {
+                return Some(line.to_string());
+            }
+        }
+    }
+    // 3) 已知命令动词开头的行
+    let verbs = [
+        "cargo", "rustc", "git", "echo", "ls", "grep", "sh", "bash", "python", "make",
+    ];
+    for line in text.lines() {
+        let l = line.trim().trim_start_matches(|c| c == '-' || c == '*').trim();
+        if l.is_empty() {
+            continue;
+        }
+        let head = l.split_whitespace().next().unwrap_or("");
+        if verbs.contains(&head) {
+            let c: String = l.chars().take(120).collect();
+            if c.split_whitespace().count() >= 1 && c.split_whitespace().count() <= 8 {
+                return Some(c);
+            }
+        }
+    }
+    None
 }
 
 /// 从自由文本中提取一个看起来像仓库文件路径的 token(含已知扩展名或含 '/')。

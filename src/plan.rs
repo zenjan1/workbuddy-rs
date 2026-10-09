@@ -58,7 +58,8 @@ pub struct Plan {
 impl Plan {
     /// 从 LLM 原始输出解析并校验计划。容忍 markdown 围栏、额外文字,
     /// 以及模型常见的字段格式幻觉(id 为字符串/数组、needs 混入非数字等)。
-    pub fn from_llm(goal: &str, raw: &str) -> anyhow::Result<Self> {
+    /// 解析 LLM 原始输出为计划(不做最终 validate),供 dev 模式先容忍修复再校验。
+    pub fn parse_from_llm(goal: &str, raw: &str) -> anyhow::Result<Self> {
         let json_text = extract_json_object(raw)?;
         let v: serde_json::Value =
             serde_json::from_str(&json_text).context("解析计划 JSON 失败")?;
@@ -148,6 +149,12 @@ impl Plan {
                 }
             }
         }
+        Ok(p)
+    }
+
+    /// 从 LLM 原始输出解析并校验计划(校验失败返回 Err)。
+    pub fn from_llm(goal: &str, raw: &str) -> anyhow::Result<Self> {
+        let p = Self::parse_from_llm(goal, raw)?;
         p.validate()?;
         Ok(p)
     }
