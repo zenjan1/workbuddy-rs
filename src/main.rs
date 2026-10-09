@@ -21,7 +21,7 @@ use workspace::{RunRecord, StepRecord, Workspace};
 #[derive(Parser)]
 #[command(
     name = "workbuddy",
-    version,
+    version = env!("CARGO_PKG_VERSION"),
     about = "WorkBuddy 非官方 Rust 复刻:多专家 AI 智能体工作台"
 )]
 struct Cli {
