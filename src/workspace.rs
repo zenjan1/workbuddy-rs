@@ -129,7 +129,8 @@ fn new_run_id() -> String {
             .wrapping_mul(6364136223846793005)
             .wrapping_add(t.wrapping_add(1442695040888963407).wrapping_add(seq as u64));
     }
-    format!("{:013x}-{:04x}", t, h as u32)
+    // 前缀 13 位(世纪内足够)+ 后缀固定 8 位十六进制,总长恒定 22
+    format!("{:013x}-{:08x}", t, h as u32)
 }
 
 #[cfg(test)]

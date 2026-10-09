@@ -47,13 +47,81 @@ pub struct Plan {
 }
 
 impl Plan {
-    /// 从 LLM 原始输出解析并校验计划(容忍 markdown 围栏等额外文字)。
+    /// 从 LLM 原始输出解析并校验计划。容忍 markdown 围栏、额外文字,
+    /// 以及模型常见的字段格式幻觉(id 为字符串/数组、needs 混入非数字等)。
     pub fn from_llm(goal: &str, raw: &str) -> anyhow::Result<Self> {
         let json_text = extract_json_object(raw)?;
-        let mut p: Plan =
+        let v: serde_json::Value =
             serde_json::from_str(&json_text).context("解析计划 JSON 失败")?;
-        // 计划目标以用户原始目标为准,LLM 的 goal 字段仅作文本参考
-        p.goal = goal.to_string();
+
+        let steps_v = v
+            .get("steps")
+            .and_then(|s| s.as_array())
+            .context("计划缺少 steps 数组")?;
+
+        let mut steps: Vec<Step> = Vec::new();
+        for (i, sv) in steps_v.iter().enumerate() {
+            let obj = sv.as_object().with_context(|| format!("步骤 {} 不是 JSON 对象", i + 1))?;
+            // id:优先取数字;容忍字符串数字、数组首个元素;否则按序号补齐
+            let mut id = obj
+                .get("id")
+                .and_then(|x| x.as_u64().or_else(|| first_number(x)))
+                .map(|n| n as usize);
+            if id.is_none() {
+                id = Some(i + 1);
+            }
+            let id = id.unwrap();
+
+            let str_field = |name: &str| {
+                obj.get(name)
+                    .and_then(|x| x.as_str().or_else(|| x.as_array().and_then(|a| a.first()).and_then(|f| f.as_str())))
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string()
+            };
+            let name = str_field("name");
+            let agent = str_field("agent");
+            let skill = str_field("skill");
+            let prompt = str_field("prompt");
+
+            let kind = match obj.get("kind").and_then(|k| k.as_str()).unwrap_or("llm") {
+                "shell" => StepKind::Shell,
+                _ => StepKind::Llm,
+            };
+            let command = (kind == StepKind::Shell).then(|| str_field("command")).filter(|c| !c.is_empty());
+
+            // needs:容忍字符串数字/数组嵌套,只保留纯数字项
+            let needs: Vec<usize> = obj
+                .get("needs")
+                .map(|n| {
+                    let mut out = Vec::new();
+                    if let Some(arr) = n.as_array() {
+                        for x in arr {
+                            if let Some(num) = x.as_u64().or_else(|| first_number(x)) {
+                                out.push(num as usize);
+                            }
+                        }
+                    }
+                    out
+                })
+                .unwrap_or_default();
+
+            steps.push(Step {
+                id,
+                name,
+                agent,
+                skill,
+                prompt,
+                kind,
+                command,
+                needs,
+            });
+        }
+
+        let mut p = Plan {
+            goal: goal.to_string(),
+            steps,
+        };
         p.steps.sort_by_key(|s| s.id);
         // 未知 skill 回退为该专家的第一个 skill(容忍模型轻微幻觉)
         for s in &mut p.steps {
@@ -156,6 +224,17 @@ fn extract_json_object(raw: &str) -> anyhow::Result<String> {
     Ok(raw[start..=end].to_string())
 }
 
+/// 从一个 JSON 值里尽力提取一个非负整数:
+/// 数字直接用;字符串按数字解析;数组取第一个可解析的元素。
+fn first_number(v: &serde_json::Value) -> Option<u64> {
+    match v {
+        serde_json::Value::Number(n) => n.as_u64(),
+        serde_json::Value::String(s) => s.trim().parse::<u64>().ok(),
+        serde_json::Value::Array(a) => a.iter().find_map(first_number),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,5 +296,30 @@ mod tests {
     fn reject_empty_steps() {
         let bad = r#"{ "goal": "x", "steps": [] }"#;
         assert!(Plan::from_llm("x", bad).is_err());
+    }
+
+    #[test]
+    fn tolerate_string_and_array_id() {
+        // 模型幻觉:id 为字符串、数组,needs 混入字符串数字与无效项
+        let raw = r#"{ "goal": "x", "steps": [
+            {"id":"1","name":"a","agent":"researcher","skill":"deep-research","prompt":"p","kind":"llm","needs":[]},
+            {"id":[2],"name":"b","agent":"writer","skill":"report-writing","prompt":"p","kind":"llm","needs":["1", "oops"]},
+            {"name":"c","agent":"reviewer","skill":"final-review","prompt":"p","kind":"llm","needs":[1,2]}
+        ]}"#;
+        let p = Plan::from_llm("x", raw).unwrap();
+        assert_eq!(p.steps.iter().map(|s| s.id).collect::<Vec<_>>(), vec![1, 2, 3]);
+        assert_eq!(p.steps[1].needs, vec![1]);
+        assert_eq!(p.topo_order().unwrap(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn tolerate_missing_kind_defaults_to_llm() {
+        let raw = r#"{ "goal": "x", "steps": [
+            {"id":1,"name":"a","agent":"coder","skill":"code-writing","prompt":"p","needs":[]},
+            {"id":2,"name":"b","agent":"reviewer","skill":"final-review","prompt":"p","kind":"LLM","needs":[1]}
+        ]}"#;
+        let p = Plan::from_llm("x", raw).unwrap();
+        assert_eq!(p.steps[0].kind, StepKind::Llm);
+        assert_eq!(p.steps[1].kind, StepKind::Llm);
     }
 }
