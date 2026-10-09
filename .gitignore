@@ -2,6 +2,6 @@
 .workbuddy/state.json
 .workbuddy/failures/
 .workbuddy/dev.pid
-.workbuddy/dev.log
+.workbuddy/dev.log*
 .workbuddy/worktrees/
 .workbuddy/backlog.json.tmp

@@ -443,43 +443,52 @@ pub async fn run_dev_loop(
             }
         }
 
+        // 完成判定:验证通过 且 仓库确有源码改动(提交成功)。
+        // 防止假成功:步骤全失败/零改动时 cargo test 本来就绿,不能算完成。
+        let steps_ok = results.iter().filter(|r| r.ok).count();
+        let steps_total = results.len();
+        let mut sha = None;
         if verify_ok {
-            // 提交
-            let sha = match git_commit(&cfg.repo_dir, &format!("feat: {}", task.title)) {
+            // 提交(无改动 → 视为未完成任务)
+            sha = match git_commit(&cfg.repo_dir, &format!("feat: {}", task.title)) {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("[dev] 提交失败: {}", clip(&e.to_string(), 200));
                     None
                 }
             };
-            let sha_str = sha.as_deref().unwrap_or("(无改动/提交失败)");
-            eprintln!("[dev] ✅ 任务完成并已提交: {} ({})", task.title, sha_str);
-            completed.push(task.title.clone());
-            state.done.push(task_id.clone());
-            state.history.push(format!(
-                "{} ✅ {} @ {}",
-                now_iso(),
-                task.title,
-                sha_str
-            ));
-            done_set.insert(task_id);
-        } else {
-            eprintln!("[dev] ❌ 任务失败(验证未通过,已尝试 {} 次修复)", repair_count);
-            // 回滚脏改动,避免污染下一个任务
-            let _ = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&cfg.repo_dir)
-                .args(["checkout", "--", "."])
-                .status();
-            let _ = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&cfg.repo_dir)
-                .args(["clean", "-fd", "-e", ".workbuddy"])
-                .status();
-            failed.push(task.title.clone());
-            state.failed.push(task_id.clone());
-            state.history.push(format!("{} ❌ {}", now_iso(), task.title));
-            done_set.insert(task_id);
+        }
+        match sha {
+            Some(sha) => {
+                eprintln!(
+                    "[dev] ✅ 任务完成并已提交: {} ({}) [步骤 {steps_ok}/{steps_total}]",
+                    task.title, sha
+                );
+                completed.push(task.title.clone());
+                state.done.push(task_id.clone());
+                state
+                    .history
+                    .push(format!("{} ✅ {} @ {}", now_iso(), task.title, sha));
+                done_set.insert(task_id);
+            }
+            None => {
+                let reason = if verify_ok {
+                    "验证通过但无源码改动".to_string()
+                } else {
+                    format!("验证未通过(已尝试 {repair_count} 次修复)")
+                };
+                mark_task_failed(
+                    &cfg.repo_dir,
+                    &task.title,
+                    &task_id,
+                    &reason,
+                    steps_ok,
+                    steps_total,
+                    &mut failed,
+                    &mut state,
+                    &mut done_set,
+                );
+            }
         }
         save_state(&cfg.repo_dir, &state)?;
     }
@@ -490,6 +499,37 @@ pub async fn run_dev_loop(
         failed.len()
     );
     Ok(DevReport { completed, failed })
+}
+
+/// 标记任务失败:回滚脏改动(避免污染下一个任务)并记录 state。
+fn mark_task_failed(
+    repo: &Path,
+    title: &str,
+    task_id: &str,
+    reason: &str,
+    steps_ok: usize,
+    steps_total: usize,
+    failed: &mut Vec<String>,
+    state: &mut DevState,
+    done_set: &mut HashSet<String>,
+) {
+    eprintln!(
+        "[dev] ❌ 任务未完成: {title} ({reason}) [步骤 {steps_ok}/{steps_total}]"
+    );
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["checkout", "--", "."])
+        .status();
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["clean", "-fd", "-e", ".workbuddy"])
+        .status();
+    failed.push(title.to_string());
+    state.failed.push(task_id.to_string());
+    state.history.push(format!("{} ❌ {} ({reason})", now_iso(), title));
+    done_set.insert(task_id.to_string());
 }
 
 fn now_iso() -> String {

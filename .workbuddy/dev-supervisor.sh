@@ -12,6 +12,13 @@ LOG="$REPO/.workbuddy/dev.log"
 PIDFILE="$REPO/.workbuddy/dev.pid"
 echo $$ > "$PIDFILE"
 echo "[supervisor] $(date '+%F %T') 启动 pid=$$ repo=$REPO" >> "$LOG"
+# 启动前:把操作者遗留的未提交改动以 wip 提交,
+# 避免 dev 循环把它们当作任务产出提交(早期事故的根因)。
+if [ -n "$(git status --porcelain)" ]; then
+  git add -A
+  git commit -m "wip: uncommitted changes before dev loop" >> "$LOG" 2>&1
+  echo "[supervisor] 启动前工作区不干净,已以 wip 提交" >> "$LOG"
+fi
 while true; do
   ~/.local/bin/workbuddy dev --repo "$REPO" --verify "cargo test" --minutes 43200 --extend 10 >> "$LOG" 2>&1
   rc=$?
