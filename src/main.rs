@@ -70,6 +70,9 @@ enum Cmd {
         /// 操作仓库目录(默认当前目录)
         #[arg(long)]
         repo: Option<std::path::PathBuf>,
+        /// backlog 耗尽时自动生成新任务(每轮 N 个),支撑长期运行
+        #[arg(long)]
+        extend: Option<usize>,
         /// 使用 Mock LLM(离线演练)
         #[arg(long)]
         mock: bool,
@@ -113,6 +116,7 @@ async fn main() -> Result<()> {
             tasks,
             minutes,
             repo,
+            extend,
             mock,
         } => {
             if let Some(r) = repo {
@@ -136,6 +140,7 @@ async fn main() -> Result<()> {
                     verify,
                     max_tasks: tasks,
                     max_minutes: minutes,
+                    extend,
                 },
             )
             .await?;

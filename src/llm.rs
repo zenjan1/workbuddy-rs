@@ -102,6 +102,9 @@ const MOCK_DEV_PLAN: &str = r#"{"goal":"(mock) 开发任务","steps":[
 /// Mock 的 edits 输出:在 .workbuddy/autodev_note.md 追加一行(始终唯一/存在)。
 const MOCK_EDITS: &str = r#"{"edits":[{"path":".workbuddy/autodev_note.md","old_string":"","new_string":"(mock) 自主开发步骤完成","replace_all":false}]}"#;
 
+/// Mock 的任务生成输出:一个可重复执行的安全 mock 任务。
+const MOCK_GEN_TASKS: &str = r#"{"tasks":[{"title":"(mock) 生成任务:补充文档注释","description":"为某个模块补充一行注释","priority":1}]}"#;
+
 impl Llm for MockLlm {
     fn chat<'a>(
         &'a self,
@@ -111,6 +114,8 @@ impl Llm for MockLlm {
         Box::pin(async move {
             if system.contains("输出协议") {
                 Ok(MOCK_EDITS.to_string())
+            } else if system.contains("任务生成器") {
+                Ok(MOCK_GEN_TASKS.to_string())
             } else if system.contains("开发任务") {
                 Ok(MOCK_DEV_PLAN.to_string())
             } else if system.contains("规划师") || system.contains("Planner") {

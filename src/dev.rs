@@ -21,6 +21,8 @@ use crate::planner;
 use crate::util::clip;
 
 const MAX_REPAIRS: usize = 3;
+/// --extend 单次运行最多允许的补给轮数(防失控;每轮 1 次 LLM 调用)
+const MAX_EXTEND_ROUNDS: usize = 1000;
 
 // ---------- backlog ----------
 
@@ -65,6 +67,59 @@ pub fn load_backlog(path: &Path) -> Result<Vec<DevTask>> {
     }
     if out.is_empty() {
         bail!("backlog 为空");
+    }
+    Ok(out)
+}
+
+/// 持久化 backlog(原子写:先写临时文件再 rename)。
+fn save_backlog(path: &Path, tasks: &[DevTask]) -> Result<()> {
+    let v = serde_json::to_string_pretty(&serde_json::json!({ "tasks": tasks }))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, v)?;
+    std::fs::rename(&tmp, path).with_context(|| format!("写回 backlog 失败: {}", path.display()))?;
+    Ok(())
+}
+
+/// 调用 LLM 生成 N 个新的开发任务(用于 backlog 耗尽时自补给,支撑长期运行)。
+async fn generate_tasks(llm: &Arc<dyn Llm>, n: usize) -> Result<Vec<DevTask>> {
+    let system = "你是 WorkBuddy 的任务生成器。为 workbuddy-rs 这个 Rust 多智能体 CLI 项目\
+    (模块: main/dev/edits/executor/llm/plan/planner/agents/workspace/config/util)生成持续的开发任务,\
+    要求:每个任务小而独立、可验证(用 cargo test 或编译)、不破坏现有功能、优先补测试/文档/CLI 子命令/性能/健壮性,\
+    禁止安全敏感操作。\n\
+    只输出一个 JSON 对象: {\"tasks\": [{\"title\": \"任务名\", \"description\": \"完整说明\", \"priority\": 1}]},\
+    恰好 N 个任务,不要 markdown 围栏、不要额外文字。";
+    let user = format!("请生成 {n} 个新任务(避免与 backlog 中已有的重复主题: 文档、clip 测试、--version、summary、CRLF、占位符、workspace 提示、失败报告、dry-run、--since、重试、StepRecord 统计、retry-failed、stats、--json、LLM 预算、skip 字段、提交序号、SHELL_TIMEOUT、report 命令、health、git 状态摘要、undo、hint 字段、agents.toml、worktree 并行、watch、bench、CLI 集成测试、selfcheck)。");
+    let raw = llm.chat(system, &user).await.context("任务生成 LLM 调用失败")?;
+    let v: serde_json::Value = serde_json::from_str(&clip(&raw, 8000)).context("解析生成任务 JSON 失败")?;
+    let arr = v
+        .get("tasks")
+        .and_then(|t| t.as_array())
+        .cloned()
+        .or_else(|| v.as_array().cloned())
+        .context("生成结果缺少 tasks 数组")?;
+    let mut out = Vec::new();
+    for (i, t) in arr.into_iter().take(n).enumerate() {
+        let obj = match t.as_object() {
+            Some(o) => o,
+            None => continue,
+        };
+        let title = match obj.get("title").and_then(|x| x.as_str()) {
+            Some(s) if !s.trim().is_empty() => s.to_string(),
+            _ => continue,
+        };
+        let description = obj
+            .get("description")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let priority = obj.get("priority").and_then(|x| x.as_i64()).unwrap_or(1) as i32;
+        let _ = i;
+        out.push(DevTask {
+            title,
+            description,
+            verify: None,
+            priority,
+        });
     }
     Ok(out)
 }
@@ -209,6 +264,8 @@ pub struct DevOptions {
     pub verify: Option<String>,
     pub max_tasks: Option<usize>,
     pub max_minutes: Option<u64>,
+    /// backlog 耗尽时自动生成 N 个新任务(可重复补给,直到达到该上限),支撑长期运行
+    pub extend: Option<usize>,
 }
 
 pub struct DevReport {
@@ -224,7 +281,7 @@ pub async fn run_dev_loop(
     if !cfg.repo_dir.join(".git").exists() {
         bail!("{} 不是 git 仓库(dev 模式需要 git 用于提交)", cfg.repo_dir.display());
     }
-    let backlog = load_backlog(&opts.backlog_path)?;
+    let mut backlog = load_backlog(&opts.backlog_path)?;
     let mut state = load_state(&cfg.repo_dir);
     if state.started_at.is_none() {
         state.started_at = Some(now_iso());
@@ -242,9 +299,9 @@ pub async fn run_dev_loop(
     let start = Instant::now();
     let mut completed = Vec::new();
     let mut failed = Vec::new();
+    let mut extend_rounds = 0usize;
     let mut done_set: HashSet<String> = state.done.iter().cloned().collect();
 
-    let mut idx = 0usize;
     loop {
         // 预算:任务数
         if let Some(m) = opts.max_tasks {
@@ -267,8 +324,44 @@ pub async fn run_dev_loop(
             .max_by_key(|(i, t)| (t.priority, -(*i as i32)))
             .map(|(i, t)| (i, t));
         let Some((i, task)) = next else {
-            eprintln!("[dev] backlog 全部处理完毕");
-            break;
+            // backlog 耗尽:开启 --extend 时自动补给新任务,支撑长期运行
+            let Some(per_round) = opts.extend else {
+                eprintln!("[dev] backlog 全部处理完毕");
+                break;
+            };
+            if extend_rounds >= MAX_EXTEND_ROUNDS {
+                eprintln!("[dev] backlog 耗尽且补给轮数达上限({MAX_EXTEND_ROUNDS}),停止");
+                break;
+            }
+            eprintln!(
+                "[dev] backlog 耗尽,第 {} 轮自动生成 {per_round} 个新任务...",
+                extend_rounds + 1
+            );
+            match generate_tasks(&llm, per_round).await {
+                Ok(new_tasks) if !new_tasks.is_empty() => {
+                    backlog.extend(new_tasks);
+                    if let Err(e) = save_backlog(&opts.backlog_path, &backlog) {
+                        eprintln!(
+                            "[dev] 警告:新任务写回 backlog 失败: {}",
+                            clip(&e.to_string(), 120)
+                        );
+                    }
+                    eprintln!("[dev] backlog 现为 {} 项", backlog.len());
+                    extend_rounds += 1;
+                    continue;
+                }
+                Ok(_) => {
+                    eprintln!("[dev] 任务生成返回空,停止");
+                    break;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[dev] 任务生成失败,停止: {}",
+                        clip(&e.to_string(), 120)
+                    );
+                    break;
+                }
+            }
         };
         let task_id = format!("backlog[{}]", i);
         let goal = format!("{}\n{}", task.title, task.description).trim().to_string();
@@ -389,8 +482,6 @@ pub async fn run_dev_loop(
             done_set.insert(task_id);
         }
         save_state(&cfg.repo_dir, &state)?;
-        idx += 1;
-        let _ = idx;
     }
 
     eprintln!(
@@ -491,6 +582,7 @@ mod tests {
                 backlog_path: dir.join(".workbuddy/backlog.json"),
                 verify: Some("echo verify-ok".into()),
                 max_tasks: Some(2),
+                extend: None,
                 max_minutes: None,
             },
         )
