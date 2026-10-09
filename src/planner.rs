@@ -81,4 +81,13 @@ mod tests {
         assert!(kinds.contains(&crate::plan::StepKind::Edit));
         assert!(kinds.contains(&crate::plan::StepKind::Shell));
     }
+
+    #[tokio::test]
+    async fn test_dev_planner_system_replacement() {
+        let system = DEV_PLANNER_SYSTEM
+            .replace("{MAX_STEPS}", &MAX_STEPS.to_string())
+            .replace("{catalog}", &agents::catalog_text());
+        assert!(!system.contains("{MAX_STEPS}"));
+        assert!(!system.contains("{catalog}"));
+    }
 }
