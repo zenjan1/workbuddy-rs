@@ -1,1 +1,5 @@
 /target
+.workbuddy/state.json
+.workbuddy/failures/
+.workbuddy/dev.pid
+.workbuddy/worktrees/

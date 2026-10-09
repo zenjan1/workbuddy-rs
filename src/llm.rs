@@ -83,7 +83,8 @@ impl Llm for OpenAiCompat {
     }
 }
 
-/// 离线 Mock LLM:规划请求返回固定合法计划,其余返回占位输出。
+/// 离线 Mock LLM:规划请求返回固定合法计划,dev 规划返回含 edit/shell 的计划,
+/// edits 请求返回安全的 no-op 编辑,其余返回占位输出。
 pub struct MockLlm;
 
 const MOCK_PLAN: &str = r#"{"goal":"(mock) 任务目标","steps":[
@@ -92,6 +93,15 @@ const MOCK_PLAN: &str = r#"{"goal":"(mock) 任务目标","steps":[
   {"id":3,"name":"终稿审核","agent":"reviewer","skill":"final-review","prompt":"(mock) 审核并总结","kind":"llm","needs":[2]}
 ]}"#;
 
+const MOCK_DEV_PLAN: &str = r#"{"goal":"(mock) 开发任务","steps":[
+  {"id":1,"name":"查看构建","agent":"coder","skill":"code-writing","prompt":"(mock) 查看构建文件","kind":"read","path":"Cargo.toml","needs":[]},
+  {"id":2,"name":"安全改动","agent":"coder","skill":"code-writing","prompt":"(mock) 做一处安全的最小改动","kind":"edit","path":".workbuddy/autodev_note.md","needs":[1]},
+  {"id":3,"name":"验证","agent":"reviewer","skill":"final-review","prompt":"(mock) 运行验证","kind":"shell","command":"echo mock-verify-ok","needs":[2]}
+]}"#;
+
+/// Mock 的 edits 输出:在 .workbuddy/autodev_note.md 追加一行(始终唯一/存在)。
+const MOCK_EDITS: &str = r#"{"edits":[{"path":".workbuddy/autodev_note.md","old_string":"","new_string":"(mock) 自主开发步骤完成","replace_all":false}]}"#;
+
 impl Llm for MockLlm {
     fn chat<'a>(
         &'a self,
@@ -99,7 +109,11 @@ impl Llm for MockLlm {
         _user: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
         Box::pin(async move {
-            if system.contains("规划师") || system.contains("Planner") {
+            if system.contains("输出协议") {
+                Ok(MOCK_EDITS.to_string())
+            } else if system.contains("开发任务") {
+                Ok(MOCK_DEV_PLAN.to_string())
+            } else if system.contains("规划师") || system.contains("Planner") {
                 Ok(MOCK_PLAN.to_string())
             } else {
                 let head = _user

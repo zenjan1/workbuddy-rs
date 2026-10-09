@@ -158,6 +158,7 @@ mod tests {
             model: "x".into(),
             max_parallel: 1,
             workspace_dir: tmp.clone(),
+            repo_dir: tmp.clone(),
             request_timeout_secs: 1,
             mock: true,
         };

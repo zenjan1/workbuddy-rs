@@ -220,6 +220,8 @@ impl Executor {
         let result = match step.kind {
             StepKind::Llm => run_llm_step(step, agent, plan, outputs, llm, cfg).await,
             StepKind::Shell => run_shell_step(step).await,
+            StepKind::Read => run_read_step(step, cfg),
+            StepKind::Edit => run_edit_step(step, agent, plan, outputs, llm, cfg).await,
         };
         let seconds = start.elapsed().as_secs_f64();
         match result {
@@ -290,11 +292,95 @@ async fn run_llm_step(
         .context("LLM 步骤调用失败")
 }
 
+/// read 步骤:读取仓库内文件内容(限制 20KB),供下游作为上下文。
+fn run_read_step(step: &Step, cfg: &Config) -> Result<String> {
+    let path = step.path.as_deref().context("read 步骤缺少 path")?;
+    let p = cfg.repo_dir.join(path);
+    if !p.is_file() {
+        anyhow::bail!("文件不存在: {}", p.display());
+    }
+    let content = std::fs::read_to_string(&p).with_context(|| format!("读取失败: {}", p.display()))?;
+    Ok(format!("# 文件: {path}\n\n{}", clip(&content, 20_000)))
+}
+
+/// edit 步骤:LLM 产出 edits JSON(文件操作协议),解析并应用到仓库,
+/// 输出应用了哪些动作供下游/审计。
+async fn run_edit_step(
+    step: &Step,
+    agent: &Agent,
+    plan: &Plan,
+    outputs: &HashMap<usize, String>,
+    llm: &Arc<dyn Llm>,
+    cfg: &Config,
+) -> Result<String> {
+    let skill = agent
+        .skills
+        .iter()
+        .find(|s| s.name == step.skill)
+        .copied()
+        .unwrap_or_else(|| agent.skills[0]);
+
+    let mut system = String::new();
+    system.push_str(agent.system);
+    system.push_str("\n\n当前启用的 Skill:");
+    system.push_str(&skill.name);
+    system.push_str(" — ");
+    system.push_str(skill.desc);
+    system.push_str("\n");
+    system.push_str(skill.prompt);
+    system.push_str(
+        "\n\n== 输出协议(必须遵守) ==\n\
+        只输出一个 JSON 对象: {\"edits\": [ ... ]},不要 markdown 围栏、不要额外文字。\n\
+        每个 edit: {\"path\": 仓库相对路径, \"old_string\": 要替换的精确原文(为空表示在文件末尾追加;文件不存在则新建), \"new_string\": 替换后内容, \"replace_all\": 布尔}。\n\
+        old_string 必须与文件内容逐字符一致(含缩进);不唯一时报错,请给更长上下文或 replace_all=true。\n\
+        每次最多输出 5 个 edits,聚焦最小改动。",
+    );
+
+    let mut user = format!("总目标: {}\n", plan.goal);
+    user.push_str(&format!(
+        "你的任务(步骤 {}): {}\n\n{}",
+        step.id, step.name, step.prompt
+    ));
+    if let Some(p) = &step.path {
+        if let Ok(content) = std::fs::read_to_string(cfg.repo_dir.join(p)) {
+            user.push_str(&format!("\n== 当前文件内容: {p} ==\n{}\n", clip(&content, 12_000)));
+        }
+    }
+    if !step.needs.is_empty() {
+        user.push_str("\n=== 上游步骤产出(依赖上下文) ===\n");
+        for n in &step.needs {
+            user.push_str(&format!(
+                "\n## 来自步骤 {} [{}]\n",
+                n,
+                plan.step_name(*n)
+            ));
+            match outputs.get(n) {
+                Some(t) => user.push_str(&clip(t, DEPS_CONTEXT_MAX).to_string()),
+                None => user.push_str("(无产出)"),
+            }
+        }
+    }
+
+    let raw = llm.chat(&system, &user).await.context("edit 步骤 LLM 调用失败")?;
+    let ops = crate::edits::parse_edits(&raw).context("解析 edits JSON 失败")?;
+    if ops.is_empty() {
+        anyhow::bail!("LLM 未返回任何 edit 操作");
+    }
+    let mut applied = Vec::new();
+    for op in &ops {
+        let a = crate::edits::apply_op(&cfg.repo_dir, op)?;
+        applied.push(a);
+    }
+    Ok(applied.join("\n"))
+}
+
 async fn run_shell_step(step: &Step) -> Result<String> {
     let cmd = step
         .command
         .clone()
         .context("shell 步骤缺少 command")?;
+    // 自主开发安全护栏:拒绝危险命令
+    crate::edits::check_shell(&cmd)?;
     let out = tokio::time::timeout(
         Duration::from_secs(SHELL_TIMEOUT_SECS),
         tokio::task::spawn_blocking(move || {
@@ -338,6 +424,7 @@ mod tests {
             model: "mock".into(),
             max_parallel: 2,
             workspace_dir: Path::new("/tmp").to_path_buf(),
+            repo_dir: Path::new("/tmp").to_path_buf(),
             request_timeout_secs: 5,
             mock: true,
         }

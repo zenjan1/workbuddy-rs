@@ -1,5 +1,7 @@
 mod agents;
 mod config;
+mod dev;
+mod edits;
 mod executor;
 mod llm;
 mod plan;
@@ -51,6 +53,27 @@ enum Cmd {
     Agents,
     /// 打印当前生效配置(隐藏 key)
     Config,
+    /// 自主开发循环:从 backlog 取任务 → 规划 → 改码 → 验证 → 提交
+    Dev {
+        /// backlog 文件(JSON,默认 .workbuddy/backlog.json)
+        #[arg(long)]
+        backlog: Option<std::path::PathBuf>,
+        /// 全局验证命令(任务未指定 verify 时使用)
+        #[arg(long)]
+        verify: Option<String>,
+        /// 本次最多完成任务数
+        #[arg(long)]
+        tasks: Option<usize>,
+        /// 本次最多运行分钟数
+        #[arg(long)]
+        minutes: Option<u64>,
+        /// 操作仓库目录(默认当前目录)
+        #[arg(long)]
+        repo: Option<std::path::PathBuf>,
+        /// 使用 Mock LLM(离线演练)
+        #[arg(long)]
+        mock: bool,
+    },
 }
 
 #[tokio::main]
@@ -82,6 +105,51 @@ async fn main() -> Result<()> {
         Cmd::Agents => cmd_agents(),
         Cmd::Config => {
             println!("{}", cfg.summary());
+            Ok(())
+        }
+        Cmd::Dev {
+            backlog,
+            verify,
+            tasks,
+            minutes,
+            repo,
+            mock,
+        } => {
+            if let Some(r) = repo {
+                cfg.repo_dir = r;
+            }
+            cfg.mock = mock;
+            let llm: Arc<dyn Llm> = if cfg.mock {
+                eprintln!("[workbuddy] Mock 模式:使用内置 Mock LLM");
+                Arc::new(MockLlm)
+            } else {
+                Arc::new(OpenAiCompat::new(&cfg)?)
+            };
+            let backlog_path = backlog.unwrap_or_else(|| {
+                cfg.repo_dir.join(".workbuddy/backlog.json")
+            });
+            let report = dev::run_dev_loop(
+                llm,
+                cfg.clone(),
+                dev::DevOptions {
+                    backlog_path,
+                    verify,
+                    max_tasks: tasks,
+                    max_minutes: minutes,
+                },
+            )
+            .await?;
+            println!("\n=== dev 循环报告 ===");
+            println!("完成 {} 项:", report.completed.len());
+            for t in &report.completed {
+                println!("  ✅ {}", t);
+            }
+            if !report.failed.is_empty() {
+                println!("失败 {} 项:", report.failed.len());
+                for t in &report.failed {
+                    println!("  ❌ {}", t);
+                }
+            }
             Ok(())
         }
     }
@@ -223,6 +291,11 @@ fn cmd_agents() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// dev.rs 等模块复用的 ISO 时间戳(UTC)。
+pub fn main_now_iso() -> String {
+    now_iso()
 }
 
 fn now_iso() -> String {

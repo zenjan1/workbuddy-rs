@@ -8,6 +8,10 @@ pub const MAX_STEPS: usize = 8;
 pub enum StepKind {
     Llm,
     Shell,
+    /// 读取仓库内文件,产出作为下游上下文
+    Read,
+    /// LLM 产出 edits JSON,应用到仓库文件
+    Edit,
 }
 
 impl Default for StepKind {
@@ -21,6 +25,8 @@ impl StepKind {
         match self {
             StepKind::Llm => "llm",
             StepKind::Shell => "shell",
+            StepKind::Read => "read",
+            StepKind::Edit => "edit",
         }
     }
 }
@@ -36,6 +42,9 @@ pub struct Step {
     pub kind: StepKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    /// read/edit 步骤的目标文件(仓库相对路径)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     #[serde(default)]
     pub needs: Vec<usize>,
 }
@@ -84,11 +93,18 @@ impl Plan {
             let skill = str_field("skill");
             let prompt = str_field("prompt");
 
-            let kind = match obj.get("kind").and_then(|k| k.as_str()).unwrap_or("llm") {
+            let kind = match obj.get("kind").and_then(|k| k.as_str().map(|s| s.to_lowercase())).as_deref().unwrap_or("llm") {
                 "shell" => StepKind::Shell,
+                "read" => StepKind::Read,
+                "edit" => StepKind::Edit,
                 _ => StepKind::Llm,
             };
-            let command = (kind == StepKind::Shell).then(|| str_field("command")).filter(|c| !c.is_empty());
+            let command = (kind == StepKind::Shell)
+                .then(|| str_field("command"))
+                .filter(|c| !c.is_empty());
+            let path = (kind == StepKind::Read || kind == StepKind::Edit)
+                .then(|| str_field("path"))
+                .filter(|c| !c.is_empty());
 
             // needs:容忍字符串数字/数组嵌套,只保留纯数字项
             let needs: Vec<usize> = obj
@@ -114,6 +130,7 @@ impl Plan {
                 prompt,
                 kind,
                 command,
+                path,
                 needs,
             });
         }
@@ -155,6 +172,19 @@ impl Plan {
             }
             if s.prompt.trim().is_empty() {
                 anyhow::bail!("步骤 {} 缺少 prompt", s.id);
+            }
+            match s.kind {
+                StepKind::Shell => {
+                    if s.command.as_deref().map(|c| c.trim().is_empty()).unwrap_or(true) {
+                        anyhow::bail!("步骤 {} 是 shell 类型但缺少 command", s.id);
+                    }
+                }
+                StepKind::Read | StepKind::Edit => {
+                    if s.path.as_deref().map(|p| p.trim().is_empty()).unwrap_or(true) {
+                        anyhow::bail!("步骤 {} 是 {} 类型但缺少 path", s.id, s.kind.label());
+                    }
+                }
+                StepKind::Llm => {}
             }
             for n in &s.needs {
                 if *n >= s.id {

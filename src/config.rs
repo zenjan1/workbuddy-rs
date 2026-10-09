@@ -12,6 +12,8 @@ pub struct Config {
     pub model: String,
     pub max_parallel: usize,
     pub workspace_dir: PathBuf,
+    /// dev 模式的操作仓库(默认当前目录)
+    pub repo_dir: PathBuf,
     pub request_timeout_secs: u64,
     pub mock: bool,
 }
@@ -24,6 +26,7 @@ struct FileConfig {
     model: Option<String>,
     max_parallel: Option<usize>,
     workspace_dir: Option<PathBuf>,
+    repo_dir: Option<PathBuf>,
     request_timeout_secs: Option<u64>,
 }
 
@@ -52,6 +55,10 @@ impl Config {
         let workspace_dir = file
             .workspace_dir
             .unwrap_or_else(|| home.join(".local/share/workbuddy"));
+        let repo_dir = file
+            .repo_dir
+            .or_else(|| env::var("WORKBUDDY_REPO").ok().map(PathBuf::from))
+            .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
         Ok(Config {
             api_key,
@@ -59,6 +66,7 @@ impl Config {
             model,
             max_parallel: file.max_parallel.unwrap_or(4).max(1),
             workspace_dir,
+            repo_dir,
             request_timeout_secs: file.request_timeout_secs.unwrap_or(120),
             mock: false,
         })
