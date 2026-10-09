@@ -68,6 +68,9 @@ request_timeout_secs = 120
 # 执行一个任务(真实 LLM)
 workbuddy run "调研一下 Rust 与 Go 在并发模型上的差异,写一份对比简报"
 
+# 自主开发循环(在 git 仓库里持续改代码,详见下文 dev 一节)
+workbuddy dev --tasks 5 --verify "cargo test"
+
 # 离线演练(不调用 API,用内置 Mock,验证全链路)
 workbuddy run --mock "随便一个任务"
 
@@ -106,13 +109,15 @@ workbuddy config
 
 ```
 src/
-├── main.rs       # CLI(clap 子命令:run/list/show/agents/config)
+├── main.rs       # CLI(clap 子命令:run/list/show/agents/config/dev)
 ├── config.rs     # 配置加载(环境变量 > 配置文件 > 默认)
 ├── llm.rs        # Llm trait:OpenAI 兼容客户端 + 离线 Mock
 ├── agents.rs     # 专家目录(角色 + skills,静态数据)
-├── planner.rs    # 规划提示词 + 计划解析入口
+├── planner.rs    # 规划提示词(run/dev 两套)+ 幻觉容忍修复
 ├── plan.rs       # Plan/Step 结构、JSON 解析与校验、拓扑序
-├── executor.rs   # 拓扑并行执行、失败传播(跳过下游)、shell 步骤
+├── executor.rs   # 拓扑并行执行、失败传播(跳过下游)、shell/read/edit 步骤
+├── edits.rs      # edit 步骤的 edits JSON 解析/应用 + shell 安全护栏
+├── dev.rs        # 自主开发循环:backlog/state/git 提交/自修复/预算/自补给
 ├── workspace.rs  # 任务工作区持久化(meta/plan/report/outputs)
 └── util.rs       # 字符安全截断等
 ```
@@ -120,7 +125,7 @@ src/
 ## 测试
 
 ```bash
-cargo test        # 19 个单元测试:计划解析/校验、Mock 端到端、shell 步骤、工作区生命周期
+cargo test        # 33 个单元测试:计划解析/校验、Mock 端到端、dev 循环离线集成等
 ```
 
 ## 已知限制
@@ -132,21 +137,67 @@ cargo test        # 19 个单元测试:计划解析/校验、Mock 端到端、sh
 
 ## 自主开发模式(dev)
 
-启用开发模式进行快速验证：
+让 WorkBuddy 在**一个 git 仓库**里长期自主开发:从任务清单(backlog)取任务 →
+LLM 规划(read/edit/shell 步骤)→ 修改代码 → 运行验证命令 → 失败自动修复(≤3 次)→
+git 提交 → 下一个任务。支持中断恢复与长期运行(月级)。
 
 ```bash
-workbuddy dev --tasks 5 --minutes 30
+cd your-repo            # dev 模式在"当前目录"(或 --repo 指定)的 git 仓库中操作
+
+workbuddy dev --tasks 1 --verify "cargo test"   # 跑 1 个任务,验证命令 cargo test
+workbuddy dev --minutes 43200 --extend 10       # 跑满 30 天;backlog 耗尽时每轮自动生成 10 个新任务
+workbuddy dev --mock                              # 离线演练(内置 Mock LLM,不消耗 API)
 ```
 
-### 参数说明
-- `--tasks N`：指定生成任务数量（N为正整数）
-- `--minutes M`：设置每个任务的持续时间（M为1-60的整数）
+### 参数
 
-### backlog 文件位置
-系统自动生成的待办事项存储于：
-`.workbuddy/backlog.json`
+| 参数 | 说明 |
+|---|---|
+| `--backlog <path>` | 任务清单文件(默认 `<repo>/.workbuddy/backlog.json`) |
+| `--verify <cmd>` | 全局验证命令(任务未指定自己的 `verify` 时使用) |
+| `--tasks N` | 本次最多完成 N 个任务 |
+| `--minutes M` | 本次最多运行 M 分钟 |
+| `--repo <dir>` | 操作仓库目录(默认当前目录) |
+| `--extend N` | backlog 耗尽时,每轮调用 LLM 生成 N 个新任务并追加进 backlog(可重复补给,支撑月级运行) |
+| `--mock` | 使用内置 Mock LLM(离线演练) |
 
-### 验证机制
-1. **格式校验**：JSON文件需包含 `tasks` 数组和 `timestamp` 字段
-2. **时间戳验证**：自动校验文件创建时间与系统时间差值在±5分钟内
-3. **数据完整性**：每个任务对象必须包含 `id`、`content` 和 `duration` 属性
+### backlog 格式(`<repo>/.workbuddy/backlog.json`)
+
+```json
+{
+  "tasks": [
+    {
+      "title": "为 util::clip 补充边界单元测试",
+      "description": "在 src/util.rs 测试模块新增:空字符串、恰好 max、超过 max。",
+      "verify": "cargo test -- clip",
+      "priority": 29
+    }
+  ]
+}
+```
+
+- `verify` 缺省时使用 `--verify` 的值;
+- `priority` 越大越先执行。
+
+### 完成判定与可靠性
+
+- 一个任务**只有同时满足"验证命令通过"且"产生了真实 git 提交"才计为完成**
+  (防止"验证本来就绿、实际零改动"的假成功);
+- 失败任务自动 `git checkout` + `git clean` 回滚脏改动,不污染下一个任务;
+- 规划器对 LLM 幻觉有容忍修复:未知专家回退、read 缺 path 从 prompt 提取、
+  shell 缺 command 从 prompt 提取或降级、文件路径按 basename 唯一匹配兜底;
+- 进度持久化在 `.workbuddy/state.json`(不进 git),中断后重启自动从断点继续;
+- shell 步骤有安全护栏:拒绝 `git push`/`sudo`/`rm -rf /` 等危险命令。
+
+### 长期运行(supervisor)
+
+`.workbuddy/dev-supervisor.sh` 提供带崩溃自动重启的后台运行:
+
+```bash
+setsid bash .workbuddy/dev-supervisor.sh > /dev/null 2>&1 &   # 启动(30 天预算 + 自补给)
+tail -f .workbuddy/dev.log                                     # 监控
+kill -- -$(cat .workbuddy/dev.pid)                             # 停止(杀整个进程组)
+```
+
+> 注意:dev 模式会**直接修改仓库代码并产生本地提交**。启动前请确认仓库状态干净、
+> 你信任该仓库被持续修改;它只创建本地 commit,从不 push。
