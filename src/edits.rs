@@ -89,9 +89,53 @@ pub fn parse_edits(raw: &str) -> Result<Vec<EditOp>> {
     Ok(ops)
 }
 
+/// 解析编辑目标路径:精确路径存在则用之;不存在且 basename 在仓库内唯一匹配时
+/// 用该文件(容忍模型漏目录前缀);其余情况按原路径新建。
+pub fn resolve_path(base: &Path, path: &str, new_file_allowed: bool) -> Result<std::path::PathBuf> {
+    let exact = base.join(path);
+    if exact.is_file() {
+        return Ok(exact);
+    }
+    if new_file_allowed && !path.contains('/') {
+        // 相对路径且文件不存在 → 视为新建(原路径)
+        return Ok(exact);
+    }
+    let bname = std::path::Path::new(path)
+        .file_name()
+        .and_then(|s| s.to_str());
+    let Some(bname) = bname else {
+        return Ok(exact);
+    };
+    let mut matches = Vec::new();
+    let mut stack = vec![base.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                if name == "target" || name == ".git" || name == "node_modules" {
+                    continue;
+                }
+                stack.push(p);
+            } else if p.file_name().and_then(|s| s.to_str()) == Some(bname) {
+                matches.push(p);
+            }
+        }
+    }
+    match matches.len() {
+        1 => Ok(matches.into_iter().next().unwrap()),
+        _ => Ok(exact),
+    }
+}
+
 /// 应用单个编辑操作,返回动作描述。
 pub fn apply_op(base: &Path, op: &EditOp) -> Result<String> {
-    let p = base.join(&op.path);
+    // old 为空 → 允许新建;old 非空 → 目标必须已存在(经 basename 兜底解析)
+    let p = resolve_path(base, &op.path, op.old.is_empty())?;
     if let Some(parent) = p.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("创建目录失败: {}", parent.display()))?;
     }

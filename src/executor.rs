@@ -292,15 +292,61 @@ async fn run_llm_step(
         .context("LLM 步骤调用失败")
 }
 
+/// 解析模型给出的文件路径:优先原路径;否则按 basename 在仓库里查找唯一匹配
+/// (容忍模型漏掉 src/ 等目录前缀)。
+fn resolve_repo_path(cfg: &Config, path: &str) -> Result<std::path::PathBuf> {
+    let exact = cfg.repo_dir.join(path);
+    if exact.is_file() {
+        return Ok(exact);
+    }
+    let base = std::path::Path::new(path)
+        .file_name()
+        .and_then(|s| s.to_str());
+    let Some(base) = base else {
+        anyhow::bail!("文件不存在: {}", path);
+    };
+    let mut matches = Vec::new();
+    let mut stack = vec![cfg.repo_dir.clone()];
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                if name == "target" || name == ".git" || name == "node_modules" {
+                    continue;
+                }
+                stack.push(p);
+            } else if p.file_name().and_then(|s| s.to_str()) == Some(base) {
+                matches.push(p);
+            }
+        }
+    }
+    match matches.len() {
+        1 => Ok(matches.into_iter().next().unwrap()),
+        0 => anyhow::bail!("文件不存在: {}(按 {} 也未找到)", path, base),
+        n => anyhow::bail!(
+            "{} 匹配到 {} 个同名文件,请给完整路径",
+            base,
+            n
+        ),
+    }
+}
+
 /// read 步骤:读取仓库内文件内容(限制 20KB),供下游作为上下文。
 fn run_read_step(step: &Step, cfg: &Config) -> Result<String> {
     let path = step.path.as_deref().context("read 步骤缺少 path")?;
-    let p = cfg.repo_dir.join(path);
-    if !p.is_file() {
-        anyhow::bail!("文件不存在: {}", p.display());
-    }
+    let p = resolve_repo_path(cfg, path)?;
     let content = std::fs::read_to_string(&p).with_context(|| format!("读取失败: {}", p.display()))?;
-    Ok(format!("# 文件: {path}\n\n{}", clip(&content, 20_000)))
+    let rel = p
+        .strip_prefix(&cfg.repo_dir)
+        .unwrap_or(&p)
+        .to_string_lossy()
+        .to_string();
+    Ok(format!("# 文件: {rel}\n\n{}", clip(&content, 20_000)))
 }
 
 /// edit 步骤:LLM 产出 edits JSON(文件操作协议),解析并应用到仓库,
