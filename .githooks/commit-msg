@@ -1,0 +1,10 @@
+#!/bin/sh
+# 验证提交信息格式: feat(dev): [N/总数] <任务标题>
+# 规范见 CONTRIBUTING.md
+# 注意: 必须在 commit-msg 阶段校验——pre-commit 阶段 .git/COMMIT_EDITMSG 尚未生成
+# (原 hook 放在 pre-commit 读 COMMIT_EDITMSG, 文件不存在导致所有提交被拒, 2026-10-10 修复)。
+COMMIT_TITLE=$(sed -n '1p' "$1" | xargs)
+if ! echo "$COMMIT_TITLE" | grep -qE '^feat\(dev\): \[[0-9]+/[0-9]+\] .+$'; then
+  echo "提交信息格式错误! 请使用: feat(dev): [N/总数] 任务标题" >&2
+  exit 1
+fi

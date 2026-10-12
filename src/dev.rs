@@ -204,10 +204,12 @@ fn git(repo: &Path, args: &[&str]) -> Result<String> {
 }
 
 fn git_has_changes(repo: &Path) -> bool {
+    // 只看 .workbuddy/ 之外的改动:笔记/状态文件不算"源码改动"
+    // (否则 LLM 只写 .workbuddy/autodev_note.md 也能骗过假成功守卫)
     std::process::Command::new("git")
         .arg("-C")
         .arg(repo)
-        .args(["status", "--porcelain"])
+        .args(["status", "--porcelain", "--", ".", ":(exclude).workbuddy"])
         .output()
         .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
         .unwrap_or(false)
@@ -218,11 +220,11 @@ fn git_commit(repo: &Path, message: &str) -> Result<Option<String>> {
     if !git_has_changes(repo) {
         return Ok(None);
     }
-    // .workbuddy/ 状态文件不进 git(避免每次提交都带状态噪声)
+    // .workbuddy/ 下的文件不进 git(状态/笔记噪声,且不能充当"源码改动")
     let _ = std::process::Command::new("git")
         .arg("-C")
         .arg(repo)
-        .args(["add", "-A", "--", ".", ":(exclude).workbuddy/state.json"])
+        .args(["add", "-A", "--", ".", ":(exclude).workbuddy"])
         .status();
     let out = git(repo, &["commit", "-m", message])?;
     let sha = git(repo, &["rev-parse", "--short", "HEAD"])?;

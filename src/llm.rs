@@ -94,13 +94,14 @@ const MOCK_PLAN: &str = r#"{"goal":"(mock) 任务目标","steps":[
 ]}"#;
 
 const MOCK_DEV_PLAN: &str = r#"{"goal":"(mock) 开发任务","steps":[
-  {"id":1,"name":"查看构建","agent":"coder","skill":"code-writing","prompt":"(mock) 查看构建文件","kind":"read","path":"Cargo.toml","needs":[]},
-  {"id":2,"name":"安全改动","agent":"coder","skill":"code-writing","prompt":"(mock) 做一处安全的最小改动","kind":"edit","path":".workbuddy/autodev_note.md","needs":[1]},
+  {"id":1,"name":"查看构建","agent":"coder","skill":"code-writing","prompt":"(mock) 查看构建文件","kind":"read","path":"README.md","needs":[]},
+  {"id":2,"name":"安全改动","agent":"coder","skill":"code-writing","prompt":"(mock) 做一处安全的最小改动","kind":"edit","path":"autodev_note.md","needs":[1]},
   {"id":3,"name":"验证","agent":"reviewer","skill":"final-review","prompt":"(mock) 运行验证","kind":"shell","command":"echo mock-verify-ok","needs":[2]}
 ]}"#;
 
-/// Mock 的 edits 输出:在 .workbuddy/autodev_note.md 追加一行(始终唯一/存在)。
-const MOCK_EDITS: &str = r#"{"edits":[{"path":".workbuddy/autodev_note.md","old_string":"","new_string":"(mock) 自主开发步骤完成","replace_all":false}]}"#;
+/// Mock 的 edits 输出:在仓库根的 autodev_note.md 追加一行(始终唯一/存在)。
+/// 注意:必须写在 .workbuddy/ 之外——该目录下的文件不算"源码改动"(假成功守卫)。
+const MOCK_EDITS: &str = r#"{"edits":[{"path":"autodev_note.md","old_string":"","new_string":"(mock) 自主开发步骤完成","replace_all":false}]}"#;
 
 /// Mock 的任务生成输出:一个可重复执行的安全 mock 任务。
 const MOCK_GEN_TASKS: &str = r#"{"tasks":[{"title":"(mock) 生成任务:补充文档注释","description":"为某个模块补充一行注释","priority":1}]}"#;
