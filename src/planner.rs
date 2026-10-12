@@ -43,13 +43,18 @@ pub const DEV_PLANNER_SYSTEM: &str = "你是 WorkBuddy 的总规划师(Planner),
 - needs 列出依赖的其他步骤 id,必须引用更小的 id;无依赖给空数组。\n\
 - 编排原则:先用 read 步骤查看要改的文件(或让 edit 步骤自带文件内容),再 edit,最后必须用 shell 步骤运行验证命令(如 `cargo test`)确认改动可用。\n\
 - 最后一个步骤应为 shell 验证或 reviewer 综合,确保改动被验证。\n\
-- 每个 edit 步骤聚焦最小改动,不要重写整个文件。\n\n\
+- 每个 edit 步骤聚焦最小改动,不要重写整个文件。\n\
+- read/edit 步骤的 path 只能取自下方【仓库实际文件列表】中的路径,禁止编造不存在的文件;列表中没有的目标文件才允许新建。\n\n\
+仓库实际文件列表(共 {filecount} 个):\n{filelist}\n\n\
 专家目录:\n{catalog}";
 
 /// dev 模式:规划一个"在仓库里完成开发任务"的计划。
-pub async fn plan_dev_task(llm: &Arc<dyn Llm>, goal: &str) -> Result<Plan> {
+/// `filelist` 为仓库实际文件列表(模型只能引用其中已存在的文件,大幅降低幻觉路径)。
+pub async fn plan_dev_task(llm: &Arc<dyn Llm>, goal: &str, filelist: &str) -> Result<Plan> {
     let system = DEV_PLANNER_SYSTEM
         .replace("{MAX_STEPS}", &MAX_STEPS.to_string())
+        .replace("{filecount}", &filelist.lines().count().to_string())
+        .replace("{filelist}", filelist)
         .replace("{catalog}", &agents::catalog_text());
     let user = format!("开发任务(在当前代码仓库中完成):\n{}\n\n请输出 JSON 计划。", goal);
     let raw = llm.chat(&system, &user).await?;
@@ -199,7 +204,7 @@ mod tests {
     #[tokio::test]
     async fn mock_dev_planner_produces_valid_dev_plan() {
         let llm: Arc<dyn Llm> = Arc::new(MockLlm);
-        let plan = plan_dev_task(&llm, "给项目加一个文档").await.unwrap();
+        let plan = plan_dev_task(&llm, "给项目加一个文档", "src/main.rs\nREADME.md").await.unwrap();
         assert_eq!(plan.steps.len(), 3);
         let kinds: Vec<_> = plan.steps.iter().map(|s| s.kind).collect();
         assert!(kinds.contains(&crate::plan::StepKind::Read));

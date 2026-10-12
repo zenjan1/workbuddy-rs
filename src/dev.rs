@@ -89,14 +89,41 @@ async fn generate_tasks(llm: &Arc<dyn Llm>, n: usize) -> Result<Vec<DevTask>> {
     只输出一个 JSON 对象: {\"tasks\": [{\"title\": \"任务名\", \"description\": \"完整说明\", \"priority\": 1}]},\
     恰好 N 个任务,不要 markdown 围栏、不要额外文字。";
     let user = format!("请生成 {n} 个新任务(避免与 backlog 中已有的重复主题: 文档、clip 测试、--version、summary、CRLF、占位符、workspace 提示、失败报告、dry-run、--since、重试、StepRecord 统计、retry-failed、stats、--json、LLM 预算、skip 字段、提交序号、SHELL_TIMEOUT、report 命令、health、git 状态摘要、undo、hint 字段、agents.toml、worktree 并行、watch、bench、CLI 集成测试、selfcheck)。");
-    let raw = llm.chat(system, &user).await.context("任务生成 LLM 调用失败")?;
-    let v: serde_json::Value = serde_json::from_str(&clip(&raw, 8000)).context("解析生成任务 JSON 失败")?;
+    // 最多 2 次调用:解析失败时重试(容忍模型偶发输出围栏/前后多余文字/截断)
+    let mut last_err = None;
+    for attempt in 1..=2 {
+        let raw = llm.chat(system, &user).await.context("任务生成 LLM 调用失败")?;
+        match extract_tasks_json(&raw) {
+            Ok(arr) => return parse_generated_tasks(arr, n),
+            Err(e) => {
+                eprintln!("[dev] 任务生成解析失败(第 {attempt} 次): {}", clip(&e.to_string(), 120));
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("任务生成失败")))
+}
+
+/// 从 LLM 原始输出提取 tasks 数组(容忍 markdown 围栏、前后文字、裸数组)。
+fn extract_tasks_json(raw: &str) -> Result<Vec<serde_json::Value>> {
+    let start = raw.find('{').or_else(|| raw.find('[')).context("未找到 JSON")?;
+    let end = raw
+        .rfind('}')
+        .or_else(|| raw.rfind(']'))
+        .filter(|e| *e > start)
+        .ok_or_else(|| anyhow::anyhow!("JSON 不完整"))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&raw[start..=end]).context("解析生成任务 JSON 失败")?;
     let arr = v
         .get("tasks")
         .and_then(|t| t.as_array())
         .cloned()
         .or_else(|| v.as_array().cloned())
         .context("生成结果缺少 tasks 数组")?;
+    Ok(arr)
+}
+
+fn parse_generated_tasks(arr: Vec<serde_json::Value>, n: usize) -> Result<Vec<DevTask>> {
     let mut out = Vec::new();
     for (i, t) in arr.into_iter().take(n).enumerate() {
         let obj = match t.as_object() {
@@ -120,6 +147,9 @@ async fn generate_tasks(llm: &Arc<dyn Llm>, n: usize) -> Result<Vec<DevTask>> {
             verify: None,
             priority,
         });
+    }
+    if out.is_empty() {
+        bail!("生成任务解析后为空");
     }
     Ok(out)
 }
@@ -198,6 +228,35 @@ fn git_commit(repo: &Path, message: &str) -> Result<Option<String>> {
     let sha = git(repo, &["rev-parse", "--short", "HEAD"])?;
     let _ = out;
     Ok(Some(sha))
+}
+
+/// 列出仓库内实际文件(供 planner 约束 path 引用,减少幻觉路径);
+/// 跳过 .git/target/node_modules/.workbuddy,上限 300 个。
+fn list_repo_files(repo: &Path) -> String {
+    let mut out = Vec::new();
+    let mut stack = vec![repo.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                if matches!(name, ".git" | "target" | "node_modules" | ".workbuddy") {
+                    continue;
+                }
+                stack.push(p);
+            } else if out.len() < 300 {
+                if let Some(rel) = p.strip_prefix(repo).ok() {
+                    out.push(rel.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+    out.sort();
+    out.join("\n")
 }
 
 // ---------- verify ----------
@@ -371,12 +430,13 @@ pub async fn run_dev_loop(
             .verify
             .clone()
             .or_else(|| opts.verify.clone())
-            .unwrap_or_else(|| "echo no-verify".to_string());
+            .unwrap_or_else(|| "cargo test".to_string());
 
         // 规划(最多 3 次,防规划器抖动)
+        let filelist = list_repo_files(&cfg.repo_dir);
         let mut plan = None;
         for attempt in 1..=3 {
-            match planner::plan_dev_task(&llm, &goal).await {
+            match planner::plan_dev_task(&llm, &goal, &filelist).await {
                 Ok(p) => {
                     plan = Some(p);
                     break;
@@ -449,8 +509,14 @@ pub async fn run_dev_loop(
         let steps_total = results.len();
         let mut sha = None;
         if verify_ok {
-            // 提交(无改动 → 视为未完成任务)
-            sha = match git_commit(&cfg.repo_dir, &format!("feat: {}", task.title)) {
+            // 提交(无改动 → 视为未完成任务;防止假成功:步骤全失败/零改动时
+            // 验证命令本来就绿,不能算完成)。消息格式必须匹配 pre-commit hook:
+            // feat(dev): [N/总数] 任务标题
+            let task_no = state.done.len() + 1;
+            sha = match git_commit(
+                &cfg.repo_dir,
+                &format!("feat(dev): [{task_no}/{}] {}", backlog.len(), task.title),
+            ) {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("[dev] 提交失败: {}", clip(&e.to_string(), 200));
