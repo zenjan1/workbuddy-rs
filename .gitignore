@@ -5,3 +5,5 @@
 .workbuddy/dev.log*
 .workbuddy/worktrees/
 .workbuddy/backlog.json.tmp
+.workbuddy/llm.env
+.workbuddy/.fuse_hidden*

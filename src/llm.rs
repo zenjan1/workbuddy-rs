@@ -55,6 +55,9 @@ impl Llm for OpenAiCompat {
             let payload = json!({
                 "model": self.cfg.model,
                 "temperature": 0.3,
+                // 推理模型(如 deepseek-v4-pro)需足量预算:先思考(reasoning)再产出,
+                // 太小会耗尽预算导致 content 为空(见下方回退兜底)。
+                "max_tokens": 8192,
                 "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": user}
@@ -83,10 +86,29 @@ impl Llm for OpenAiCompat {
                 if status.is_success() {
                     let v: serde_json::Value =
                         serde_json::from_str(&text).context("解析 LLM 响应 JSON 失败")?;
-                    return v.pointer("/choices/0/message/content")
+                    // 推理模型(如 deepseek-v4-pro):content 可能为空而答案在 reasoning_content;
+                    // 优先取 content,空则回退 reasoning_content,避免空内容直接报错导致任务失败。
+                    let content = v
+                        .pointer("/choices/0/message/content")
                         .and_then(|c| c.as_str())
-                        .map(|s| s.to_string())
-                        .ok_or_else(|| anyhow::anyhow!("响应中缺少 choices[0].message.content"));
+                        .unwrap_or("")
+                        .to_string();
+                    if !content.trim().is_empty() {
+                        return Ok(content);
+                    }
+                    let reasoning = v
+                        .pointer("/choices/0/message/reasoning_content")
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if !reasoning.trim().is_empty() {
+                        eprintln!(
+                            "[llm] content 为空,回退使用 reasoning_content({} 字符)",
+                            reasoning.len()
+                        );
+                        return Ok(reasoning);
+                    }
+                    return Err(anyhow::anyhow!("响应中 content 与 reasoning_content 均为空"));
                 }
 
                 bail!("LLM API 返回 {}: {}", status, clip(&text, 300));

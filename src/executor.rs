@@ -339,7 +339,19 @@ fn resolve_repo_path(cfg: &Config, path: &str) -> Result<std::path::PathBuf> {
 /// read 步骤:读取仓库内文件内容(限制 20KB),供下游作为上下文。
 fn run_read_step(step: &Step, cfg: &Config) -> Result<String> {
     let path = step.path.as_deref().context("read 步骤缺少 path")?;
-    let p = resolve_repo_path(cfg, path)?;
+    let p = match resolve_repo_path(cfg, path) {
+        Ok(p) => p,
+        Err(e) => {
+            // fail-soft:找不到文件时不级联跳过依赖步骤,回传真实文件清单供模型自纠
+            let filelist = crate::dev::list_repo_files(&cfg.repo_dir);
+            return Ok(format!(
+                "⚠️ read 未找到 `{}`({})。请用下面真实存在的文件路径继续,不要臆造路径:\n{}",
+                path,
+                clip(&e.to_string(), 160),
+                clip(&filelist, 6000)
+            ));
+        }
+    };
     let content = std::fs::read_to_string(&p).with_context(|| format!("读取失败: {}", p.display()))?;
     let rel = p
         .strip_prefix(&cfg.repo_dir)

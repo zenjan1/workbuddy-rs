@@ -20,7 +20,7 @@ use crate::llm::Llm;
 use crate::planner;
 use crate::util::clip;
 
-const MAX_REPAIRS: usize = 3;
+const MAX_REPAIRS: usize = 8;
 /// --extend 单次运行最多允许的补给轮数(防失控;每轮 1 次 LLM 调用)
 const MAX_EXTEND_ROUNDS: usize = 1000;
 
@@ -81,18 +81,28 @@ fn save_backlog(path: &Path, tasks: &[DevTask]) -> Result<()> {
 }
 
 /// 调用 LLM 生成 N 个新的开发任务(用于 backlog 耗尽时自补给,支撑长期运行)。
-async fn generate_tasks(llm: &Arc<dyn Llm>, n: usize) -> Result<Vec<DevTask>> {
-    let system = "你是 WorkBuddy 的任务生成器。为 workbuddy-rs 这个 Rust 多智能体 CLI 项目\
+async fn generate_tasks(llm: &Arc<dyn Llm>, repo: &Path, n: usize) -> Result<Vec<DevTask>> {
+    // 对齐"完整 workbuddy"目标:把仓库根 VISION.md 路线图注入,让 backlog 耗尽后的自补给持续朝目标推进
+    let vision = std::fs::read_to_string(repo.join("VISION.md")).unwrap_or_default();
+    let base = "你是 WorkBuddy 的任务生成器。为 workbuddy-rs 这个 Rust 多智能体 CLI 项目\
     (模块: main/dev/edits/executor/llm/plan/planner/agents/workspace/config/util)生成持续的开发任务,\
     要求:每个任务小而独立、可验证(用 cargo test 或编译)、不破坏现有功能、优先补测试/文档/CLI 子命令/性能/健壮性,\
-    禁止安全敏感操作。\n\
-    只输出一个 JSON 对象: {\"tasks\": [{\"title\": \"任务名\", \"description\": \"完整说明\", \"priority\": 1}]},\
-    恰好 N 个任务,不要 markdown 围栏、不要额外文字。";
+    禁止安全敏感操作。\n";
+    let vision_note = format!(
+        "仓库路线图 VISION.md(请优先推进其中【未完成】且高价值的方向,避免与已完成/已列出的重复):\n{}\n",
+        clip(&vision, 4000)
+    );
+    let system = format!(
+        "{}{}{}",
+        base,
+        vision_note,
+        "只输出一个 JSON 对象: {\"tasks\": [{\"title\": \"任务名\", \"description\": \"完整说明\", \"priority\": 1}]},恰好 N 个任务,不要 markdown 围栏、不要额外文字。"
+    );
     let user = format!("请生成 {n} 个新任务(避免与 backlog 中已有的重复主题: 文档、clip 测试、--version、summary、CRLF、占位符、workspace 提示、失败报告、dry-run、--since、重试、StepRecord 统计、retry-failed、stats、--json、LLM 预算、skip 字段、提交序号、SHELL_TIMEOUT、report 命令、health、git 状态摘要、undo、hint 字段、agents.toml、worktree 并行、watch、bench、CLI 集成测试、selfcheck)。");
     // 最多 2 次调用:解析失败时重试(容忍模型偶发输出围栏/前后多余文字/截断)
     let mut last_err = None;
     for attempt in 1..=2 {
-        let raw = llm.chat(system, &user).await.context("任务生成 LLM 调用失败")?;
+        let raw = llm.chat(&system, &user).await.context("任务生成 LLM 调用失败")?;
         match extract_tasks_json(&raw) {
             Ok(arr) => return parse_generated_tasks(arr, n),
             Err(e) => {
@@ -234,7 +244,7 @@ fn git_commit(repo: &Path, message: &str) -> Result<Option<String>> {
 
 /// 列出仓库内实际文件(供 planner 约束 path 引用,减少幻觉路径);
 /// 跳过 .git/target/node_modules/.workbuddy,上限 300 个。
-fn list_repo_files(repo: &Path) -> String {
+pub fn list_repo_files(repo: &Path) -> String {
     let mut out = Vec::new();
     let mut stack = vec![repo.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -395,7 +405,7 @@ pub async fn run_dev_loop(
                 "[dev] backlog 耗尽,第 {} 轮自动生成 {per_round} 个新任务...",
                 extend_rounds + 1
             );
-            match generate_tasks(&llm, per_round).await {
+            match generate_tasks(&llm, &cfg.repo_dir, per_round).await {
                 Ok(new_tasks) if !new_tasks.is_empty() => {
                     backlog.extend(new_tasks);
                     if let Err(e) = save_backlog(&opts.backlog_path, &backlog) {
