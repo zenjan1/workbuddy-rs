@@ -83,6 +83,8 @@ enum Cmd {
         #[arg(long)]
         mock: bool,
     },
+    /// 一键健康自检:依次运行 cargo test 与 cargo clippy
+    Selfcheck,
 }
 
 #[tokio::main]
@@ -164,6 +166,7 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
+        Cmd::Selfcheck => cmd_selfcheck(),
     }
 }
 
@@ -377,6 +380,61 @@ async fn cmd_health(cfg: Config) -> Result<()> {
 
 fn mock_health_ok() -> &'static str {
     "ok"
+}
+
+fn cmd_selfcheck() -> Result<()> {
+    use std::process::Command;
+
+    let mut results = Vec::new();
+
+    // 运行 cargo test
+    let test_status = Command::new("cargo")
+        .arg("test")
+        .status();
+    let test_ok = match test_status {
+        Ok(status) => status.success(),
+        Err(e) => {
+            eprintln!("运行 cargo test 失败: {e}");
+            false
+        }
+    };
+    results.push(("cargo test", if test_ok { "PASS" } else { "FAIL" }));
+
+    // 检测 clippy 是否可用
+    let clippy_available = Command::new("clippy")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if clippy_available {
+        let clippy_status = Command::new("cargo")
+            .arg("clippy")
+            .status();
+        let clippy_ok = match clippy_status {
+            Ok(status) => status.success(),
+            Err(e) => {
+                eprintln!("运行 cargo clippy 失败: {e}");
+                false
+            }
+        };
+        results.push(("cargo clippy", if clippy_ok { "PASS" } else { "FAIL" }));
+    } else {
+        results.push(("cargo clippy", "SKIP"));
+    }
+
+    // 打印汇总表
+    println!("{:<20} {}", "命令", "结果");
+    for (cmd, result) in &results {
+        println!("{:<20} {}", cmd, result);
+    }
+
+    let all_pass = results.iter().all(|(_, result)| *result == "PASS" || *result == "SKIP");
+    if all_pass {
+        Ok(())
+    } else {
+        anyhow::bail!("selfcheck 存在失败命令")
+    }
 }
 
 /// dev.rs 等模块复用的 ISO 时间戳(UTC)。
