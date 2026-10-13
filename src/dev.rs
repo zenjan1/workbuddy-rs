@@ -36,6 +36,9 @@ pub struct DevTask {
     pub verify: Option<String>,
     #[serde(default)]
     pub priority: i32,
+    /// 为 true 时跳过该任务并写入 state.history
+    #[serde(default)]
+    pub skip: bool,
 }
 
 pub fn load_backlog(path: &Path) -> Result<Vec<DevTask>> {
@@ -58,11 +61,13 @@ pub fn load_backlog(path: &Path) -> Result<Vec<DevTask>> {
         let description = obj.get("description").and_then(|x| x.as_str()).unwrap_or_default().to_string();
         let verify = obj.get("verify").and_then(|x| x.as_str()).map(|s| s.to_string());
         let priority = obj.get("priority").and_then(|x| x.as_i64()).unwrap_or(0) as i32;
+        let skip = obj.get("skip").and_then(|x| x.as_bool()).unwrap_or(false);
         out.push(DevTask {
             title,
             description,
             verify,
             priority,
+            skip,
         });
     }
     if out.is_empty() {
@@ -156,6 +161,7 @@ fn parse_generated_tasks(arr: Vec<serde_json::Value>, n: usize) -> Result<Vec<De
             description,
             verify: None,
             priority,
+            skip: false,
         });
     }
     if out.is_empty() {
@@ -354,6 +360,17 @@ pub async fn run_dev_loop(
     if state.started_at.is_none() {
         state.started_at = Some(now_iso());
     }
+
+    // 处理 skip 任务: 不进入正常调度队列, 但在 state.history 中留下跳过记录
+    backlog.retain(|task| {
+        if task.skip {
+            state.history.push(format!("[skipped] {}", task.title));
+            eprintln!("[dev] 跳过任务: {} (skip=true)", task.title);
+            false
+        } else {
+            true
+        }
+    });
 
     eprintln!(
         "[dev] 仓库: {} | backlog {} 项 | 已完成 {} | 预算: 任务 {} 分钟数 {}",
@@ -730,5 +747,45 @@ mod tests {
         let log = g(&["log", "--oneline"]);
         assert!(String::from_utf8_lossy(&log.stdout).contains("任务一"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod dev_skip_tests {
+    use super::*;
+
+    #[test]
+    fn backlog_parses_skip_field() {
+        let dir = std::env::temp_dir().join(format!("workbuddy_devskip_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("backlog.json");
+        std::fs::write(&path, r#"{"tasks":[{"title":"skip me","skip":true},{"title":"normal"}]}"#).unwrap();
+        let tasks = load_backlog(&path).unwrap();
+        assert_eq!(tasks.len(), 2);
+        assert!(tasks[0].skip);
+        assert!(!tasks[1].skip);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn skip_true_filters_out_and_records_history() {
+        let tasks = vec![
+            DevTask { title: "skip".into(), description: String::new(), verify: None, priority: 0, skip: true },
+            DevTask { title: "run".into(), description: String::new(), verify: None, priority: 0, skip: false },
+        ];
+        let mut state = DevState::default();
+        let mut active = tasks;
+        active.retain(|t| {
+            if t.skip {
+                state.history.push(format!("[skipped] {}", t.title));
+                false
+            } else {
+                true
+            }
+        });
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].title, "run");
+        assert_eq!(state.history.len(), 1);
+        assert!(state.history[0].contains("skip"));
     }
 }
