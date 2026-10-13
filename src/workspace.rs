@@ -110,6 +110,26 @@ impl Workspace {
         .context("更新 meta.json 失败")?;
         Ok(())
     }
+
+    /// 读取最新执行日志/产出摘要,供 TUI 每帧轮询。
+    /// 返回首行当前步骤摘要,随后为步骤输出文件尾部(最多 max_lines 行)。
+    pub fn latest_logs(&self, max_lines: usize) -> Vec<String> {
+        let mut lines = Vec::new();
+        if let Ok(rec) = self.load_record() {
+            if let Some(step) = rec.steps.last() {
+                lines.push(format!(
+                    "[step {}] {}: {}",
+                    step.id, step.name, step.output_preview
+                ));
+                let out_path = self.dir.join("outputs").join(format!("{}.md", step.id));
+                if let Ok(text) = std::fs::read_to_string(out_path) {
+                    let tail: Vec<_> = text.lines().rev().take(max_lines).collect();
+                    lines.extend(tail.into_iter().rev().map(|s| s.to_string()));
+                }
+            }
+        }
+        lines
+    }
 }
 
 static RUN_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
