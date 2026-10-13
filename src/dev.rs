@@ -371,6 +371,24 @@ pub async fn run_dev_loop(
     let mut done_set: HashSet<String> = state.done.iter().cloned().collect();
 
     loop {
+        // 每个任务开始前打印 git 状态摘要
+        {
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(&cfg.repo_dir)
+                .args(["status", "--short"])
+                .output();
+            match status {
+                Ok(out) => {
+                    let text = String::from_utf8_lossy(&out.stdout);
+                    for line in text.lines().take(5) {
+                        eprintln!("[dev] git status: {}", line);
+                    }
+                }
+                Err(e) => eprintln!("[dev] git status 执行失败: {e}"),
+            }
+        }
+
         // 预算:任务数
         if let Some(m) = opts.max_tasks {
             if completed.len() >= m {
