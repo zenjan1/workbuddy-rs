@@ -412,11 +412,7 @@ async fn run_edit_step(
     if ops.is_empty() {
         anyhow::bail!("LLM 未返回任何 edit 操作");
     }
-    let mut applied = Vec::new();
-    for op in &ops {
-        let a = crate::edits::apply_op(&cfg.repo_dir, op)?;
-        applied.push(a);
-    }
+    let applied = crate::edits::apply_batch(&cfg.repo_dir, &ops)?;
     Ok(applied.join("\n"))
 }
 

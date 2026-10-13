@@ -132,6 +132,64 @@ pub fn resolve_path(base: &Path, path: &str, new_file_allowed: bool) -> Result<s
     }
 }
 
+/// 纯计算:由现有文件内容(None = 文件不存在)推出新内容与替换处数,不触碰文件系统。
+/// `op.old` 非空时 existing 必须存在,否则报错;CRLF 容忍与末尾换行保留逻辑均在此。
+pub fn compute_new_content(existing: Option<&str>, op: &EditOp) -> Result<(String, usize)> {
+    let c = existing
+        .with_context(|| format!("文件不存在: {}(空 old_string 表示追加/新建)", op.path))?;
+    // CRLF 容忍:文件含 CRLF 而 old 使用 LF 时,将 old 的 LF 规范为 CRLF 匹配,
+    // new 同步转为 CRLF,避免混合换行风格。
+    let crlf = c.contains("\r\n");
+    let old_pattern = if crlf && !op.old.contains("\r\n") {
+        op.old.replace('\n', "\r\n")
+    } else {
+        op.old.clone()
+    };
+    let new_text = if crlf {
+        op.new.replace("\r\n", "\n").replace('\n', "\r\n")
+    } else {
+        op.new.clone()
+    };
+    let count = c.matches(&old_pattern).count();
+    if count == 0 {
+        bail!(
+            "{}: old_string 未找到(前 80 字符: {})",
+            op.path,
+            crate::util::clip(&op.old, 80).replace('\n', "⏎")
+        );
+    }
+    if count > 1 && !op.replace_all {
+        bail!(
+            "{}: old_string 出现 {} 次,需要唯一匹配或 replace_all=true",
+            op.path,
+            count
+        );
+    }
+    let mut out = if op.replace_all {
+        c.replace(&old_pattern, &new_text)
+    } else {
+        c.replacen(&old_pattern, &new_text, 1)
+    };
+    // 末尾换行保留:原文件以换行结尾时,替换后也保持换行结尾。
+    let trailing = if c.ends_with("\r\n") {
+        Some("\r\n")
+    } else if c.ends_with('\n') {
+        Some("\n")
+    } else {
+        None
+    };
+    if let Some(t) = trailing {
+        if !out.ends_with('\n') {
+            out.push_str(t);
+        } else if t == "\r\n" && !out.ends_with("\r\n") {
+            if let Some(i) = out.rfind('\n') {
+                out.insert(i, '\r');
+            }
+        }
+    }
+    Ok((out, count))
+}
+
 /// 应用单个编辑操作,返回动作描述。
 pub fn apply_op(base: &Path, op: &EditOp) -> Result<String> {
     // old 为空 → 允许新建;old 非空 → 目标必须已存在(经 basename 兜底解析)
@@ -141,7 +199,7 @@ pub fn apply_op(base: &Path, op: &EditOp) -> Result<String> {
     }
     let existing = std::fs::read_to_string(&p).ok();
 
-    let action = if op.old.is_empty() {
+    if op.old.is_empty() {
         let out = match &existing {
             Some(c) => format!(
                 "{}\n{}",
@@ -151,72 +209,67 @@ pub fn apply_op(base: &Path, op: &EditOp) -> Result<String> {
             None => op.new.clone(),
         };
         std::fs::write(&p, &out).with_context(|| format!("写入失败: {}", op.path))?;
-        if existing.is_some() {
+        return Ok(if existing.is_some() {
             format!("{} (追加)", op.path)
         } else {
             format!("{} (新建)", op.path)
-        }
-    } else {
-        let c = existing
-            .with_context(|| format!("文件不存在: {}(空 old_string 表示追加/新建)", op.path))?;
-        // CRLF 容忍:文件含 CRLF 而 old 使用 LF 时,将 old 的 LF 规范为 CRLF 匹配,
-        // new 同步转为 CRLF,避免混合换行风格。
-        let crlf = c.contains("\r\n");
-        let old_pattern = if crlf && !op.old.contains("\r\n") {
-            op.old.replace('\n', "\r\n")
+        });
+    }
+    let (out, count) = compute_new_content(existing.as_deref(), op)?;
+    std::fs::write(&p, &out).with_context(|| format!("写入失败: {}", op.path))?;
+    Ok(format!(
+        "{} (替换 {} 处)",
+        op.path,
+        if op.replace_all { count } else { 1 }
+    ))
+}
+
+/// 原子应用一批编辑:先在内存中模拟整批(同文件的多个 op 按序链式叠加),
+/// 任一 op 失败则整体报错且零写入,避免"部分已应用、部分失败"的半成品改坏仓库。
+pub fn apply_batch(base: &Path, ops: &[EditOp]) -> Result<Vec<String>> {
+    let mut mem: std::collections::HashMap<std::path::PathBuf, String> = std::collections::HashMap::new();
+    let mut plan: Vec<(std::path::PathBuf, String, String)> = Vec::new();
+    for op in ops {
+        let p = resolve_path(base, &op.path, op.old.is_empty())?;
+        let cur = mem.get(&p).cloned().or_else(|| std::fs::read_to_string(&p).ok());
+        let (out, action) = if op.old.is_empty() {
+            let out = match &cur {
+                Some(c) => format!(
+                    "{}\n{}",
+                    c.trim_end_matches('\n'),
+                    op.new.trim_end_matches('\n')
+                ),
+                None => op.new.clone(),
+            };
+            let action = if cur.is_some() {
+                format!("{} (追加)", op.path)
+            } else {
+                format!("{} (新建)", op.path)
+            };
+            (out, action)
         } else {
-            op.old.clone()
-        };
-        let new_text = if crlf {
-            op.new.replace("\r\n", "\n").replace('\n', "\r\n")
-        } else {
-            op.new.clone()
-        };
-        let count = c.matches(&old_pattern).count();
-        if count == 0 {
-            bail!(
-                "{}: old_string 未找到(前 80 字符: {})",
+            let (out, count) = compute_new_content(cur.as_deref(), op)?;
+            let action = format!(
+                "{} (替换 {} 处)",
                 op.path,
-                crate::util::clip(&op.old, 80).replace('\n', "⏎")
+                if op.replace_all { count } else { 1 }
             );
-        }
-        if count > 1 && !op.replace_all {
-            bail!(
-                "{}: old_string 出现 {} 次,需要唯一匹配或 replace_all=true",
-                op.path,
-                count
-            );
-        }
-        let mut out = if op.replace_all {
-            c.replace(&old_pattern, &new_text)
-        } else {
-            c.replacen(&old_pattern, &new_text, 1)
+            (out, action)
         };
-        // 末尾换行保留:原文件以换行结尾时,替换后也保持换行结尾。
-        let trailing = if c.ends_with("\r\n") {
-            Some("\r\n")
-        } else if c.ends_with('\n') {
-            Some("\n")
-        } else {
-            None
-        };
-        if let Some(t) = trailing {
-            if !out.ends_with('\n') {
-                out.push_str(t);
-            } else if t == "\r\n" && !out.ends_with("\r\n") {
-                if let Some(i) = out.rfind('\n') {
-                    out.insert(i, '\r');
-                }
-            }
+        mem.insert(p.clone(), out.clone());
+        plan.push((p, out, action));
+    }
+    // 全批次验证通过,统一落盘
+    let mut actions = Vec::new();
+    for (p, out, action) in plan {
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(&parent)
+                .with_context(|| format!("创建目录失败: {}", parent.display()))?;
         }
-        std::fs::write(&p, &out).with_context(|| format!("写入失败: {}", op.path))?;
-        format!(
-            "{} (替换 {} 处)",
-            op.path,
-            if op.replace_all { count } else { 1 }
-        )
-    };
-    Ok(action)
+        std::fs::write(&p, &out).with_context(|| format!("写入失败: {}", p.display()))?;
+        actions.push(action);
+    }
+    Ok(actions)
 }
 
 /// shell 命令安全过滤:拒绝危险操作(自主开发循环的底线)。
@@ -344,6 +397,32 @@ mod tests {
             std::fs::read_to_string(tmp.join("a.txt")).unwrap(),
             "line1\nline2 changed\n"
         );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn apply_batch_atomic_no_write_on_failure() {
+        let tmp = std::env::temp_dir().join(format!("wb-edits-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("a.txt"), "alpha\nbeta\n").unwrap();
+
+        // op1 能成功,op2 的 old_string 不匹配 → 整批失败且 a.txt 必须保持原样(零写入)
+        let ops = vec![
+            EditOp { path: "a.txt".into(), old: "alpha".into(), new: "ALPHA".into(), replace_all: false },
+            EditOp { path: "a.txt".into(), old: "不存在的文本".into(), new: "x".into(), replace_all: false },
+        ];
+        assert!(apply_batch(&tmp, &ops).is_err());
+        assert_eq!(std::fs::read_to_string(tmp.join("a.txt")).unwrap(), "alpha\nbeta\n");
+
+        // 同一批但第二个 op 合法 → 两个 op 都落盘,且同文件链式叠加
+        let ops = vec![
+            EditOp { path: "a.txt".into(), old: "alpha".into(), new: "ALPHA".into(), replace_all: false },
+            EditOp { path: "a.txt".into(), old: "beta".into(), new: "BETA".into(), replace_all: false },
+        ];
+        let actions = apply_batch(&tmp, &ops).unwrap();
+        assert_eq!(actions.len(), 2);
+        assert_eq!(std::fs::read_to_string(tmp.join("a.txt")).unwrap(), "ALPHA\nBETA\n");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

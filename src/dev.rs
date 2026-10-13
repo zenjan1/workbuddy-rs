@@ -311,10 +311,7 @@ async fn repair(
     if ops.is_empty() {
         return Ok(None);
     }
-    let mut applied = Vec::new();
-    for op in &ops {
-        applied.push(edits::apply_op(&cfg.repo_dir, op)?);
-    }
+    let applied = edits::apply_batch(&cfg.repo_dir, &ops)?;
     Ok(Some(applied.join("; ")))
 }
 
