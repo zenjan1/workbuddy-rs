@@ -85,6 +85,8 @@ enum Cmd {
     },
     /// 一键健康自检:依次运行 cargo test 与 cargo clippy
     Selfcheck,
+    /// 安全撤销上次 dev 提交:仅当最近提交以 `feat(dev):` 开头时执行 reset --hard
+    Undo,
 }
 
 #[tokio::main]
@@ -167,6 +169,16 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Selfcheck => cmd_selfcheck(),
+        Cmd::Undo => match run_undo(None) {
+            Ok(short_sha) => {
+                println!("已撤销 dev 提交: {short_sha}");
+                Ok(())
+            }
+            Err(reason) => {
+                eprintln!("拒绝撤销：{reason}");
+                Ok(())
+            }
+        },
     }
 }
 
@@ -325,6 +337,35 @@ fn cmd_agents() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn run_undo(repo_path: Option<&std::path::Path>) -> Result<String, String> {
+    let git = |args: &[&str]| -> Result<String, String> {
+        let mut cmd = std::process::Command::new("git");
+        if let Some(path) = repo_path {
+            cmd.arg("-C").arg(path);
+        }
+        cmd.args(args);
+        let output = cmd.output().map_err(|e| format!("执行 git {:?} 失败: {e}", args))?;
+        if !output.status.success() {
+            return Err(format!(
+                "git {:?} 失败: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    };
+
+    let subject = git(&["log", "-1", "--pretty=%s"])?;
+    if !subject.starts_with("feat(dev):") {
+        return Err(format!("最近提交不是 dev 提交：{subject}"));
+    }
+
+    let short_sha = git(&["rev-parse", "--short", "HEAD"])?;
+    git(&["reset", "--hard", "HEAD~1"])?;
+
+    Ok(short_sha)
 }
 
 async fn cmd_health(cfg: Config) -> Result<()> {
