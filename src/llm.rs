@@ -52,33 +52,46 @@ impl Llm for OpenAiCompat {
                 "{}/chat/completions",
                 self.cfg.base_url.trim_end_matches('/')
             );
-            let resp = self
-                .client
-                .post(&url)
-                .bearer_auth(&key)
-                .json(&json!({
-                    "model": self.cfg.model,
-                    "temperature": 0.3,
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user}
-                    ]
-                }))
-                .send()
-                .await
-                .with_context(|| format!("LLM 请求失败: {url}"))?;
+            let payload = json!({
+                "model": self.cfg.model,
+                "temperature": 0.3,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user}
+                ]
+            });
 
-            let status = resp.status();
-            let text = resp.text().await.context("读取响应体失败")?;
-            if !status.is_success() {
+            for attempt in 0..=1 {
+                let resp = self
+                    .client
+                    .post(&url)
+                    .bearer_auth(&key)
+                    .json(&payload)
+                    .send()
+                    .await
+                    .with_context(|| format!("LLM 请求失败: {url}"))?;
+
+                let status = resp.status();
+                if attempt == 0 && matches!(status.as_u16(), 429 | 500 | 502 | 503) {
+                    // 可重试状态码:429/5xx,等待 3 秒后重试一次
+                    drop(resp);
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    continue;
+                }
+
+                let text = resp.text().await.context("读取响应体失败")?;
+                if status.is_success() {
+                    let v: serde_json::Value =
+                        serde_json::from_str(&text).context("解析 LLM 响应 JSON 失败")?;
+                    return v.pointer("/choices/0/message/content")
+                        .and_then(|c| c.as_str())
+                        .map(|s| s.to_string())
+                        .ok_or_else(|| anyhow::anyhow!("响应中缺少 choices[0].message.content"));
+                }
+
                 bail!("LLM API 返回 {}: {}", status, clip(&text, 300));
             }
-            let v: serde_json::Value =
-                serde_json::from_str(&text).context("解析 LLM 响应 JSON 失败")?;
-            v.pointer("/choices/0/message/content")
-                .and_then(|c| c.as_str())
-                .map(|s| s.to_string())
-                .ok_or_else(|| anyhow::anyhow!("响应中缺少 choices[0].message.content"))
+            unreachable!("重试循环不应正常结束")
         })
     }
 }
