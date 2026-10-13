@@ -245,7 +245,15 @@ async fn run_task(cfg: Config, goal: &str) -> Result<()> {
     println!("{report}");
     println!("==================================================");
     println!("任务已保存到: {}", ws.dir.display());
+    println!(
+        "完整报告: {}",
+        report_path(&cfg.workspace_dir, &run.id).display()
+    );
     Ok(())
+}
+
+fn report_path(workspace_dir: &std::path::Path, run_id: &str) -> std::path::PathBuf {
+    workspace_dir.join(run_id).join("report.md")
 }
 
 fn cmd_list(cfg: Config) -> Result<()> {
@@ -347,4 +355,18 @@ fn now_iso() -> String {
         mo += 1;
     }
     format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, mo, d + 1, h, m, sec)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn report_path_joins_workspace_run_id_and_report_md() {
+        let path = report_path(std::path::Path::new("/tmp/workbuddy-ws"), "run-123");
+        assert_eq!(
+            path,
+            std::path::PathBuf::from("/tmp/workbuddy-ws/run-123/report.md")
+        );
+    }
 }
