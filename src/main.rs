@@ -46,7 +46,11 @@ enum Cmd {
         parallel: Option<usize>,
     },
     /// 列出历史任务
-    List,
+    List {
+        /// 仅显示该日期(含)之后创建的任务 (YYYY-MM-DD)
+        #[arg(long)]
+        since: Option<String>,
+    },
     /// 查看某次任务的计划与报告
     Show { id: String },
     /// 列出内置专家与 skills
@@ -103,7 +107,7 @@ async fn main() -> Result<()> {
             cfg.mock = mock;
             run_task(cfg, &goal).await
         }
-        Cmd::List => cmd_list(cfg),
+        Cmd::List { since } => cmd_list(cfg, since.as_deref()),
         Cmd::Show { id } => cmd_show(cfg, &id),
         Cmd::Agents => cmd_agents(),
         Cmd::Config => {
@@ -256,14 +260,25 @@ fn report_path(workspace_dir: &std::path::Path, run_id: &str) -> std::path::Path
     workspace_dir.join(run_id).join("report.md")
 }
 
-fn cmd_list(cfg: Config) -> Result<()> {
+fn run_created_since(created: &str, since: Option<&str>) -> bool {
+    match since {
+        Some(since) => created >= since,
+        None => true,
+    }
+}
+
+fn cmd_list(cfg: Config, since: Option<&str>) -> Result<()> {
     let runs = Workspace::root(&cfg.workspace_dir);
-    if runs.is_empty() {
+    let filtered: Vec<&RunRecord> = runs
+        .iter()
+        .filter(|r| run_created_since(&r.created, since))
+        .collect();
+    if filtered.is_empty() {
         println!("(暂无历史任务)");
         return Ok(());
     }
     println!("{:<14} {:<24} {}", "ID", "时间", "目标");
-    for r in &runs {
+    for r in filtered {
         let goal = util::clip(&r.goal, 40);
         println!("{:<14} {:<24} {}", r.id, r.created, goal);
     }
@@ -368,5 +383,21 @@ mod tests {
             path,
             std::path::PathBuf::from("/tmp/workbuddy-ws/run-123/report.md")
         );
+    }
+
+    #[test]
+    fn run_created_since_no_since_filter_true() {
+        assert!(run_created_since("2025-03-01T00:00:00Z", None));
+    }
+
+    #[test]
+    fn run_created_since_includes_boundary_day() {
+        assert!(run_created_since("2025-03-02T00:00:00Z", Some("2025-03-02")));
+        assert!(run_created_since("2025-03-02T23:59:59Z", Some("2025-03-02")));
+    }
+
+    #[test]
+    fn run_created_since_filters_earlier_run() {
+        assert!(!run_created_since("2025-03-01T23:59:59Z", Some("2025-03-02")));
     }
 }
