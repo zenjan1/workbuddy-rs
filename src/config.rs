@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use clap::Args;
 
 /// 运行时配置。优先级:命令行 > 环境变量 > 配置文件 > 默认值。
 #[derive(Debug, Clone)]
@@ -134,5 +135,23 @@ mod tests {
         let c: FileConfig = toml::from_str("").unwrap();
         assert!(c.model.is_none());
         assert!(c.max_parallel.is_none());
+    }
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct CmdShow {
+    /// Run ID
+    pub id: String,
+    /// 输出完整 JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+impl Default for CmdShow {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            json: false,
+        }
     }
 }
