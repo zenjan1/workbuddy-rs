@@ -159,7 +159,20 @@ pub fn apply_op(base: &Path, op: &EditOp) -> Result<String> {
     } else {
         let c = existing
             .with_context(|| format!("文件不存在: {}(空 old_string 表示追加/新建)", op.path))?;
-        let count = c.matches(&op.old).count();
+        // CRLF 容忍:文件含 CRLF 而 old 使用 LF 时,将 old 的 LF 规范为 CRLF 匹配,
+        // new 同步转为 CRLF,避免混合换行风格。
+        let crlf = c.contains("\r\n");
+        let old_pattern = if crlf && !op.old.contains("\r\n") {
+            op.old.replace('\n', "\r\n")
+        } else {
+            op.old.clone()
+        };
+        let new_text = if crlf {
+            op.new.replace("\r\n", "\n").replace('\n', "\r\n")
+        } else {
+            op.new.clone()
+        };
+        let count = c.matches(&old_pattern).count();
         if count == 0 {
             bail!(
                 "{}: old_string 未找到(前 80 字符: {})",
@@ -174,11 +187,28 @@ pub fn apply_op(base: &Path, op: &EditOp) -> Result<String> {
                 count
             );
         }
-        let out = if op.replace_all {
-            c.replace(&op.old, &op.new)
+        let mut out = if op.replace_all {
+            c.replace(&old_pattern, &new_text)
         } else {
-            c.replacen(&op.old, &op.new, 1)
+            c.replacen(&old_pattern, &new_text, 1)
         };
+        // 末尾换行保留:原文件以换行结尾时,替换后也保持换行结尾。
+        let trailing = if c.ends_with("\r\n") {
+            Some("\r\n")
+        } else if c.ends_with('\n') {
+            Some("\n")
+        } else {
+            None
+        };
+        if let Some(t) = trailing {
+            if !out.ends_with('\n') {
+                out.push_str(t);
+            } else if t == "\r\n" && !out.ends_with("\r\n") {
+                if let Some(i) = out.rfind('\n') {
+                    out.insert(i, '\r');
+                }
+            }
+        }
         std::fs::write(&p, &out).with_context(|| format!("写入失败: {}", op.path))?;
         format!(
             "{} (替换 {} 处)",
@@ -270,6 +300,50 @@ mod tests {
 
         let op = EditOp { path: "missing.txt".into(), old: "zz".into(), new: "yy".into(), replace_all: false };
         assert!(apply_op(&tmp, &op).is_err());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn apply_op_tolerates_crlf_with_lf_pattern() {
+        let tmp = std::env::temp_dir().join(format!("wb-edits-crlf-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        // 整个文件以 CRLF 结尾;old_string 只用 LF(长度为 1 的换行符)
+        std::fs::write(tmp.join("a.txt"), "line1\r\nline2\r\n").unwrap();
+
+        let op = EditOp {
+            path: "a.txt".into(),
+            old: "line1\nline2".into(),
+            new: "changed".into(),
+            replace_all: false,
+        };
+        assert!(apply_op(&tmp, &op).is_ok(), "CRLF 文件应能使用 LF 模式的 old_string 替换");
+        assert_eq!(
+            std::fs::read_to_string(tmp.join("a.txt")).unwrap(),
+            "changed\r\n"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn apply_op_preserves_trailing_newline() {
+        let tmp = std::env::temp_dir().join(format!("wb-edits-trail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("a.txt"), "line1\nline2\n").unwrap();
+
+        // old_string 吞掉了末尾换行,new_string 不带换行 → 替换后仍应保留末尾换行
+        let op = EditOp {
+            path: "a.txt".into(),
+            old: "line2\n".into(),
+            new: "line2 changed".into(),
+            replace_all: false,
+        };
+        assert!(apply_op(&tmp, &op).is_ok());
+        assert_eq!(
+            std::fs::read_to_string(tmp.join("a.txt")).unwrap(),
+            "line1\nline2 changed\n"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
