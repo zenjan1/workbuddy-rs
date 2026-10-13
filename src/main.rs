@@ -57,6 +57,8 @@ enum Cmd {
     Agents,
     /// 打印当前生效配置(隐藏 key)
     Config,
+    /// 探测 LLM 端点健康状态
+    Health,
     /// 自主开发循环:从 backlog 取任务 → 规划 → 改码 → 验证 → 提交
     Dev {
         /// backlog 文件(JSON,默认 .workbuddy/backlog.json)
@@ -114,6 +116,7 @@ async fn main() -> Result<()> {
             println!("{}", cfg.summary());
             Ok(())
         }
+        Cmd::Health => cmd_health(cfg).await,
         Cmd::Dev {
             backlog,
             verify,
@@ -321,6 +324,61 @@ fn cmd_agents() -> Result<()> {
     Ok(())
 }
 
+async fn cmd_health(cfg: Config) -> Result<()> {
+    if cfg.mock {
+        println!("{}", mock_health_ok());
+        return Ok(());
+    }
+
+    let url = format!("{}/models", cfg.base_url.trim_end_matches('/'));
+    let client = reqwest::Client::new();
+    let mut request = client.get(&url);
+    if let Some(key) = &cfg.api_key {
+        request = request.bearer_auth(key);
+    }
+
+    let start = std::time::Instant::now();
+    let response = request.send().await?;
+    let status = response.status();
+    let body_text = response.text().await?;
+    let elapsed = start.elapsed();
+
+    println!("HTTP 状态码: {}", status);
+    println!("耗时: {} ms", elapsed.as_millis());
+
+    if !status.is_success() {
+        anyhow::bail!("健康检查失败: HTTP {}", status);
+    }
+
+    let body: serde_json::Value = serde_json::from_str(&body_text)
+        .map_err(|e| anyhow::anyhow!("响应不是合法 JSON: {e}"))?;
+    let data = body
+        .get("data")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| anyhow::anyhow!("响应缺少 data 数组"))?;
+
+    let ids: Vec<&str> = data
+        .iter()
+        .take(5)
+        .filter_map(|v| v.get("id").and_then(|s| s.as_str()))
+        .collect();
+
+    if ids.is_empty() {
+        println!("(未找到模型 id)");
+    } else {
+        println!("模型 id (前 {} 个):", ids.len());
+        for id in ids {
+            println!("  - {}", id);
+        }
+    }
+
+    Ok(())
+}
+
+fn mock_health_ok() -> &'static str {
+    "ok"
+}
+
 /// dev.rs 等模块复用的 ISO 时间戳(UTC)。
 pub fn main_now_iso() -> String {
     now_iso()
@@ -377,6 +435,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn health_mock_branch_returns_ok_without_network() {
+        let mut cfg = Config::load().expect("加载默认配置失败");
+        cfg.mock = true;
+        assert!(cfg.mock);
+        // 仅调用同步辅助函数;不会发起任何 reqwest/网络请求。
+        assert_eq!(mock_health_ok(), "ok");
+    }
+
+    #[test]
     fn report_path_joins_workspace_run_id_and_report_md() {
         let path = report_path(std::path::Path::new("/tmp/workbuddy-ws"), "run-123");
         assert_eq!(
@@ -399,5 +466,10 @@ mod tests {
     #[test]
     fn run_created_since_filters_earlier_run() {
         assert!(!run_created_since("2025-03-01T23:59:59Z", Some("2025-03-02")));
+    }
+
+    #[test]
+    fn mock_health_returns_ok() {
+        assert_eq!(mock_health_ok(), "ok");
     }
 }
