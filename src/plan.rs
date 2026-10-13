@@ -360,3 +360,35 @@ mod tests {
         assert_eq!(p.steps[1].kind, StepKind::Llm);
     }
 }
+
+#[test]
+fn parse_tool_steps() {
+    let raw = r#"{ "goal": "改码", "steps": [
+        {"id":1,"name":"读文件","agent":"coder","skill":"code-writing","prompt":"读 source","kind":"read","path":"src/main.rs","needs":[]},
+        {"id":2,"name":"跑测试","agent":"coder","skill":"code-writing","prompt":"跑命令","kind":"shell","command":"cargo test","needs":[1]},
+        {"id":3,"name":"改文件","agent":"coder","skill":"code-writing","prompt":"生成 edits","kind":"edit","path":"src/main.rs","needs":[1,2]}
+    ]}"#;
+    let p = Plan::from_llm("改码", raw).unwrap();
+    assert_eq!(p.steps.len(), 3);
+    assert_eq!(p.steps[0].kind, StepKind::Read);
+    assert_eq!(p.steps[0].path.as_deref(), Some("src/main.rs"));
+    assert_eq!(p.steps[0].command, None);
+    assert_eq!(p.steps[1].kind, StepKind::Shell);
+    assert_eq!(p.steps[1].command.as_deref(), Some("cargo test"));
+    assert_eq!(p.steps[1].path, None);
+    assert_eq!(p.steps[2].kind, StepKind::Edit);
+    assert_eq!(p.steps[2].path.as_deref(), Some("src/main.rs"));
+    assert_eq!(p.steps[2].command, None);
+}
+
+#[test]
+fn reject_tool_step_missing_required_field() {
+    let missing_shell_command = r#"{ "goal": "x", "steps": [{"id":1,"name":"a","agent":"coder","skill":"code-writing","prompt":"p","kind":"shell","needs":[]}]}"#;
+    assert!(Plan::from_llm("x", missing_shell_command).is_err());
+
+    let missing_edit_path = r#"{ "goal": "x", "steps": [{"id":1,"name":"a","agent":"coder","skill":"code-writing","prompt":"p","kind":"edit","needs":[]}]}"#;
+    assert!(Plan::from_llm("x", missing_edit_path).is_err());
+
+    let missing_read_path = r#"{ "goal": "x", "steps": [{"id":1,"name":"a","agent":"coder","skill":"code-writing","prompt":"p","kind":"read","needs":[]}]}"#;
+    assert!(Plan::from_llm("x", missing_read_path).is_err());
+}
