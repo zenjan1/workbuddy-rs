@@ -385,7 +385,15 @@ pub async fn run_dev_loop(
     let mut completed = Vec::new();
     let mut failed = Vec::new();
     let mut extend_rounds = 0usize;
-    let mut done_set: HashSet<String> = state.done.iter().cloned().collect();
+    let mut extend_fail_streak = 0usize;
+    // done_set 同时含 done 与 failed:重启后不重复跑已失败任务(省 token);
+    // 确需重试时用 --retry-failed 从 failed 移回待办。
+    let mut done_set: HashSet<String> = state
+        .done
+        .iter()
+        .chain(state.failed.iter())
+        .cloned()
+        .collect();
 
     loop {
         // 每个任务开始前打印 git 状态摘要
@@ -451,6 +459,7 @@ pub async fn run_dev_loop(
                     }
                     eprintln!("[dev] backlog 现为 {} 项", backlog.len());
                     extend_rounds += 1;
+                    extend_fail_streak = 0;
                     continue;
                 }
                 Ok(_) => {
@@ -458,11 +467,24 @@ pub async fn run_dev_loop(
                     break;
                 }
                 Err(e) => {
+                    // 自补给失败多为瞬时(限流/抖动):等 5 分钟重试,连续失败约 1 小时才停,
+                    // 避免一次瞬时错误就终止整个 30 天无人值守。
+                    extend_fail_streak += 1;
+                    if extend_fail_streak >= 12 {
+                        eprintln!(
+                            "[dev] 任务生成连续失败 {} 次,停止: {}",
+                            extend_fail_streak,
+                            clip(&e.to_string(), 120)
+                        );
+                        break;
+                    }
                     eprintln!(
-                        "[dev] 任务生成失败,停止: {}",
+                        "[dev] 任务生成失败,5 分钟后重试(第 {}/12 次): {}",
+                        extend_fail_streak,
                         clip(&e.to_string(), 120)
                     );
-                    break;
+                    tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+                    continue;
                 }
             }
         };

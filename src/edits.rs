@@ -23,17 +23,15 @@ pub struct EditOp {
 /// 从 LLM 原始输出解析 edits 列表(容忍 markdown 围栏与前后多余文字,
 /// 接受 `{"edits":[...]}` 或裸数组)。
 pub fn parse_edits(raw: &str) -> Result<Vec<EditOp>> {
-    let first = raw
-        .find('{')
-        .map_or(usize::MAX, |i| i)
-        .min(raw.find('[').map_or(usize::MAX, |i| i));
-    let last = raw
-        .rfind('}')
-        .map_or(usize::MAX, |i| i)
-        .max(raw.rfind(']').map_or(usize::MAX, |i| i));
-    if first == usize::MAX || last <= first {
-        bail!("响应中未找到完整 JSON");
-    }
+    // 定位 JSON 片段:开括号取存在者最小位置、闭括号取存在者最大位置。
+    // (修复:旧逻辑缺某类括号时用 usize::MAX 参与 min/max,使 last 恒为 usize::MAX,
+    //  导致 raw[..=usize::MAX] 越界 panic——曾于 2026-10-13 崩掉整个循环)
+    let first = [raw.find('{'), raw.find('[')].into_iter().flatten().min();
+    let last = [raw.rfind('}'), raw.rfind(']')].into_iter().flatten().max();
+    let (first, last) = match (first, last) {
+        (Some(f), Some(l)) if l >= f => (f, l),
+        _ => bail!("响应中未找到完整 JSON"),
+    };
     let v: serde_json::Value =
         serde_json::from_str(&raw[first..=last]).context("解析 edits JSON 失败")?;
     let arr = v

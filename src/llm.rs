@@ -57,7 +57,7 @@ impl Llm for OpenAiCompat {
                 "temperature": 0.3,
                 // 推理模型(如 deepseek-v4-pro)需足量预算:先思考(reasoning)再产出,
                 // 太小会耗尽预算导致 content 为空(见下方回退兜底)。
-                "max_tokens": 8192,
+                "max_tokens": 32768,
                 "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": user}
