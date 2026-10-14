@@ -299,7 +299,7 @@ pub fn list_repo_files(repo: &Path) -> String {
 
 // ---------- verify ----------
 
-fn run_verify(repo: &Path, cmd: &str) -> Result<bool> {
+fn run_verify(repo: &Path, cmd: &str) -> Result<(bool, String)> {
     let out = Command::new("sh")
         .arg("-c")
         .arg(cmd)
@@ -307,20 +307,27 @@ fn run_verify(repo: &Path, cmd: &str) -> Result<bool> {
         .output()
         .with_context(|| format!("运行验证命令失败: {cmd}"))?;
     let ok = out.status.success();
+    // 合并 stderr+stdout 作为失败输出:编译错误常在 stderr,测试断言/panic 常在 stdout。
+    // 之前只打印不返回,repair 拿不到真正的报错,只能对着 diff --stat 猜。
+    let mut output = String::from_utf8_lossy(&out.stderr).into_owned();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    if !stdout.trim().is_empty() {
+        if !output.trim().is_empty() {
+            output.push('\n');
+        }
+        output.push_str(&stdout);
+    }
     if !ok {
         eprintln!(
             "[verify] ❌ {} (退出码 {:?})\n{}",
             cmd,
             out.status.code(),
-            clip(
-                &String::from_utf8_lossy(&out.stderr),
-                2000
-            )
+            clip(&output, 2000)
         );
     } else {
         eprintln!("[verify] ✅ {}", cmd);
     }
-    Ok(ok)
+    Ok((ok, output))
 }
 
 // ---------- 修复 ----------
@@ -333,14 +340,34 @@ async fn repair(
     verify_cmd: &str,
     failure_output: &str,
 ) -> Result<Option<String>> {
+    // 关键修复:把改动文件的当前真实内容喂给 LLM。旧行为只给 diff --stat,
+    // LLM 看不到真实代码,只能凭空猜 old_string(常拿错文件里的片段)→ old_string 对不上 → 修复落空。
+    // 现在:LLM 能看到确切报错 + 每个改动文件的当前全文,据此给出逐字符一致的 old_string。
+    let mut files_ctx = String::new();
+    let names = git(&cfg.repo_dir, &["diff", "--name-only"]).unwrap_or_default();
+    for name in names.lines().filter(|l| !l.trim().is_empty()) {
+        if let Ok(content) = std::fs::read_to_string(cfg.repo_dir.join(name)) {
+            files_ctx.push_str(&format!(
+                "\n== 当前文件内容: {} ==\n{}\n",
+                name,
+                clip(&content, 30_000)
+            ));
+        }
+    }
+    if files_ctx.is_empty() {
+        // 无未提交改动(如纯测试断言失败):给出最近 diff 供参考
+        files_ctx.push_str("\n== 最近改动(git diff) ==\n");
+        files_ctx.push_str(&clip(&git(&cfg.repo_dir, &["diff"]).unwrap_or_default(), 8000));
+    }
     let system = "你是 WorkBuddy 的修复工程师。验证命令失败了,请找出问题并直接修复代码。\n\
-    只输出一个 JSON 对象: {\"edits\": [ ... ]},每个 edit: {\"path\": 仓库相对路径, \"old_string\": 精确原文, \"new_string\": 修复后内容, \"replace_all\": 布尔}。\n\
-    old_string 为空表示在文件末尾追加(文件不存在则新建)。不要 markdown 围栏,不要额外文字,最多 5 个 edits。";
+     只输出一个 JSON 对象: {\"edits\": [ ... ]},每个 edit: {\"path\": 仓库相对路径, \"old_string\": 精确原文, \"new_string\": 修复后内容, \"replace_all\": 布尔}。\n\
+     old_string 必须与下面\"当前文件内容\"里的真实代码逐字符一致(含缩进);为空表示在文件末尾追加(文件不存在则新建)。不要 markdown 围栏,不要额外文字,最多 5 个 edits。";
     let user = format!(
-        "任务: {}\n验证命令: {}\n失败输出(尾部):\n{}\n\n请修复。",
+        "任务: {}\n验证命令: {}\n失败输出(尾部):\n{}\n{}\n请修复:old_string 必须取自上面\"当前文件内容\"里能逐字符匹配的真实代码,不要臆造。",
         task.title,
         verify_cmd,
-        clip(failure_output, 4000)
+        clip(failure_output, 4000),
+        files_ctx
     );
     let raw = llm.chat(system, &user).await.context("修复 LLM 调用失败")?;
     let ops = edits::parse_edits(&raw).context("解析修复 edits 失败")?;
@@ -573,16 +600,17 @@ pub async fn run_dev_loop(
         ws.finish_run(&mut run, &summary)?;
 
         // 验证 + 自修复
-        let mut verify_ok = run_verify(&cfg.repo_dir, &verify_cmd)?;
+        let mut (verify_ok, verify_out) = run_verify(&cfg.repo_dir, &verify_cmd)?;
         let mut repair_count = 0;
         while !verify_ok && repair_count < MAX_REPAIRS {
             repair_count += 1;
             eprintln!("[dev] 验证失败,第 {} 次自动修复...", repair_count);
-            let failure = git(&cfg.repo_dir, &["diff", "--stat"]).unwrap_or_default();
-            match repair(&llm, &cfg, task, &verify_cmd, &failure).await {
+            match repair(&llm, &cfg, task, &verify_cmd, &verify_out).await {
                 Ok(Some(desc)) => {
                     eprintln!("[dev] 修复已应用: {}", clip(&desc, 200));
-                    verify_ok = run_verify(&cfg.repo_dir, &verify_cmd)?;
+                    let (v, o) = run_verify(&cfg.repo_dir, &verify_cmd)?;
+                    verify_ok = v;
+                    verify_out = o;
                 }
                 Ok(None) => eprintln!("[dev] 修复 LLM 未返回编辑"),
                 Err(e) => eprintln!("[dev] 修复失败: {}", clip(&e.to_string(), 200)),
@@ -788,6 +816,91 @@ mod tests {
         // 仓库里应产生提交(mock edits 追加到 autodev_note)
         let log = g(&["log", "--oneline"]);
         assert!(String::from_utf8_lossy(&log.stdout).contains("任务一"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 捕获提示的 mock LLM:记录收到的 user 提示,并返回一个合法(追加)edit
+    struct CapturingLlm {
+        users: std::sync::Mutex<Vec<String>>,
+    }
+    impl crate::llm::Llm for CapturingLlm {
+        fn chat<'a>(
+            &'a self,
+            _system: &'a str,
+            user: &'a str,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send + 'a>,
+        > {
+            self.users.lock().unwrap().push(user.to_string());
+            let r = r#"{"edits":[{"path":"code.rs","old_string":"","new_string":"x","replace_all":false}]}"#
+                .to_string();
+            Box::pin(async move { Ok(r) })
+        }
+    }
+
+    // 回归:自修复提示必须包含改动文件的当前真实内容 + 真实报错,
+    // 否则 LLM 只能凭空猜 old_string(对不上)→ 修复落空(2026-10-14 主因)。
+    #[tokio::test]
+    async fn repair_prompt_includes_changed_file_content_and_error() {
+        let dir = std::env::temp_dir().join(format!("wb-repair-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let g = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        g(&["init", "-b", "main"]);
+        g(&["config", "user.email", "t@t"]);
+        g(&["config", "user.name", "t"]);
+        std::fs::write(dir.join("code.rs"), "fn main() {\n    let x = 1;\n}\n").unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-m", "init"]);
+        // 改动 code.rs(未提交)→ 进入 git diff --name-only
+        std::fs::write(dir.join("code.rs"), "fn main() {\n    let x = 1;\n    let y = x;\n}\n").unwrap();
+
+        let cfg = Config {
+            api_key: None,
+            base_url: "http://mock".into(),
+            model: "mock".into(),
+            max_parallel: 1,
+            workspace_dir: dir.join("ws"),
+            repo_dir: dir.clone(),
+            request_timeout_secs: 5,
+            mock: true,
+        };
+        let task = DevTask {
+            title: "test task".into(),
+            description: "mock".into(),
+            verify: None,
+            priority: 1,
+            skip: false,
+        };
+        let llm: std::sync::Arc<dyn crate::llm::Llm> =
+            std::sync::Arc::new(CapturingLlm {
+                users: std::sync::Mutex::new(Vec::new()),
+            });
+        let _ = repair(&llm, &cfg, &task, "cargo test", "编译错误: borrow of moved value")
+            .await
+            .unwrap();
+        let users = llm.users.lock().unwrap();
+        assert!(!users.is_empty(), "repair 应调用 LLM");
+        let prompt = &users[0];
+        assert!(
+            prompt.contains("fn main()"),
+            "repair 提示应包含改动文件当前内容"
+        );
+        assert!(
+            prompt.contains("let y = x"),
+            "repair 提示应包含改动后的真实代码行"
+        );
+        assert!(
+            prompt.contains("borrow of moved value"),
+            "repair 提示应包含真实报错"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

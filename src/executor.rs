@@ -401,7 +401,7 @@ async fn run_edit_step(
     ));
     if let Some(p) = &step.path {
         if let Ok(content) = std::fs::read_to_string(cfg.repo_dir.join(p)) {
-            user.push_str(&format!("\n== 当前文件内容: {p} ==\n{}\n", clip(&content, 12_000)));
+            user.push_str(&format!("\n== 当前文件内容: {p} ==\n{}\n", clip(&content, 20_000)));
         }
     }
     if !step.needs.is_empty() {
