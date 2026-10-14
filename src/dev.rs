@@ -174,10 +174,16 @@ fn parse_generated_tasks(arr: Vec<serde_json::Value>, n: usize) -> Result<Vec<De
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DevState {
+    // 各字段带 #[serde(default)]:手写/外部/旧版本 state.json 漏字段时取默认值,不致解析失败而丢进度
+    #[serde(default)]
     pub done: Vec<String>,
+    #[serde(default)]
     pub failed: Vec<String>,
+    #[serde(default)]
     pub llm_calls: u64,
+    #[serde(default)]
     pub started_at: Option<String>,
+    #[serde(default)]
     pub history: Vec<String>,
 }
 
@@ -186,10 +192,24 @@ fn state_path(repo: &Path) -> std::path::PathBuf {
 }
 
 fn load_state(repo: &Path) -> DevState {
-    std::fs::read_to_string(state_path(repo))
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default()
+    let path = state_path(repo);
+    if !path.exists() {
+        return DevState::default(); // 全新开始:无 state 文件,直接空(不重试)
+    }
+    // FUSE(NTFS)上偶发瞬读失败/读滞后:文件确在却读不到时重试,避免把真实进度误判为空
+    // (曾于 2026-10-14 复现:state.json 确有 done=10,循环却读到空,导致重做已完成任务、烧 token)
+    for attempt in 0..8 {
+        match std::fs::read_to_string(&path) {
+            Ok(t) => match serde_json::from_str::<DevState>(&t) {
+                Ok(s) => return s,
+                Err(e) => eprintln!("[dev] state 解析失败(第 {} 次): {}", attempt + 1, e),
+            },
+            Err(e) => eprintln!("[dev] state 读取失败(第 {} 次): {}", attempt + 1, e),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(400));
+    }
+    eprintln!("[dev] 警告: state 文件存在但多次读取失败,回退空状态(将重做已完成任务)");
+    DevState::default()
 }
 
 fn save_state(repo: &Path, s: &DevState) -> Result<()> {
