@@ -91,7 +91,8 @@ pub fn parse_status(workspace_dir: &Path) -> anyhow::Result<StatusSummary> {
                     .clone()
                     .unwrap_or_else(|| last_step.output_preview.clone());
                 let content = truncate_chars(&content, 80);
-                recent_logs.push(format!("[{}] {}: {}", record.id, last_step.name, content));
+                let usage = format_usage(record.token_usage, record.char_usage);
+                recent_logs.push(format!("[{}] {}: {} {}", record.id, last_step.name, content, usage));
             }
         }
     }
@@ -181,6 +182,16 @@ fn truncate_chars(input: &str, max_chars: usize) -> String {
     }
 }
 
+fn format_usage(token_usage: Option<u64>, char_usage: Option<u64>) -> String {
+    let tokens = token_usage
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "N/A".to_string());
+    let chars = char_usage
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "N/A".to_string());
+    format!("(tokens: {}, chars: {})", tokens, chars)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,6 +237,8 @@ mod tests {
             model: "test-model".to_string(),
             mock: false,
             steps,
+            token_usage: None,
+            char_usage: None,
         }
     }
 
@@ -317,6 +330,91 @@ mod tests {
         assert!(result.is_err());
         let err = format!("{}", result.unwrap_err());
         assert!(err.contains("解析运行历史失败"));
+
+        fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn deserialize_old_run_record_without_usage_fields_is_ok() {
+        let json = serde_json::json!({
+            "id": "old-run",
+            "goal": "test goal",
+            "created": "2024-01-01T00:00:00Z",
+            "model": "test-model",
+            "mock": false,
+            "steps": []
+        });
+        let record: RunRecord = serde_json::from_value(json).unwrap();
+        assert_eq!(record.token_usage, None);
+        assert_eq!(record.char_usage, None);
+    }
+
+    #[test]
+    fn format_status_shows_token_and_char_usage() {
+        let workspace = test_workspace("usage");
+        let json = serde_json::json!({
+            "id": "run-with-usage",
+            "goal": "test goal",
+            "created": "2024-01-01T00:00:00Z",
+            "model": "test-model",
+            "mock": false,
+            "token_usage": 123,
+            "char_usage": 456,
+            "steps": [
+                {
+                    "id": 1,
+                    "name": "plan",
+                    "agent": "test-agent",
+                    "skill": "test-skill",
+                    "kind": "test-kind",
+                    "ok": true,
+                    "error": null,
+                    "seconds": 0.1,
+                    "output_preview": "planned"
+                }
+            ]
+        });
+        let path = workspace.join("runs").join("run-with-usage.json");
+        fs::write(&path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+
+        let summary = parse_status(&workspace).unwrap();
+        let rendered = format_status(&summary);
+        assert!(rendered.contains("tokens: 123"));
+        assert!(rendered.contains("chars: 456"));
+
+        fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn format_status_shows_na_for_missing_usage() {
+        let workspace = test_workspace("missing-usage");
+        let json = serde_json::json!({
+            "id": "run-old",
+            "goal": "test goal",
+            "created": "2024-01-01T00:00:00Z",
+            "model": "test-model",
+            "mock": false,
+            "steps": [
+                {
+                    "id": 1,
+                    "name": "plan",
+                    "agent": "test-agent",
+                    "skill": "test-skill",
+                    "kind": "test-kind",
+                    "ok": true,
+                    "error": null,
+                    "seconds": 0.1,
+                    "output_preview": "planned"
+                }
+            ]
+        });
+        let path = workspace.join("runs").join("run-old.json");
+        fs::write(&path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+
+        let summary = parse_status(&workspace).unwrap();
+        let rendered = format_status(&summary);
+        assert!(rendered.contains("tokens: N/A"));
+        assert!(rendered.contains("chars: N/A"));
 
         fs::remove_dir_all(&workspace).unwrap();
     }

@@ -22,6 +22,8 @@ pub struct StepResult {
     pub ok: bool,
     pub error: Option<String>,
     pub seconds: f64,
+    pub token_usage: Option<u64>,
+    pub char_usage: Option<u64>,
 }
 
 struct StepOutcome {
@@ -30,6 +32,8 @@ struct StepOutcome {
     error: Option<String>,
     seconds: f64,
     output: Option<String>,
+    token_usage: Option<u64>,
+    char_usage: Option<u64>,
 }
 
 pub struct Executor {
@@ -132,6 +136,8 @@ impl Executor {
                         ok: false,
                         error: Some(format!("跳过: 依赖步骤 {} 失败", n)),
                         seconds: 0.0,
+                        token_usage: None,
+                        char_usage: None,
                     });
                     failed.insert(s.id);
                     done.insert(s.id);
@@ -179,6 +185,8 @@ impl Executor {
                         ok: true,
                         error: None,
                         seconds: o.seconds,
+                        token_usage: o.token_usage,
+                        char_usage: o.char_usage,
                     });
                 } else {
                     if let Some(e) = &o.error {
@@ -190,6 +198,8 @@ impl Executor {
                         ok: false,
                         error: o.error,
                         seconds: o.seconds,
+                        token_usage: o.token_usage,
+                        char_usage: o.char_usage,
                     });
                 }
                 done.insert(o.id);
@@ -243,6 +253,8 @@ impl Executor {
                     error: Some(format!("未知专家: {}", step.agent)),
                     seconds: 0.0,
                     output: None,
+                    token_usage: None,
+                    char_usage: None,
                 }
             }
         };
@@ -255,19 +267,26 @@ impl Executor {
         };
         let seconds = start.elapsed().as_secs_f64();
         match result {
-            Ok(text) => StepOutcome {
-                id: step.id,
-                ok: true,
-                error: None,
-                seconds,
-                output: Some(text),
-            },
+            Ok(text) => {
+                let char_usage = Some(text.chars().count() as u64);
+                StepOutcome {
+                    id: step.id,
+                    ok: true,
+                    error: None,
+                    seconds,
+                    output: Some(text),
+                    token_usage: None,
+                    char_usage,
+                }
+            }
             Err(e) => StepOutcome {
                 id: step.id,
                 ok: false,
                 error: Some(e.to_string()),
                 seconds,
                 output: None,
+                token_usage: None,
+                char_usage: None,
             },
         }
     }

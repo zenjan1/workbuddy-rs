@@ -571,6 +571,8 @@ pub async fn run_dev_loop(
         let ws = crate::workspace::Workspace::create_new(&cfg.workspace_dir)?;
         let ws = Arc::new(ws);
         let mut run = crate::workspace::RunRecord {
+            token_usage: None,
+            char_usage: None,
             id: ws.dir.file_name().unwrap().to_string_lossy().to_string(),
             goal: goal.clone(),
             created: now_iso(),

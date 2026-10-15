@@ -26,6 +26,10 @@ pub struct StepRecord {
 
 #[derive(Serialize, Deserialize)]
 pub struct RunRecord {
+    #[serde(default)]
+    pub token_usage: Option<u64>,
+    #[serde(default)]
+    pub char_usage: Option<u64>,
     pub id: String,
     pub goal: String,
     pub created: String,
@@ -239,6 +243,8 @@ mod tests {
         };
         let ws = Workspace::create_new(&cfg.workspace_dir).unwrap();
         let mut run = RunRecord {
+            token_usage: None,
+            char_usage: None,
             id: ws.dir.file_name().unwrap().to_string_lossy().to_string(),
             goal: "测试".into(),
             created: "now".into(),

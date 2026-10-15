@@ -412,6 +412,8 @@ async fn run_task(cfg: Config, goal: &str) -> Result<()> {
     // 工作区
     let ws = Workspace::create_new(&cfg.workspace_dir)?;
     let mut run = RunRecord {
+        token_usage: None,
+        char_usage: None,
         id: ws.dir.file_name().unwrap().to_string_lossy().to_string(),
         goal: goal.to_string(),
         created: now_iso(),
