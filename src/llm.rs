@@ -64,56 +64,101 @@ impl Llm for OpenAiCompat {
                 ]
             });
 
-            for attempt in 0..=1 {
-                let resp = self
+            // 校园网到 DeepSeek 不稳定:读响应体失败/超时/连接重置时有发生。
+            // 旧逻辑只对 429/5xx 状态码重试一次,传输错误直接返回 → 网络一抖整轮 LLM 调用全废。
+            // 现在:任何错误(传输失败 / 可重试状态码 / 解析失败 / 内容为空)都重试,指数退避,最多 5 次。
+            const MAX_ATTEMPTS: u32 = 5;
+            let mut last_err = String::new();
+            for attempt in 0..MAX_ATTEMPTS {
+                if attempt > 0 {
+                    let backoff = std::cmp::min(60u64, 1u64 << attempt);
+                    eprintln!("[llm] 第 {attempt} 次重试,等待 {backoff}s...");
+                    tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+                }
+                // 1) 发送(传输错误可重试)
+                let resp = match self
                     .client
                     .post(&url)
                     .bearer_auth(&key)
                     .json(&payload)
                     .send()
                     .await
-                    .with_context(|| format!("LLM 请求失败: {url}"))?;
-
-                let status = resp.status();
-                if attempt == 0 && matches!(status.as_u16(), 429 | 500 | 502 | 503) {
-                    // 可重试状态码:429/5xx,等待 3 秒后重试一次
-                    drop(resp);
-                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                    continue;
-                }
-
-                let text = resp.text().await.context("读取响应体失败")?;
-                if status.is_success() {
-                    let v: serde_json::Value =
-                        serde_json::from_str(&text).context("解析 LLM 响应 JSON 失败")?;
-                    // 推理模型(如 deepseek-v4-pro):content 可能为空而答案在 reasoning_content;
-                    // 优先取 content,空则回退 reasoning_content,避免空内容直接报错导致任务失败。
-                    let content = v
-                        .pointer("/choices/0/message/content")
-                        .and_then(|c| c.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    if !content.trim().is_empty() {
-                        return Ok(content);
-                    }
-                    let reasoning = v
-                        .pointer("/choices/0/message/reasoning_content")
-                        .and_then(|c| c.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    if !reasoning.trim().is_empty() {
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        last_err = format!("LLM 请求失败(传输): {e}");
                         eprintln!(
-                            "[llm] content 为空,回退使用 reasoning_content({} 字符)",
-                            reasoning.len()
+                            "[llm] 第 {} 次请求失败: {}",
+                            attempt + 1,
+                            clip(&last_err, 120)
                         );
-                        return Ok(reasoning);
+                        continue;
                     }
-                    return Err(anyhow::anyhow!("响应中 content 与 reasoning_content 均为空"));
+                };
+                let status = resp.status();
+                // 2) 读响应体(传输错误可重试)
+                let text = match resp.text().await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        last_err = format!("读取响应体失败(传输): {e}");
+                        eprintln!(
+                            "[llm] 第 {} 次读体失败: {}",
+                            attempt + 1,
+                            clip(&last_err, 120)
+                        );
+                        continue;
+                    }
+                };
+                // 3) 非 2xx:429/5xx 可重试,其余(4xx 业务错误,如 401/400)直接返回
+                if !status.is_success() {
+                    if matches!(status.as_u16(), 429 | 500 | 502 | 503) {
+                        last_err = format!("LLM API 返回 {status}: {}", clip(&text, 200));
+                        eprintln!("[llm] 第 {} 次可重试状态码 {status}", attempt + 1);
+                        continue;
+                    }
+                    bail!("LLM API 返回 {}: {}", status, clip(&text, 300));
                 }
-
-                bail!("LLM API 返回 {}: {}", status, clip(&text, 300));
+                // 4) 解析 JSON(解析错误可重试)
+                let v: serde_json::Value = match serde_json::from_str(&text) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        last_err = format!("解析 LLM 响应 JSON 失败: {e}");
+                        eprintln!(
+                            "[llm] 第 {} 次解析失败: {}",
+                            attempt + 1,
+                            clip(&last_err, 120)
+                        );
+                        continue;
+                    }
+                };
+                // 5) 取 content,空则回退 reasoning_content(内容空可重试)
+                let content = v
+                    .pointer("/choices/0/message/content")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if !content.trim().is_empty() {
+                    return Ok(content);
+                }
+                let reasoning = v
+                    .pointer("/choices/0/message/reasoning_content")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if !reasoning.trim().is_empty() {
+                    eprintln!(
+                        "[llm] content 为空,回退使用 reasoning_content({} 字符)",
+                        reasoning.len()
+                    );
+                    return Ok(reasoning);
+                }
+                last_err = "响应中 content 与 reasoning_content 均为空".to_string();
+                eprintln!("[llm] 第 {} 次内容为空,重试...", attempt + 1);
             }
-            unreachable!("重试循环不应正常结束")
+            bail!(
+                "LLM 调用失败(已重试 {MAX_ATTEMPTS} 次): {}",
+                clip(&last_err, 200)
+            )
         })
     }
 }

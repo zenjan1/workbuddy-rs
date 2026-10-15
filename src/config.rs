@@ -72,7 +72,7 @@ impl Config {
             max_parallel: file.max_parallel.unwrap_or(4).max(1),
             workspace_dir,
             repo_dir,
-            request_timeout_secs: file.request_timeout_secs.unwrap_or(120),
+            request_timeout_secs: file.request_timeout_secs.unwrap_or(300),
             price: file.price.unwrap_or(0.0),
             max_budget: file.max_budget.unwrap_or(0.0),
             mock: false,
