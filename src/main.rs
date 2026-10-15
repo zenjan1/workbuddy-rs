@@ -69,6 +69,11 @@ mod serve {
     }
 }
 mod status;
+mod tui {
+    pub fn run(_workspace_dir: &std::path::Path) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
 mod review {
     use super::*;
     use anyhow::anyhow;
@@ -209,6 +214,8 @@ enum Cmd {
     Undo,
     /// 查看 workspace 运行状态(只读)
     Status,
+    /// 启动 TUI 界面查看 backlog(只读)
+    Tui,
     /// 启动只读 HTTP 服务
     Serve {
         /// 监听地址,如 127.0.0.1:8080(默认 127.0.0.1:0 自动分配端口)
@@ -350,6 +357,10 @@ async fn main() -> Result<()> {
             status::run(&cfg.workspace_dir)
                 .map_err(|e| anyhow::anyhow!("查看 workspace 运行状态失败: {e:#}"))?;
             Ok(())
+        }
+        Cmd::Tui => {
+            tui::run(&cfg.workspace_dir)
+                .map_err(|e| anyhow::anyhow!("启动 TUI 失败: {e:#}"))
         }
         Cmd::Serve { listen } => {
             let addr: std::net::SocketAddr = listen
