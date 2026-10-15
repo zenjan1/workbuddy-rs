@@ -70,6 +70,17 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum ConfigAction {
+    /// 设置配置项
+    Set {
+        /// 配置键
+        key: String,
+        /// 配置值
+        value: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum Cmd {
     /// 规划并执行一个任务
     Run {
@@ -97,8 +108,11 @@ enum Cmd {
     Agents,
     /// 提交前自评审(只读)
     Review,
-    /// 打印当前生效配置(隐藏 key)
-    Config,
+    /// 查看或修改当前生效配置
+    Config {
+        #[command(subcommand)]
+        action: Option<ConfigAction>,
+    },
     /// 校验配置(读取 config.toml 或默认配置)
     Validate,
     /// 探测 LLM 端点健康状态
@@ -172,10 +186,25 @@ async fn main() -> Result<()> {
         Cmd::Show { id } => cmd_show(cfg, &id),
         Cmd::Agents => cmd_agents(),
         Cmd::Review => review::review(cfg).await,
-        Cmd::Config => {
-            println!("{}", cfg.summary());
-            Ok(())
-        }
+        Cmd::Config { action } => match action {
+            None => {
+                println!("{}", cfg.summary());
+                Ok(())
+            }
+            Some(ConfigAction::Set { key, value }) => {
+                if key.trim().is_empty() {
+                    return Err(anyhow::anyhow!("配置键不能为空"));
+                }
+                if value.trim().is_empty() {
+                    return Err(anyhow::anyhow!("配置值不能为空"));
+                }
+                Config::set_config_value(&key, &value)?;
+                let cfg = Config::load()?;
+                println!("已更新配置：{} = {}", key, value);
+                println!("{}", cfg.summary());
+                Ok(())
+            }
+        },
         Cmd::Validate => unreachable!("Validate 已在 main 入口处理"),
         Cmd::Health => cmd_health(cfg).await,
         Cmd::Dev {

@@ -123,6 +123,73 @@ impl Config {
         Ok(FileConfig::default())
     }
 
+    pub fn set_config_value(key: &str, value: &str) -> Result<()> {
+        let path = Self::config_file_path();
+        Self::update_config_file(&path, key, value)
+    }
+
+    fn update_config_file(path: &Path, key: &str, value: &str) -> Result<()> {
+        let mut doc: toml::Value = if path.exists() {
+            let text = std::fs::read_to_string(path)
+                .with_context(|| format!("读取配置文件失败: {}", path.display()))?;
+            toml::from_str(&text)
+                .with_context(|| format!("解析配置文件失败: {}", path.display()))?
+        } else {
+            toml::Value::Table(Default::default())
+        };
+
+        let table = doc.as_table_mut().context("配置文件根节点必须是表")?;
+        let parsed = Self::parse_value_for_key(key, value)?;
+        table.insert(key.to_string(), parsed);
+
+        let text = toml::to_string_pretty(&doc)?;
+        std::fs::write(path, text)
+            .with_context(|| format!("写入配置文件失败: {}", path.display()))?;
+        Ok(())
+    }
+
+    fn parse_value_for_key(key: &str, raw: &str) -> Result<toml::Value> {
+        let value = match key {
+            "max_budget" | "price" => {
+                let n: f64 = raw.parse().with_context(|| format!("{key} 需要是数字"))?;
+                toml::Value::Float(n)
+            }
+            "max_parallel" | "request_timeout_secs" | "webhook_retry" | "webhook_timeout_secs" => {
+                let n: i64 = raw.parse().with_context(|| format!("{key} 需要是整数"))?;
+                toml::Value::Integer(n)
+            }
+            "api_key" | "base_url" | "model" | "workspace_dir" | "repo_dir" | "webhook_url" => {
+                toml::Value::String(raw.to_string())
+            }
+            _ => match raw {
+                "true" => toml::Value::Boolean(true),
+                "false" => toml::Value::Boolean(false),
+                _ => {
+                    if let Ok(n) = raw.parse::<i64>() {
+                        toml::Value::Integer(n)
+                    } else if let Ok(f) = raw.parse::<f64>() {
+                        toml::Value::Float(f)
+                    } else {
+                        toml::Value::String(raw.to_string())
+                    }
+                }
+            },
+        };
+        Ok(value)
+    }
+
+    fn config_file_path() -> PathBuf {
+        for path in Self::config_candidates() {
+            if path.exists() {
+                return path;
+            }
+        }
+        Self::config_candidates()
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| PathBuf::from("workbuddy.toml"))
+    }
+
     fn config_candidates() -> Vec<PathBuf> {
         let mut v = vec![PathBuf::from("workbuddy.toml")];
         if let Ok(xdg) = env::var("XDG_CONFIG_HOME") {
@@ -278,6 +345,86 @@ mod tests {
         assert!(errors.iter().any(|e| e.contains("model")));
         assert!(errors.iter().any(|e| e.contains("api_key")));
         assert!(errors.iter().any(|e| e.contains("workspace_dir")));
+    }
+
+    fn temp_config_path(test_name: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        path.push(format!("workbuddy-test-{}-{}.toml", test_name, unique));
+        path
+    }
+
+    #[test]
+    fn update_config_file_writes_new_key() {
+        let path = temp_config_path("new_key");
+        let initial = "model = \"qwen-plus\"\n";
+        std::fs::write(&path, initial).unwrap();
+
+        Config::update_config_file(&path, "max_budget", "123.45").unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let doc: toml::Value = toml::from_str(&text).unwrap();
+        assert_eq!(doc["max_budget"].as_float(), Some(123.45));
+        assert_eq!(doc["model"].as_str(), Some("qwen-plus"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn update_config_file_updates_existing_key() {
+        let path = temp_config_path("update_key");
+        let initial = "max_budget = 100.0\nmodel = \"qwen-plus\"\n";
+        std::fs::write(&path, initial).unwrap();
+
+        Config::update_config_file(&path, "max_budget", "200.5").unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let doc: toml::Value = toml::from_str(&text).unwrap();
+        assert_eq!(doc["max_budget"].as_float(), Some(200.5));
+        assert_eq!(doc["model"].as_str(), Some("qwen-plus"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn update_config_file_round_trip_read_consistent() {
+        let path = temp_config_path("round_trip");
+        std::fs::write(&path, "base_url = \"https://example.com/v1\"\n").unwrap();
+
+        Config::update_config_file(&path, "max_budget", "42.0").unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let loaded: FileConfig = toml::from_str(&text).unwrap();
+        assert_eq!(loaded.max_budget, Some(42.0));
+        assert_eq!(loaded.base_url.as_deref(), Some("https://example.com/v1"));
+
+        let reloaded: FileConfig = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(reloaded.max_budget, Some(42.0));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn update_config_file_does_not_clobber_other_keys() {
+        let path = temp_config_path("no_clobber");
+        let initial = r#"
+            api_key = "existing-key"
+            model = "qwen-max"
+            max_parallel = 2
+            some_unknown = "keepme"
+        "#;
+        std::fs::write(&path, initial).unwrap();
+
+        Config::update_config_file(&path, "max_budget", "999.0").unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let doc: toml::Value = toml::from_str(&text).unwrap();
+        assert_eq!(doc["max_budget"].as_float(), Some(999.0));
+        assert_eq!(doc["api_key"].as_str(), Some("existing-key"));
+        assert_eq!(doc["model"].as_str(), Some("qwen-max"));
+        assert_eq!(doc["max_parallel"].as_integer(), Some(2));
+        assert_eq!(doc["some_unknown"].as_str(), Some("keepme"));
+        std::fs::remove_file(&path).ok();
     }
 }
 
