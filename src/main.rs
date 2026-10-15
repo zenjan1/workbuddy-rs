@@ -352,12 +352,8 @@ async fn main() -> Result<()> {
             println!("{output}");
             Ok(())
         }
-        Cmd::Status => {
-            // 注册 status 子命令
-            status::run(&cfg.workspace_dir)
-                .map_err(|e| anyhow::anyhow!("查看 workspace 运行状态失败: {e:#}"))?;
-            Ok(())
-        }
+        Cmd::Status => status::run(&cfg.workspace_dir)
+            .map_err(|e| anyhow::anyhow!("查看 workspace 运行状态失败: {e:#}")),
         Cmd::Tui => {
             tui::run(&cfg.workspace_dir)
                 .map_err(|e| anyhow::anyhow!("启动 TUI 失败: {e:#}"))

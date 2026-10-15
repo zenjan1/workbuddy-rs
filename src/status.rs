@@ -26,14 +26,6 @@ pub struct StatusSummary {
 }
 
 pub fn run(workspace_dir: &Path) -> Result<(), Box<dyn Error>> {
-    let status_path = workspace_dir.join("status.json");
-    if !status_path.exists() {
-        println!(
-            "No status file found; supervisor is not running or has no recent runs."
-        );
-        return Ok(());
-    }
-
     let summary = parse_status(workspace_dir)?;
     println!("{}", format_status(&summary));
     Ok(())
