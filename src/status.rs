@@ -67,7 +67,6 @@ pub fn parse_status(workspace_dir: &Path) -> anyhow::Result<StatusSummary> {
     let supervisor_running = read_supervisor_running(workspace_dir)?;
     let pid = read_supervisor_pid(workspace_dir)?;
     let cost_per_1k_tokens = read_cost_per_1k_tokens(workspace_dir);
-
     let history = load_history(workspace_dir, cost_per_1k_tokens)?;
     let mut summary = StatusSummary::from_history(&history);
     summary.supervisor_running = supervisor_running;

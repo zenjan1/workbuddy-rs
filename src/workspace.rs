@@ -670,3 +670,154 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
+
+/// 工作区运行状态摘要,供 status 子命令读取。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunSummary {
+    pub supervisor_running: bool,
+    pub completed: usize,
+    pub failed: usize,
+    pub recent_logs: Vec<String>,
+}
+
+/// 读取工作区运行历史,统计已完成/失败任务数,并提取最近的失败日志摘要。
+/// 只读文件系统,不修改任何状态。
+pub fn get_run_summary(workspace_root: &Path) -> Result<RunSummary> {
+    let supervisor_running = workspace_root.join("supervisor.lock").exists()
+        || workspace_root.join(".lock").exists()
+        || workspace_root.join("lock").exists();
+
+    let runs = Workspace::root(workspace_root);
+    let mut completed = 0usize;
+    let mut failed = 0usize;
+    let mut recent_logs = Vec::new();
+
+    for run in runs {
+        if run.steps.is_empty() {
+            continue;
+        }
+        let all_ok = run.steps.iter().all(|s| s.ok);
+        if all_ok {
+            completed += 1;
+            continue;
+        }
+
+        failed += 1;
+        for step in run.steps.iter().rev() {
+            if !step.ok {
+                let summary = match step.error.as_deref() {
+                    Some(err) if !err.trim().is_empty() => {
+                        format!("[{}] step {} {}: {}", run.id, step.id, step.name, err)
+                    }
+                    _ => format!("[{}] step {} {} failed", run.id, step.id, step.name),
+                };
+                recent_logs.push(summary);
+                if recent_logs.len() >= 5 {
+                    return Ok(RunSummary {
+                        supervisor_running,
+                        completed,
+                        failed,
+                        recent_logs,
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(RunSummary {
+        supervisor_running,
+        completed,
+        failed,
+        recent_logs,
+    })
+}
+
+#[cfg(test)]
+mod run_summary_tests {
+    use super::*;
+
+    fn make_step(id: usize, name: &str, ok: bool, error: Option<&str>) -> StepRecord {
+        StepRecord {
+            id,
+            name: name.to_string(),
+            agent: "writer".to_string(),
+            skill: "report-writing".to_string(),
+            kind: "llm".to_string(),
+            ok,
+            error: error.map(|s| s.to_string()),
+            seconds: 0.1,
+            output_preview: String::new(),
+        }
+    }
+
+    fn write_run(root: &Path, id: &str, goal: &str, steps: Vec<StepRecord>) {
+        let dir = root.join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = RunRecord {
+            token_usage: None,
+            char_usage: None,
+            id: id.to_string(),
+            goal: goal.to_string(),
+            created: "now".to_string(),
+            model: "mock".to_string(),
+            mock: true,
+            steps,
+        };
+        std::fs::write(dir.join("meta.json"), serde_json::to_string(&run).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn get_run_summary_reads_history_and_recent_logs() {
+        let tmp = std::env::temp_dir().join(format!("wb-summary-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        write_run(&tmp, "run-ok-a", "成功任务 A", vec![
+            make_step(1, "a", true, None),
+        ]);
+        write_run(&tmp, "run-ok-b", "成功任务 B", vec![
+            make_step(1, "b", true, None),
+        ]);
+
+        write_run(&tmp, "run-fail-a", "失败任务 A", vec![
+            make_step(1, "step1", true, None),
+            make_step(2, "step2", false, Some("boom")),
+        ]);
+        write_run(&tmp, "run-fail-b", "失败任务 B", vec![
+            make_step(1, "step1", false, Some("bad")),
+        ]);
+        write_run(&tmp, "run-fail-c", "失败任务 C", vec![
+            make_step(1, "s1", false, Some("e1")),
+            make_step(2, "s2", false, Some("e2")),
+            make_step(3, "s3", false, Some("e3")),
+        ]);
+
+        std::fs::write(tmp.join("supervisor.lock"), "").unwrap();
+
+        let summary = get_run_summary(&tmp).unwrap();
+        assert!(summary.supervisor_running);
+        assert_eq!(summary.completed, 2);
+        assert_eq!(summary.failed, 3);
+        assert_eq!(summary.recent_logs.len(), 5);
+        assert!(summary.recent_logs.iter().any(|l| l.contains("boom")));
+        assert!(summary.recent_logs.iter().any(|l| l.contains("bad")));
+        assert!(summary.recent_logs.iter().any(|l| l.contains("e3")));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn get_run_summary_handles_empty_workspace() {
+        let tmp = std::env::temp_dir().join(format!("wb-summary-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let summary = get_run_summary(&tmp).unwrap();
+        assert!(!summary.supervisor_running);
+        assert_eq!(summary.completed, 0);
+        assert_eq!(summary.failed, 0);
+        assert!(summary.recent_logs.is_empty());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+}
