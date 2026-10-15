@@ -466,6 +466,7 @@ mod tests {
             repo_dir: tmp.clone(),
             request_timeout_secs: 1,
             mock: true,
+            webhook_enabled: false,
             webhook_url: None,
             webhook_retry: 0,
             webhook_timeout_secs: 1,

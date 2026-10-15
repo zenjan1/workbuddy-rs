@@ -24,6 +24,7 @@ toml_edit = "0.22"
 ratatui = "0.29.0"
 crossterm = "0.28.1"
 tempfile = "3"
+ureq = { version = "2", features = ["tls"] }
 tiny_http = "0.12"
 
 [profile.release]
