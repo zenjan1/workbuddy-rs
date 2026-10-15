@@ -60,6 +60,7 @@ use clap::{Parser, Subcommand};
 use config::Config;
 use executor::Executor;
 use llm::{Llm, MockLlm, OpenAiCompat};
+use utils::resolve_task_id;
 use workspace::{RunRecord, StepRecord, Workspace};
 
 #[derive(Parser)]
@@ -515,7 +516,8 @@ fn cmd_list(cfg: Config, since: Option<&str>) -> Result<()> {
 
 fn cmd_show(cfg: Config, id: &str) -> Result<()> {
     let runs = Workspace::root(&cfg.workspace_dir);
-    let idx = match workspace::resolve_task_id(id, &runs) {
+    let titles: Vec<String> = runs.iter().map(|r| r.goal.clone()).collect();
+    let idx = match resolve_task_id(id, &titles) {
         Ok(idx) => idx,
         Err(e) => {
             anyhow::bail!("{} 提示：若任务标题存在冲突，请使用任务索引（数字 id）引用任务。", e);

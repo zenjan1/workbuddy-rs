@@ -161,7 +161,7 @@ mod tests {
         assert_eq!(parse_task_id("My Task"), "my-task");
     }
 }
-pub fn resolve_task_id(workspace_dir: &std::path::Path, input: &str) -> anyhow::Result<String> {
+pub fn resolve_task_id_from_workspace(workspace_dir: &std::path::Path, input: &str) -> anyhow::Result<String> {
     let runs = crate::workspace::Workspace::root(workspace_dir);
     if runs.is_empty() {
         return Err(anyhow::anyhow!("workspace 中没有任务"));
@@ -230,4 +230,110 @@ fn task_slugify(input: &str) -> String {
         }
     }
     out
+}
+
+pub fn resolve_task_id(input: &str, tasks: &[String]) -> Result<usize, String> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err("task selector 不能为空".to_string());
+    }
+
+    if input.chars().all(|c| c.is_ascii_digit()) {
+        match input.parse::<usize>() {
+            Ok(idx) if idx < tasks.len() => return Ok(idx),
+            Ok(idx) => return Err(format!("task index {} out of range; only {} task(s) available", idx, tasks.len())),
+            Err(_) => return Err(format!("invalid numeric task selector: '{}'", input)),
+        }
+    }
+
+    let query = input.to_lowercase();
+
+    for (idx, title) in tasks.iter().enumerate() {
+        if title.to_lowercase() == query {
+            return Ok(idx);
+        }
+    }
+
+    let mut matches: Vec<usize> = Vec::new();
+    for (idx, title) in tasks.iter().enumerate() {
+        if title.to_lowercase().contains(&query) {
+            matches.push(idx);
+        }
+    }
+
+    match matches.len() {
+        0 => Err(format!("no task found matching '{input}'")),
+        1 => Ok(matches[0]),
+        _ => {
+            let mut candidates = String::new();
+            for (i, &idx) in matches.iter().enumerate() {
+                if i > 0 {
+                    candidates.push('\n');
+                }
+                candidates.push_str(&format!("  [{}] {}", idx, tasks[idx]));
+            }
+            Err(format!("multiple tasks match '{input}':\n{}", candidates))
+        }
+    }
+}
+
+#[cfg(test)]
+mod resolve_task_id_tests {
+    use super::*;
+
+    fn sample_titles() -> Vec<String> {
+        vec![
+            "Write report".to_string(),
+            "Fix login bug".to_string(),
+            "Deploy backend".to_string(),
+            "Fix login bug on mobile".to_string(),
+        ]
+    }
+
+    #[test]
+    fn numeric_index_valid_returns_index() {
+        let tasks = sample_titles();
+        assert_eq!(resolve_task_id("1", &tasks), Ok(1));
+        assert_eq!(resolve_task_id("3", &tasks), Ok(3));
+        assert_eq!(resolve_task_id(" 2 ", &tasks), Ok(2));
+    }
+
+    #[test]
+    fn numeric_index_out_of_range_errors() {
+        let tasks = sample_titles();
+        assert!(resolve_task_id("4", &tasks).is_err());
+        assert!(resolve_task_id("100", &tasks).is_err());
+    }
+
+    #[test]
+    fn exact_title_match_is_case_insensitive() {
+        let tasks = sample_titles();
+        assert_eq!(resolve_task_id("Write report", &tasks), Ok(0));
+        assert_eq!(resolve_task_id("write report", &tasks), Ok(0));
+        assert_eq!(resolve_task_id("DEPLOY BACKEND", &tasks), Ok(2));
+    }
+
+    #[test]
+    fn unique_title_fragment_matches_single_task() {
+        let tasks = sample_titles();
+        assert_eq!(resolve_task_id("report", &tasks), Ok(0));
+        assert_eq!(resolve_task_id("mobile", &tasks), Ok(3));
+        assert_eq!(resolve_task_id("backend", &tasks), Ok(2));
+    }
+
+    #[test]
+    fn multiple_matches_reports_candidates() {
+        let tasks = sample_titles();
+        let err = resolve_task_id("login", &tasks).unwrap_err();
+        assert!(err.contains("multiple tasks match"));
+        assert!(err.contains("[1] Fix login bug"));
+        assert!(err.contains("[3] Fix login bug on mobile"));
+    }
+
+    #[test]
+    fn no_match_returns_error() {
+        let tasks = sample_titles();
+        let err = resolve_task_id("nonexistent", &tasks).unwrap_err();
+        assert!(err.contains("no task found"));
+    }
 }
