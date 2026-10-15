@@ -93,6 +93,18 @@ impl Workspace {
         runs
     }
 
+    /// 只读列出根目录下所有运行记录。
+    /// 仅扫描目录并读取 meta.json,不创建、修改或删除任何文件。
+    pub fn list_runs(root: &Path) -> Vec<RunRecord> {
+        Workspace::root(root)
+    }
+
+    /// 只读获取指定 id 的单次运行详情。
+    /// 仅读取对应工作区的 meta.json,不执行任何写操作。
+    pub fn get_run(root: &Path, id: &str) -> Result<RunRecord> {
+        Workspace::open(root, id)?.load_record()
+    }
+
     pub fn load_record(&self) -> Result<RunRecord> {
         let meta = serde_json::from_str(&std::fs::read_to_string(self.meta_path())?)?;
         Ok(meta)

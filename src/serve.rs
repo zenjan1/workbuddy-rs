@@ -230,7 +230,7 @@ mod tests {
         let addr = server.server_addr().to_ip().expect("expected ip");
         let ws_clone = workspace_dir.clone();
         let server_thread = std::thread::spawn(move || {
-            for _ in 0..3 {
+            for _ in 0..4 {
                 let request = server.recv().unwrap();
                 handle_request(request, &ws_clone).unwrap();
             }
@@ -268,6 +268,16 @@ mod tests {
         stream.read_to_string(&mut response).unwrap();
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
         assert!(response.contains(&run_id));
+
+        // GET /runs/nonexistent
+        let mut stream = std::net::TcpStream::connect(addr).unwrap();
+        stream
+            .write_all(b"GET /runs/nonexistent HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 404 Not Found\r\n"));
+        assert!(response.contains("\"error\":\"run nonexistent not found\""));
 
         server_thread.join().unwrap();
     }
