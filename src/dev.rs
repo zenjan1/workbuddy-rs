@@ -108,7 +108,7 @@ async fn generate_tasks(llm: &Arc<dyn Llm>, repo: &Path, n: usize) -> Result<Vec
     let mut last_err = None;
     for attempt in 1..=2 {
         let raw = llm.chat(&system, &user).await.context("任务生成 LLM 调用失败")?;
-        match extract_tasks_json(&raw) {
+        match extract_tasks_json(&raw.text) {
             Ok(arr) => return parse_generated_tasks(arr, n),
             Err(e) => {
                 eprintln!("[dev] 任务生成解析失败(第 {attempt} 次): {}", clip(&e.to_string(), 120));
@@ -370,7 +370,7 @@ async fn repair(
         files_ctx
     );
     let raw = llm.chat(system, &user).await.context("修复 LLM 调用失败")?;
-    let ops = edits::parse_edits(&raw).context("解析修复 edits 失败")?;
+    let ops = edits::parse_edits(&raw.text).context("解析修复 edits 失败")?;
     if ops.is_empty() {
         return Ok(None);
     }
@@ -600,6 +600,10 @@ pub async fn run_dev_loop(
                 output_preview: String::new(),
             });
         }
+        let total_tokens: u64 = results.iter().filter_map(|r| r.token_usage).sum();
+        let total_chars: u64 = results.iter().filter_map(|r| r.char_usage).sum();
+        run.token_usage = Some(total_tokens);
+        run.char_usage = Some(total_chars);
         ws.finish_run(&mut run, &summary)?;
 
         // 验证 + 自修复
@@ -838,12 +842,12 @@ mod tests {
             _system: &'a str,
             user: &'a str,
         ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send + 'a>,
+            Box<dyn std::future::Future<Output = anyhow::Result<crate::llm::LlmResponse>> + Send + 'a>,
         > {
             self.users.lock().unwrap().push(user.to_string());
             let r = r#"{"edits":[{"path":"code.rs","old_string":"","new_string":"x","replace_all":false}]}"#
                 .to_string();
-            Box::pin(async move { Ok(r) })
+            Box::pin(async move { Ok(crate::llm::LlmResponse { text: r, usage: None }) })
         }
     }
 

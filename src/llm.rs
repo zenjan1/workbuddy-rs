@@ -14,6 +14,38 @@ pub fn estimate_cost(tokens: u64, cost_per_1k_tokens: f64) -> f64 {
     tokens as f64 * cost_per_1k_tokens / 1000.0
 }
 
+/// LLM 每次调用的 token 与字符用量。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LlmUsage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+    pub character_count: usize,
+}
+
+/// 兼容别名，便于外部使用 `Usage`。
+pub type Usage = LlmUsage;
+
+/// LLM 响应:文本 + 可选用量(若上游未提供 usage 则为 None/默认零)。
+pub struct LlmResponse {
+    pub text: String,
+    pub usage: Option<Usage>,
+}
+
+/// 从 OpenAI 兼容响应的 JSON 中提取 token 用量与字符数。
+/// 若响应没有 `usage` 字段，则四个值均记 0。
+pub fn extract_usage(v: &serde_json::Value, text: &str) -> LlmUsage {
+    match v.get("usage") {
+        Some(usage) => LlmUsage {
+            prompt_tokens: usage.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+            completion_tokens: usage.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+            total_tokens: usage.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+            character_count: text.chars().count(),
+        },
+        None => LlmUsage::default(),
+    }
+}
+
 /// LLM 抽象:OpenAI 兼容接口 + 离线 Mock。
 /// 手动装箱为 dyn Future 以保证 trait 对象安全(无需 async-trait 依赖)。
 pub trait Llm: Send + Sync {
@@ -21,7 +53,7 @@ pub trait Llm: Send + Sync {
         &'a self,
         system: &'a str,
         user: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<LlmResponse>> + Send + 'a>>;
 }
 
 /// OpenAI 兼容聊天客户端(DashScope compatible-mode 等)。
@@ -48,7 +80,7 @@ impl Llm for OpenAiCompat {
         &'a self,
         system: &'a str,
         user: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<LlmResponse>> + Send + 'a>> {
         Box::pin(async move {
             let key = self
                 .cfg
@@ -145,7 +177,11 @@ impl Llm for OpenAiCompat {
                     .unwrap_or("")
                     .to_string();
                 if !content.trim().is_empty() {
-                    return Ok(content);
+                    let usage = extract_usage(&v, &content);
+                    return Ok(LlmResponse {
+                        text: content,
+                        usage: Some(usage),
+                    });
                 }
                 let reasoning = v
                     .pointer("/choices/0/message/reasoning_content")
@@ -153,11 +189,15 @@ impl Llm for OpenAiCompat {
                     .unwrap_or("")
                     .to_string();
                 if !reasoning.trim().is_empty() {
+                    let usage = extract_usage(&v, &reasoning);
                     eprintln!(
                         "[llm] content 为空,回退使用 reasoning_content({} 字符)",
                         reasoning.len()
                     );
-                    return Ok(reasoning);
+                    return Ok(LlmResponse {
+                        text: reasoning,
+                        usage: Some(usage),
+                    });
                 }
                 last_err = "响应中 content 与 reasoning_content 均为空".to_string();
                 eprintln!("[llm] 第 {} 次内容为空,重试...", attempt + 1);
@@ -198,22 +238,22 @@ impl Llm for MockLlm {
         &'a self,
         system: &'a str,
         _user: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<LlmResponse>> + Send + 'a>> {
         Box::pin(async move {
             if system.contains("输出协议") {
-                Ok(MOCK_EDITS.to_string())
+                Ok(LlmResponse { text: MOCK_EDITS.to_string(), usage: None })
             } else if system.contains("任务生成器") {
-                Ok(MOCK_GEN_TASKS.to_string())
+                Ok(LlmResponse { text: MOCK_GEN_TASKS.to_string(), usage: None })
             } else if system.contains("开发任务") {
-                Ok(MOCK_DEV_PLAN.to_string())
+                Ok(LlmResponse { text: MOCK_DEV_PLAN.to_string(), usage: None })
             } else if system.contains("规划师") || system.contains("Planner") {
-                Ok(MOCK_PLAN.to_string())
+                Ok(LlmResponse { text: MOCK_PLAN.to_string(), usage: None })
             } else {
                 let head = _user
                     .lines()
                     .find(|l| !l.trim().is_empty())
                     .unwrap_or("done");
-                Ok(format!("[mock] {}", clip(head, 60)))
+                Ok(LlmResponse { text: format!("[mock] {}", clip(head, 60)), usage: None })
             }
         })
     }
@@ -227,8 +267,8 @@ mod tests {
     async fn mock_planner_returns_parseable_json() {
         let llm = MockLlm;
         let raw = llm.chat("你是规划师", "任务").await.unwrap();
-        assert!(raw.contains("\"steps\""));
-        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(raw.text.contains("\"steps\""));
+        let v: serde_json::Value = serde_json::from_str(&raw.text).unwrap();
         assert_eq!(v["steps"].as_array().unwrap().len(), 3);
     }
 
@@ -236,7 +276,7 @@ mod tests {
     async fn mock_step_returns_placeholder() {
         let llm = MockLlm;
         let out = llm.chat("专家", "第一步调研").await.unwrap();
-        assert!(out.starts_with("[mock]"));
+        assert!(out.text.starts_with("[mock]"));
     }
 
     #[test]

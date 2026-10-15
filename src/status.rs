@@ -106,22 +106,57 @@ fn load_history(
             .with_context(|| format!("读取运行历史失败 {}", path.display()))?;
         let record: RunRecord = serde_json::from_str(&data)
             .with_context(|| format!("解析运行历史失败 {}", path.display()))?;
+        let raw: serde_json::Value = serde_json::from_str(&data)
+            .with_context(|| format!("解析运行历史失败 {}", path.display()))?;
 
-        history.extend(history_entries_from_run(&record, cost_per_1k_tokens));
+        history.extend(history_entries_from_run(&record, &raw, cost_per_1k_tokens));
     }
 
     Ok(history)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RunUsage {
+    prompt_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
+    total_tokens: Option<u64>,
+    char_usage: Option<u64>,
+}
+
+fn usage_from_json(raw: &serde_json::Value, record: &RunRecord) -> RunUsage {
+    let read_root = |key: &str| raw.get(key).and_then(|value| value.as_u64());
+    let read_last_step = |key: &str| {
+        raw.get("steps")
+            .and_then(|steps| steps.as_array())
+            .and_then(|steps| steps.last())
+            .and_then(|step| step.get(key))
+            .and_then(|value| value.as_u64())
+    };
+
+    RunUsage {
+        prompt_tokens: read_root("prompt_tokens").or_else(|| read_last_step("prompt_tokens")),
+        completion_tokens: read_root("completion_tokens")
+            .or_else(|| read_last_step("completion_tokens")),
+        total_tokens: read_root("total_tokens")
+            .or_else(|| read_last_step("total_tokens"))
+            .or(record.token_usage),
+        char_usage: read_root("char_usage")
+            .or_else(|| read_last_step("char_usage"))
+            .or(record.char_usage),
+    }
+}
+
 fn history_entries_from_run(
     record: &RunRecord,
+    raw: &serde_json::Value,
     cost_per_1k_tokens: Option<f64>,
 ) -> Vec<HistoryEntry> {
+    let usage = usage_from_json(raw, record);
     let success = record.steps.iter().all(|step| step.ok);
-    let cost = record.token_usage.and_then(|tokens| {
+    let cost = usage.total_tokens.and_then(|tokens| {
         cost_per_1k_tokens.map(|price| price * (tokens as f64 / 1000.0))
     });
-    let usage = format_usage(record.token_usage, record.char_usage, cost);
+    let usage_text = format_usage(usage, cost);
 
     let content = if success {
         record
@@ -150,7 +185,7 @@ fn history_entries_from_run(
         state,
         record.steps.len(),
         content,
-        usage
+        usage_text
     );
 
     vec![HistoryEntry { success, log }]
@@ -260,14 +295,15 @@ fn read_cost_per_1k_tokens(workspace_dir: &Path) -> Option<f64> {
     json.get("cost_per_1k_tokens")?.as_f64()
 }
 
-fn format_usage(token_usage: Option<u64>, char_usage: Option<u64>, cost: Option<f64>) -> String {
-    let tokens = token_usage
-        .map(|v| v.to_string())
-        .unwrap_or_else(|| "N/A".to_string());
-    let chars = char_usage
-        .map(|v| v.to_string())
-        .unwrap_or_else(|| "N/A".to_string());
-    let mut result = format!("(tokens: {}, chars: {}", tokens, chars);
+fn format_usage(usage: RunUsage, cost: Option<f64>) -> String {
+    let prompt_tokens = usage.prompt_tokens.unwrap_or(0);
+    let completion_tokens = usage.completion_tokens.unwrap_or(0);
+    let total_tokens = usage.total_tokens.unwrap_or(0);
+    let chars = usage.char_usage.unwrap_or(0);
+    let mut result = format!(
+        "(prompt_tokens: {}, completion_tokens: {}, total_tokens: {}, chars: {})",
+        prompt_tokens, completion_tokens, total_tokens, chars
+    );
     if let Some(cost) = cost {
         result.push_str(&format!(", cost: ${:.4}", cost));
     }
@@ -276,7 +312,7 @@ fn format_usage(token_usage: Option<u64>, char_usage: Option<u64>, cost: Option<
 }
 
 fn split_usage(log: &str) -> (String, Option<String>) {
-    if let Some(pos) = log.rfind(" (tokens: ") {
+    if let Some(pos) = log.rfind(" (prompt_tokens: ") {
         let usage_start = pos + 1;
         if log[usage_start..].ends_with(')') {
             let usage = log[usage_start..].to_string();
@@ -582,6 +618,9 @@ mod tests {
             "mock": false,
             "token_usage": 123,
             "char_usage": 456,
+            "prompt_tokens": 60,
+            "completion_tokens": 63,
+            "total_tokens": 123,
             "steps": [
                 {
                     "id": 1,
@@ -601,7 +640,9 @@ mod tests {
 
         let summary = parse_status(&workspace).unwrap();
         let rendered = format_status(&summary);
-        assert!(rendered.contains("tokens: 123"));
+        assert!(rendered.contains("prompt_tokens: 60"));
+        assert!(rendered.contains("completion_tokens: 63"));
+        assert!(rendered.contains("total_tokens: 123"));
         assert!(rendered.contains("chars: 456"));
 
         fs::remove_dir_all(&workspace).unwrap();
@@ -635,8 +676,8 @@ mod tests {
 
         let summary = parse_status(&workspace).unwrap();
         let rendered = format_status(&summary);
-        assert!(rendered.contains("tokens: N/A"));
-        assert!(rendered.contains("chars: N/A"));
+        assert!(rendered.contains("prompt_tokens: 0"));
+        assert!(rendered.contains("chars: 0"));
 
         fs::remove_dir_all(&workspace).unwrap();
     }

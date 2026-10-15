@@ -24,7 +24,7 @@ pub async fn plan_task(llm: &Arc<dyn Llm>, goal: &str) -> Result<Plan> {
         .replace("{catalog}", &agents::catalog_text());
     let user = format!("用户目标:\n{}\n\n请输出 JSON 计划。", goal);
     let raw = llm.chat(&system, &user).await?;
-    Plan::from_llm(goal, &raw)
+    Plan::from_llm(goal, &raw.text)
 }
 
 /// dev 模式规划提示词:针对"在代码仓库里完成一个开发任务"。
@@ -58,7 +58,7 @@ pub async fn plan_dev_task(llm: &Arc<dyn Llm>, goal: &str, filelist: &str) -> Re
         .replace("{catalog}", &agents::catalog_text());
     let user = format!("开发任务(在当前代码仓库中完成):\n{}\n\n请输出 JSON 计划。", goal);
     let raw = llm.chat(&system, &user).await?;
-    let mut plan = Plan::parse_from_llm(goal, &raw)?;
+    let mut plan = Plan::parse_from_llm(goal, &raw.text)?;
     repair_dev_plan(&mut plan)?;
     Ok(plan)
 }

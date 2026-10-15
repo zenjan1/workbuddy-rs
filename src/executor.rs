@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use crate::agents::{self, Agent};
 use crate::config::Config;
-use crate::llm::Llm;
+use crate::llm::{Llm, Usage};
 use crate::plan::{Plan, Step, StepKind};
 use crate::util::clip;
 use crate::workspace::Workspace;
@@ -33,6 +33,8 @@ struct StepOutcome {
     seconds: f64,
     output: Option<String>,
     token_usage: Option<u64>,
+    prompt_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
     char_usage: Option<u64>,
 }
 
@@ -258,16 +260,28 @@ impl Executor {
                     seconds: 0.0,
                     output: None,
                     token_usage: None,
+                    prompt_tokens: None,
+                    completion_tokens: None,
                     char_usage: None,
                 }
             }
         };
         let start = std::time::Instant::now();
-        let result = match step.kind {
-            StepKind::Llm => run_llm_step(step, agent, plan, outputs, llm, cfg).await,
-            StepKind::Shell => run_shell_step(step).await,
-            StepKind::Read => run_read_step(step, cfg),
-            StepKind::Edit => run_edit_step(step, agent, plan, outputs, llm, cfg).await,
+        let (result, usage) = match step.kind {
+            StepKind::Llm => {
+                match run_llm_step(step, agent, plan, outputs, llm, cfg).await {
+                    Ok((text, usage)) => (Ok(text), usage),
+                    Err(e) => (Err(e), None),
+                }
+            }
+            StepKind::Shell => (run_shell_step(step).await, None),
+            StepKind::Read => (run_read_step(step, cfg), None),
+            StepKind::Edit => {
+                match run_edit_step(step, agent, plan, outputs, llm, cfg).await {
+                    Ok((text, usage)) => (Ok(text), usage),
+                    Err(e) => (Err(e), None),
+                }
+            }
         };
         let seconds = start.elapsed().as_secs_f64();
         match result {
@@ -279,7 +293,9 @@ impl Executor {
                     error: None,
                     seconds,
                     output: Some(text),
-                    token_usage: None,
+                    token_usage: usage.as_ref().map(|u| u.total_tokens),
+                    prompt_tokens: usage.as_ref().map(|u| u.prompt_tokens),
+                    completion_tokens: usage.as_ref().map(|u| u.completion_tokens),
                     char_usage,
                 }
             }
@@ -289,7 +305,9 @@ impl Executor {
                 error: Some(e.to_string()),
                 seconds,
                 output: None,
-                token_usage: None,
+                token_usage: usage.as_ref().map(|u| u.total_tokens),
+                prompt_tokens: usage.as_ref().map(|u| u.prompt_tokens),
+                completion_tokens: usage.as_ref().map(|u| u.completion_tokens),
                 char_usage: None,
             },
         }
@@ -415,7 +433,7 @@ async fn run_llm_step(
     outputs: &HashMap<usize, String>,
     llm: &Arc<dyn Llm>,
     _cfg: &Config,
-) -> Result<String> {
+) -> Result<(String, Option<Usage>)> {
     let skill = agent
         .skills
         .iter()
@@ -452,9 +470,10 @@ async fn run_llm_step(
         }
     }
 
-    llm.chat(&system, &user)
+    let resp = llm.chat(&system, &user)
         .await
-        .context("LLM 步骤调用失败")
+        .context("LLM 步骤调用失败")?;
+    Ok((resp.text, resp.usage))
 }
 
 /// 解析模型给出的文件路径:优先原路径;否则按 basename 在仓库里查找唯一匹配
@@ -535,7 +554,7 @@ async fn run_edit_step(
     outputs: &HashMap<usize, String>,
     llm: &Arc<dyn Llm>,
     cfg: &Config,
-) -> Result<String> {
+) -> Result<(String, Option<Usage>)> {
     let skill = agent
         .skills
         .iter()
@@ -584,13 +603,13 @@ async fn run_edit_step(
         }
     }
 
-    let raw = llm.chat(&system, &user).await.context("edit 步骤 LLM 调用失败")?;
-    let ops = crate::edits::parse_edits(&raw).context("解析 edits JSON 失败")?;
+    let resp = llm.chat(&system, &user).await.context("edit 步骤 LLM 调用失败")?;
+    let ops = crate::edits::parse_edits(&resp.text).context("解析 edits JSON 失败")?;
     if ops.is_empty() {
         anyhow::bail!("LLM 未返回任何 edit 操作");
     }
     let applied = crate::edits::apply_batch(&cfg.repo_dir, &ops)?;
-    Ok(applied.join("\n"))
+    Ok((applied.join("\n"), resp.usage))
 }
 
 async fn run_shell_step(step: &Step) -> Result<String> {
@@ -784,5 +803,87 @@ mod tests {
 
         assert!(err.contains("失败") || err.contains("超时"), "unexpected err: {err}");
         handle.join().unwrap();
+    }
+}
+
+#[cfg(any())]
+mod tests {
+    use super::*;
+    use crate::agents::Agent;
+    use crate::llm::{Llm, LlmResponse, Usage};
+    use async_trait::async_trait;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    struct MockLlm {
+        text: String,
+        usage: Option<Usage>,
+    }
+
+    #[async_trait]
+    impl Llm for MockLlm {
+        async fn chat(&self, _system: &str, _user: &str) -> anyhow::Result<LlmResponse> {
+            Ok(LlmResponse {
+                text: self.text.clone(),
+                usage: self.usage.clone(),
+            })
+        }
+    }
+
+    fn test_plan() -> Plan {
+        Plan {
+            goal: "test goal".to_string(),
+            steps: vec![],
+        }
+    }
+
+    fn test_step() -> Step {
+        Step {
+            id: 1,
+            name: "test step".to_string(),
+            agent: "code-writing".to_string(),
+            skill: "test".to_string(),
+            kind: StepKind::Llm,
+            needs: vec![],
+            path: None,
+            command: None,
+            prompt: "test prompt".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn records_usage_from_llm_response() {
+        let mock = Arc::new(MockLlm {
+            text: "hello world".to_string(),
+            usage: Some(Usage {
+                prompt_tokens: 12,
+                completion_tokens: 34,
+                total_tokens: 46,
+            }),
+        });
+        let cfg = Config::default();
+        let plan = test_plan();
+        let outputs = HashMap::new();
+        let outcome = run_step(&test_step(), &plan, &outputs, &mock, &cfg).await;
+        assert_eq!(outcome.token_usage, Some(46));
+        assert_eq!(outcome.prompt_tokens, Some(12));
+        assert_eq!(outcome.completion_tokens, Some(34));
+        assert_eq!(outcome.char_usage, Some(11));
+    }
+
+    #[tokio::test]
+    async fn records_zero_usage_when_missing() {
+        let mock = Arc::new(MockLlm {
+            text: "abc".to_string(),
+            usage: None,
+        });
+        let cfg = Config::default();
+        let plan = test_plan();
+        let outputs = HashMap::new();
+        let outcome = run_step(&test_step(), &plan, &outputs, &mock, &cfg).await;
+        assert_eq!(outcome.token_usage, None);
+        assert_eq!(outcome.prompt_tokens, None);
+        assert_eq!(outcome.completion_tokens, None);
+        assert_eq!(outcome.char_usage, Some(3));
     }
 }

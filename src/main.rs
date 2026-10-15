@@ -45,7 +45,7 @@ mod review {
             "请对以下 git diff 进行提交前的自评审,指出潜在问题:\n\n{diff}"
         );
         let output = llm.chat(system, &prompt).await?;
-        println!("{output}");
+        println!("{}", output.text);
         Ok(())
     }
 }
@@ -471,6 +471,10 @@ async fn run_task(cfg: Config, goal: &str) -> Result<()> {
             output_preview: preview,
         });
     }
+    let total_tokens: u64 = results.iter().filter_map(|r| r.token_usage).sum();
+    let total_chars: u64 = results.iter().filter_map(|r| r.char_usage).sum();
+    run.token_usage = Some(total_tokens);
+    run.char_usage = Some(total_chars);
     ws.finish_run(&mut run, &report)?;
 
     // 输出最终报告
@@ -526,7 +530,13 @@ fn cmd_show(cfg: Config, id: &str) -> Result<()> {
     let rec = runs.get(idx).ok_or_else(|| anyhow::anyhow!("任务 {} 不存在", id))?;
     let ws = Workspace::open(&cfg.workspace_dir, &rec.id)?;
     let rec = ws.load_record()?;
-    println!("# 任务 {}\n\n目标: {}\n模型: {}\n时间: {}\n\n## 步骤\n", rec.id, rec.goal, rec.model, rec.created);
+    let usage_line = match (rec.token_usage, rec.char_usage) {
+        (Some(t), Some(c)) => format!("Token 用量: {} | 字符用量: {}", t, c),
+        (Some(t), None) => format!("Token 用量: {} | 字符用量: 未记录", t),
+        (None, Some(c)) => format!("Token 用量: 未记录 | 字符用量: {}", c),
+        (None, None) => "Token 用量: 未记录 | 字符用量: 未记录".to_string(),
+    };
+    println!("# 任务 {}\n\n目标: {}\n模型: {}\n时间: {}\n{}\n\n## 步骤\n", rec.id, rec.goal, rec.model, rec.created, usage_line);
     for s in &rec.steps {
         let mark = if s.ok { "✅" } else { "❌" };
         println!(
