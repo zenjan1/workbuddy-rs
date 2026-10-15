@@ -70,6 +70,60 @@ impl Workspace {
         Ok(Self { dir })
     }
 
+    /// 将 task_id 字符串解析为任务在 Workspace::root 列表中的索引。
+    /// 数字输入保持原有数字索引语义(0-based);失败后回退到标题精确/前缀匹配。
+    pub fn resolve_task_id(root: &Path, input: &str) -> Result<usize, String> {
+        let runs = Workspace::root(root);
+        if let Ok(idx) = input.parse::<usize>() {
+            if idx >= runs.len() {
+                return Err(format!(
+                    "任务索引 {} 超出范围(共 {} 个任务)",
+                    idx,
+                    runs.len()
+                ));
+            }
+            return Ok(idx);
+        }
+
+        let exact: Vec<(usize, String)> = runs
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.goal == input)
+            .map(|(i, r)| (i, r.goal.clone()))
+            .collect();
+        match exact.len() {
+            1 => return Ok(exact[0].0),
+            n if n > 1 => {
+                let titles: Vec<String> = exact.iter().map(|(_, t)| t.clone()).collect();
+                return Err(format!(
+                    "任务标题 '{}' 匹配到多个任务: {}",
+                    input,
+                    titles.join(", ")
+                ));
+            }
+            _ => {}
+        }
+
+        let prefix: Vec<(usize, String)> = runs
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.goal.starts_with(input))
+            .map(|(i, r)| (i, r.goal.clone()))
+            .collect();
+        match prefix.len() {
+            1 => Ok(prefix[0].0),
+            0 => Err(format!("未找到任务: {}", input)),
+            _ => {
+                let titles: Vec<String> = prefix.iter().map(|(_, t)| t.clone()).collect();
+                Err(format!(
+                    "任务标题前缀 '{}' 匹配到多个任务: {}",
+                    input,
+                    titles.join(", ")
+                ))
+            }
+        }
+    }
+
     pub fn root(root: &Path) -> Vec<RunRecord> {
         let Ok(entries) = std::fs::read_dir(root) else {
             return Vec::new();
@@ -537,5 +591,82 @@ mod tests {
     fn advance_roadmap_returns_none_without_changes() {
         let input = "# VISION\n\n- [ ] 任务 A\n- [ ] 任务 B\n";
         assert!(advance_roadmap_text(input, "2025-04-08").is_none());
+    }
+
+    fn create_task_dir(root: &Path, id: &str, goal: &str) {
+        let dir = root.join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = RunRecord {
+            token_usage: None,
+            char_usage: None,
+            id: id.to_string(),
+            goal: goal.to_string(),
+            created: "now".into(),
+            model: "mock".into(),
+            mock: true,
+            steps: vec![],
+        };
+        std::fs::write(dir.join("meta.json"), serde_json::to_string(&run).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn resolve_task_id_parses_numeric_index() {
+        let tmp = std::env::temp_dir().join(format!("wb-resolve-num-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        create_task_dir(&tmp, "task-a", "alpha");
+        create_task_dir(&tmp, "task-b", "beta");
+        create_task_dir(&tmp, "task-c", "gamma");
+
+        let idx = Workspace::resolve_task_id(&tmp, "1").unwrap();
+        assert_eq!(idx, 1);
+        let err = Workspace::resolve_task_id(&tmp, "99").unwrap_err();
+        assert!(err.contains("超出范围"), "unexpected error: {err}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn resolve_task_id_matches_exact_title() {
+        let tmp = std::env::temp_dir().join(format!("wb-resolve-exact-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        create_task_dir(&tmp, "task-a", "my-feature");
+        create_task_dir(&tmp, "task-b", "other");
+        create_task_dir(&tmp, "task-c", "another");
+
+        let idx = Workspace::resolve_task_id(&tmp, "my-feature").unwrap();
+        let runs = Workspace::root(&tmp);
+        assert_eq!(runs[idx].goal, "my-feature");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn resolve_task_id_matches_prefix_title() {
+        let tmp = std::env::temp_dir().join(format!("wb-resolve-prefix-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        create_task_dir(&tmp, "task-a", "my-feature");
+        create_task_dir(&tmp, "task-b", "other");
+        create_task_dir(&tmp, "task-c", "another");
+
+        let idx = Workspace::resolve_task_id(&tmp, "my-").unwrap();
+        let runs = Workspace::root(&tmp);
+        assert_eq!(runs[idx].goal, "my-feature");
+        assert!(runs[idx].goal.starts_with("my-"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn resolve_task_id_detects_prefix_conflicts() {
+        let tmp = std::env::temp_dir().join(format!("wb-resolve-conflict-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        create_task_dir(&tmp, "task-a", "my-feature");
+        create_task_dir(&tmp, "task-b", "my-other");
+
+        let err = Workspace::resolve_task_id(&tmp, "my-").unwrap_err();
+        assert!(err.contains("my-feature"), "unexpected error: {err}");
+        assert!(err.contains("my-other"), "unexpected error: {err}");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
