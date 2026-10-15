@@ -93,17 +93,19 @@ enum ConfigAction {
 
 #[derive(Subcommand)]
 enum MemoryAction {
-    /// 添加一条记忆
+    /// 添加一条键值记忆
     Add {
-        /// 记忆内容（多个参数会自动以空格连接）
-        content: Vec<String>,
+        /// 记忆 key
+        key: String,
+        /// 记忆 value
+        value: String,
     },
     /// 列出所有记忆
     List,
-    /// 按 ID 获取记忆
+    /// 按 key 获取记忆
     Get {
-        /// 记忆 ID
-        id: String,
+        /// 记忆 key
+        key: String,
     },
 }
 
@@ -324,15 +326,27 @@ async fn main() -> Result<()> {
         Cmd::Selfcheck => cmd_selfcheck(),
         Cmd::Memory { action } => {
             let action = parse_memory_args(action)?;
-            let store = memory::MemoryStore::open_default()
+            let path = match std::env::var("WORKBUDDY_MEMORY_PATH") {
+                Ok(p) if !p.trim().is_empty() => std::path::PathBuf::from(p),
+                _ => {
+                    let home = std::env::var("HOME")
+                        .or_else(|_| std::env::var("USERPROFILE"))
+                        .map_err(|_| anyhow::anyhow!("无法确定 HOME 目录，请设置 WORKBUDDY_MEMORY_PATH 或 HOME"))?;
+                    std::path::PathBuf::from(home).join(".workbuddy").join("memory.db")
+                }
+            };
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| anyhow::anyhow!("创建记忆存储目录失败: {e}"))?;
+            }
+            let store = memory::MemoryStore::open(&path)
                 .map_err(|e| anyhow::anyhow!("打开记忆存储失败: {e}"))?;
             match action {
-                MemoryAction::Add { content } => {
-                    let content = content.join(" ");
+                MemoryAction::Add { key, value } => {
                     store
-                        .add(&content)
+                        .add(&key, &value)
                         .map_err(|e| anyhow::anyhow!("添加记忆失败: {e}"))?;
-                    println!("已保存记忆: {}", content);
+                    println!("已保存记忆: {} = {}", key, value);
                 }
                 MemoryAction::List => {
                     let entries = store.list();
@@ -344,14 +358,11 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
-                MemoryAction::Get { id } => {
-                    let parsed_id: u64 = id
-                        .parse()
-                        .map_err(|_| anyhow::anyhow!("记忆 ID 必须是数字: {}", id))?;
-                    match store.get(parsed_id) {
+                MemoryAction::Get { key } => {
+                    match store.get(&key) {
                         Some(entry) => println!("{:?}", entry),
                         None => {
-                            eprintln!("错误: 未找到记忆 ID '{}'", id);
+                            eprintln!("错误: 未找到记忆 key '{}'", key);
                             std::process::exit(1);
                         }
                     }
@@ -395,13 +406,19 @@ async fn main() -> Result<()> {
 
 fn parse_memory_args(action: MemoryAction) -> Result<MemoryAction> {
     match &action {
-        MemoryAction::Add { content } if content.join(" ").trim().is_empty() => {
-            anyhow::bail!("记忆内容不能为空");
+        MemoryAction::Add { key, value } => {
+            if key.trim().is_empty() {
+                anyhow::bail!("记忆 key 不能为空");
+            }
+            if value.trim().is_empty() {
+                anyhow::bail!("记忆 value 不能为空");
+            }
         }
-        MemoryAction::Get { id } if id.trim().is_empty() => {
-            anyhow::bail!("记忆 ID 不能为空");
+        MemoryAction::Get { key } if key.trim().is_empty() => {
+            anyhow::bail!("记忆 key 不能为空");
         }
-        _ => {}
+        MemoryAction::Get { .. } => {}
+        MemoryAction::List => {}
     }
     Ok(action)
 }
@@ -412,14 +429,16 @@ mod memory_tests {
     use clap::error::ErrorKind;
 
     #[test]
-    fn parse_memory_add_extracts_content() {
+    fn parse_memory_add_extracts_key_value() {
         let action = parse_memory_args(MemoryAction::Add {
-            content: vec!["hello".to_string(), "world".to_string()],
+            key: "greeting".to_string(),
+            value: "hello".to_string(),
         })
         .unwrap();
         match action {
-            MemoryAction::Add { content } => {
-                assert_eq!(content, vec!["hello".to_string(), "world".to_string()]);
+            MemoryAction::Add { key, value } => {
+                assert_eq!(key, "greeting");
+                assert_eq!(value, "hello");
             }
             _ => panic!("expected add"),
         }
@@ -434,45 +453,47 @@ mod memory_tests {
     }
 
     #[test]
-    fn parse_memory_get_extracts_id() {
+    fn parse_memory_get_extracts_key() {
         let action = parse_memory_args(MemoryAction::Get {
-            id: "abc123".to_string(),
+            key: "greeting".to_string(),
         })
         .unwrap();
         match action {
-            MemoryAction::Get { id } => assert_eq!(id, "abc123"),
+            MemoryAction::Get { key } => assert_eq!(key, "greeting"),
             _ => panic!("expected get"),
         }
     }
 
     #[test]
-    fn parse_memory_rejects_missing_id() {
+    fn parse_memory_rejects_missing_key() {
         match parse_memory_args(MemoryAction::Get {
-            id: "   ".to_string(),
+            key: "   ".to_string(),
         }) {
             Ok(_) => panic!("expected error"),
-            Err(e) => assert!(e.to_string().contains("记忆 ID 不能为空")),
+            Err(e) => assert!(e.to_string().contains("记忆 key 不能为空")),
         }
     }
 
     #[test]
-    fn parse_memory_rejects_blank_content() {
+    fn parse_memory_rejects_blank_value() {
         match parse_memory_args(MemoryAction::Add {
-            content: vec!["   ".to_string()],
+            key: "k".to_string(),
+            value: "   ".to_string(),
         }) {
             Ok(_) => panic!("expected error"),
-            Err(e) => assert!(e.to_string().contains("记忆内容不能为空")),
+            Err(e) => assert!(e.to_string().contains("记忆 value 不能为空")),
         }
     }
 
     #[test]
     fn cli_parses_memory_subcommands() {
-        let cli = Cli::try_parse_from(["workbuddy", "memory", "add", "hello", "world"])
+        let cli = Cli::try_parse_from(["workbuddy", "memory", "add", "greeting", "hello"])
             .expect("parse memory add");
         match cli.cmd {
             Cmd::Memory { action } => match action {
-                MemoryAction::Add { content } => {
-                    assert_eq!(content, vec!["hello".to_string(), "world".to_string()]);
+                MemoryAction::Add { key, value } => {
+                    assert_eq!(key, "greeting");
+                    assert_eq!(value, "hello");
                 }
                 _ => panic!("expected add"),
             },
@@ -485,11 +506,11 @@ mod memory_tests {
             _ => panic!("expected memory"),
         }
 
-        let cli = Cli::try_parse_from(["workbuddy", "memory", "get", "abc123"])
+        let cli = Cli::try_parse_from(["workbuddy", "memory", "get", "greeting"])
             .expect("parse memory get");
         match cli.cmd {
             Cmd::Memory { action } => match action {
-                MemoryAction::Get { id } => assert_eq!(id, "abc123"),
+                MemoryAction::Get { key } => assert_eq!(key, "greeting"),
                 _ => panic!("expected get"),
             },
             _ => panic!("expected memory"),
@@ -497,10 +518,10 @@ mod memory_tests {
     }
 
     #[test]
-    fn cli_memory_requires_id_arg() {
+    fn cli_memory_requires_key_arg() {
         let result = Cli::try_parse_from(["workbuddy", "memory", "get"]);
         match result {
-            Ok(_) => panic!("expected missing id error"),
+            Ok(_) => panic!("expected missing key error"),
             Err(e) => assert_eq!(e.kind(), ErrorKind::MissingRequiredArgument),
         }
     }
