@@ -189,41 +189,7 @@ impl Config {
 
     fn update_config_file(path: &Path, key: &str, value: &str) -> Result<()> {
         Self::validate_config_key(key)?;
-        let mut doc: toml::Value = if path.exists() {
-            let text = std::fs::read_to_string(path)
-                .with_context(|| format!("读取配置文件失败: {}", path.display()))?;
-            toml::from_str(&text)
-                .with_context(|| format!("解析配置文件失败: {}", path.display()))?
-        } else {
-            toml::Value::Table(Default::default())
-        };
-
-        let table = doc.as_table_mut().context("配置文件根节点必须是表")?;
-        let parsed = Self::parse_value_for_key(key, value)?;
-        table.insert(key.to_string(), parsed);
-
-        let text = toml::to_string_pretty(&doc)?;
-        std::fs::write(path, text)
-            .with_context(|| format!("写入配置文件失败: {}", path.display()))?;
-        Ok(())
-    }
-
-    fn parse_value_for_key(key: &str, raw: &str) -> Result<toml::Value> {
-        let value = match key {
-            "max_budget" | "price" | "cost_per_1k_tokens" => {
-                let n: f64 = raw.parse().with_context(|| format!("{key} 需要是数字"))?;
-                toml::Value::Float(n)
-            }
-            "max_parallel" | "request_timeout_secs" | "webhook_retry" | "webhook_timeout_secs" => {
-                let n: i64 = raw.parse().with_context(|| format!("{key} 需要是整数"))?;
-                toml::Value::Integer(n)
-            }
-            "api_key" | "base_url" | "model" | "workspace_dir" | "repo_dir" | "webhook_url" => {
-                toml::Value::String(raw.to_string())
-            }
-            _ => anyhow::bail!("未知配置键: {key}"),
-        };
-        Ok(value)
+        set_config_value(path, key, value)
     }
 
     fn config_file_path() -> PathBuf {
@@ -271,23 +237,43 @@ pub fn set_config_value(path: &Path, key: &str, value: &str) -> Result<()> {
 
 fn parse_config_set_value(key: &str, raw: &str) -> Result<toml_edit::Item> {
     match key {
-        "max_budget" | "cost_per_1k_tokens" => {
+        "max_budget" | "price" | "cost_per_1k_tokens" => {
             let n: f64 = raw
                 .parse()
-                .with_context(|| format!("{key} 需要是非负数字"))?;
-            if !n.is_finite() || n < 0.0 {
-                anyhow::bail!("{key} 必须是非负数字");
+                .with_context(|| format!("{key} 需要是数字"))?;
+            if !n.is_finite() {
+                anyhow::bail!("{key} 必须是有限数字");
+            }
+            match key {
+                "max_budget" if n <= 0.0 => anyhow::bail!("max_budget 必须为非负数"),
+                "price" | "cost_per_1k_tokens" if n < 0.0 => {
+                    anyhow::bail!("{key} 不能为负数")
+                }
+                _ => {}
             }
             Ok(toml_edit::value(n))
         }
-        "model" => {
-            if raw.trim().is_empty() {
-                anyhow::bail!("model 不能为空");
+        "max_parallel" | "request_timeout_secs" | "webhook_retry" | "webhook_timeout_secs" => {
+            let n: i64 = raw
+                .parse()
+                .with_context(|| format!("{key} 需要是整数"))?;
+            if matches!(key, "max_parallel" | "request_timeout_secs" | "webhook_timeout_secs") && n <= 0 {
+                anyhow::bail!("{key} 必须大于 0");
+            }
+            if key == "webhook_retry" && n < 0 {
+                anyhow::bail!("{key} 不能为负数");
+            }
+            Ok(toml_edit::value(n))
+        }
+        "api_key" | "base_url" | "model" | "workspace_dir" | "repo_dir" | "webhook_url" => {
+            if (key == "model" || key == "base_url") && raw.trim().is_empty() {
+                anyhow::bail!("{key} 不能为空");
             }
             Ok(toml_edit::value(raw.to_string()))
         }
         _ => anyhow::bail!(
-            "未知配置键: {key}; 可用键: max_budget, cost_per_1k_tokens, model"
+            "未知配置键: {key}; 可用键: {}",
+            CONFIG_KEYS.join(", ")
         ),
     }
 }
@@ -535,6 +521,88 @@ mod tests {
 
         let reloaded: FileConfig = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(reloaded.max_budget, Some(42.0));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn update_config_file_preserves_comments_and_unknown_keys() {
+        let path = temp_config_path("preserve_format");
+        let initial = r#"
+# 顶层注释
+model = "qwen-plus"  # 行内注释
+max_parallel = 2
+
+[unknown_section]
+foo = "bar"
+"#;
+        std::fs::write(&path, initial).unwrap();
+
+        Config::update_config_file(&path, "max_budget", "123.45").unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# 顶层注释"));
+        assert!(text.contains("# 行内注释"));
+        assert!(text.contains("[unknown_section]"));
+        assert!(text.contains("foo = \"bar\""));
+        let doc: toml::Value = toml::from_str(&text).unwrap();
+        assert_eq!(doc["max_budget"].as_float(), Some(123.45));
+        assert_eq!(doc["model"].as_str(), Some("qwen-plus"));
+        assert_eq!(doc["unknown_section"]["foo"].as_str(), Some("bar"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn update_config_file_rejects_invalid_value_and_preserves_file() {
+        let path = temp_config_path("invalid_value_preserve");
+        std::fs::write(&path, "model = \"qwen-plus\"\n").unwrap();
+
+        let err = Config::update_config_file(&path, "max_budget", "not-a-number").unwrap_err();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text, "model = \"qwen-plus\"\n");
+        assert!(err.to_string().contains("max_budget"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn update_config_file_rejects_unknown_key() {
+        let path = temp_config_path("unknown_key");
+        std::fs::write(&path, "model = \"qwen-plus\"\n").unwrap();
+
+        let err = Config::update_config_file(&path, "not_a_real_key", "value").unwrap_err();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text, "model = \"qwen-plus\"\n");
+        assert!(err.to_string().contains("未知配置键"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn update_config_file_round_trip_all_scalar_keys() {
+        let path = temp_config_path("all_scalar_roundtrip");
+        std::fs::write(&path, "").unwrap();
+
+        Config::update_config_file(&path, "max_budget", "100.5").unwrap();
+        Config::update_config_file(&path, "price", "1.25").unwrap();
+        Config::update_config_file(&path, "cost_per_1k_tokens", "0.42").unwrap();
+        Config::update_config_file(&path, "max_parallel", "8").unwrap();
+        Config::update_config_file(&path, "request_timeout_secs", "60").unwrap();
+        Config::update_config_file(&path, "webhook_retry", "5").unwrap();
+        Config::update_config_file(&path, "webhook_timeout_secs", "10").unwrap();
+        Config::update_config_file(&path, "model", "qwen-max").unwrap();
+        Config::update_config_file(&path, "base_url", "https://example.com/v1").unwrap();
+        Config::update_config_file(&path, "api_key", "secret").unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let doc: toml::Value = toml::from_str(&text).unwrap();
+        assert_eq!(doc["max_budget"].as_float(), Some(100.5));
+        assert_eq!(doc["price"].as_float(), Some(1.25));
+        assert_eq!(doc["cost_per_1k_tokens"].as_float(), Some(0.42));
+        assert_eq!(doc["max_parallel"].as_integer(), Some(8));
+        assert_eq!(doc["request_timeout_secs"].as_integer(), Some(60));
+        assert_eq!(doc["webhook_retry"].as_integer(), Some(5));
+        assert_eq!(doc["webhook_timeout_secs"].as_integer(), Some(10));
+        assert_eq!(doc["model"].as_str(), Some("qwen-max"));
+        assert_eq!(doc["base_url"].as_str(), Some("https://example.com/v1"));
+        assert_eq!(doc["api_key"].as_str(), Some("secret"));
         std::fs::remove_file(&path).ok();
     }
 
