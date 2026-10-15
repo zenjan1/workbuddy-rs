@@ -385,3 +385,31 @@ impl MemoryCommand {
         }
     }
 }
+
+pub fn list_runs(workspace_dir: &std::path::Path) -> anyhow::Result<Vec<crate::workspace::RunRecord>> {
+    if !workspace_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut runs = Vec::new();
+    for entry in std::fs::read_dir(workspace_dir)? {
+        let entry = entry?;
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let id = entry.file_name().to_string_lossy().into_owned();
+        if let Ok(run) = get_run(workspace_dir, &id) {
+            runs.push(run);
+        }
+    }
+    runs.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(runs)
+}
+
+pub fn get_run(workspace_dir: &std::path::Path, id: &str) -> anyhow::Result<crate::workspace::RunRecord> {
+    let run_dir = workspace_dir.join(id);
+    if !run_dir.exists() {
+        return Err(anyhow::anyhow!("run {id} 不存在"));
+    }
+    let ws = crate::workspace::Workspace::open(workspace_dir, id)?;
+    ws.load_record()
+}
