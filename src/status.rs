@@ -450,6 +450,66 @@ mod tests {
     }
 
     #[test]
+    fn parse_status_detects_running_from_lock_file() {
+        let workspace = test_workspace("lock-file");
+        fs::write(workspace.join("supervisor.lock"), "").unwrap();
+
+        let summary = parse_status(&workspace).unwrap();
+        assert!(summary.supervisor_running);
+        assert_eq!(summary.pid, None);
+
+        fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn parse_status_detects_running_from_running_marker() {
+        let workspace = test_workspace("running-marker");
+        fs::write(workspace.join("RUNNING"), "").unwrap();
+
+        let summary = parse_status(&workspace).unwrap();
+        assert!(summary.supervisor_running);
+        assert_eq!(summary.pid, None);
+
+        fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn parse_status_no_history_returns_empty_summary() {
+        let workspace = test_workspace("no-history");
+        fs::create_dir_all(workspace.join("runs")).unwrap();
+
+        let summary = parse_status(&workspace).unwrap();
+        assert!(!summary.supervisor_running);
+        assert_eq!(summary.completed_runs, 0);
+        assert_eq!(summary.failed_runs, 0);
+        assert!(summary.recent_logs.is_empty());
+
+        let rendered = format_status(&summary);
+        assert!(rendered.contains("No run history."));
+        assert!(rendered.contains("Recent logs: (none)"));
+
+        fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn parse_status_invalid_status_json_reports_error() {
+        let workspace = test_workspace("invalid-status");
+        fs::write(workspace.join("status.json"), "{not-json}").unwrap();
+        write_run_record(
+            &workspace.join("runs"),
+            "run-ok.json",
+            &run_record("run-ok", vec![step(1, "plan", true, None, "planned")]),
+        );
+
+        let result = parse_status(&workspace);
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("解析状态文件失败"));
+
+        fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
     fn invalid_run_json_reports_error() {
         let workspace = test_workspace("invalid-run");
         fs::write(workspace.join("runs").join("bad.json"), "{not-json}").unwrap();
