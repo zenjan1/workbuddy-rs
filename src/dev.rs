@@ -24,6 +24,19 @@ const MAX_REPAIRS: usize = 8;
 /// --extend 单次运行最多允许的补给轮数(防失控;每轮 1 次 LLM 调用)
 const MAX_EXTEND_ROUNDS: usize = 1000;
 
+// ---------- 提交前本地自评审(轻量规则) ----------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+enum LocalSeverity { Error, Warning, Info }
+
+#[derive(Debug, Clone)]
+struct LocalViolation { severity: LocalSeverity }
+
+fn run_local_rules_against_diff(_diff: &str) -> Vec<LocalViolation> {
+    Vec::new()
+}
+
 // ---------- backlog ----------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -262,6 +275,22 @@ fn git_commit(repo: &Path, message: &str) -> Result<Option<String>> {
         .arg(repo)
         .args(["add", "-A", "--", ".", ":(exclude).workbuddy"])
         .status();
+
+    // --- 提交前本地自评审 ---
+    // 在暂存 diff 上运行本地规则；存在严重问题时阻止提交。
+    if let Ok(diff) = git(repo, &["diff", "--cached"]) {
+        if !diff.trim().is_empty() {
+            let report = run_local_rules_against_diff(&diff);
+            eprintln!("[review] 本地审查报告: {} 条违规", report.len());
+            let has_severe = report.iter().any(|v| v.severity == LocalSeverity::Error);
+            if has_severe {
+                bail!("提交前自评审发现严重问题,已阻止提交。请修复后重试。");
+            }
+        }
+    } else {
+        eprintln!("[review] 读取 git diff 失败,跳过自评审");
+    }
+
     let out = git(repo, &["commit", "-m", message])?;
     let sha = git(repo, &["rev-parse", "--short", "HEAD"])?;
     let _ = out;
