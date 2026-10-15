@@ -242,9 +242,7 @@ pub fn resolve_task_id(input: &str, runs: &[RunRecord]) -> Result<usize, String>
         }
     }
 
-    if normalized_input.is_empty() {
-        return Err(format!("未找到任务: {}", input));
-    }
+    // 精确匹配无结果时,允许用标题 slug 前缀唯一匹配任务。
     let prefix_matches: Vec<(usize, String)> = runs
         .iter()
         .enumerate()
@@ -624,7 +622,42 @@ mod tests {
 
     #[test]
     fn resolve_task_id_parses_numeric_index() {
-        let tmp = std::env::temp_dir().join(format!("wb-resolve-num-{}", std::process::id()));
+        let runs = vec![make_run("My Task"), make_run("Other Task")];
+        assert_eq!(resolve_task_id("0", &runs).unwrap(), 0);
+        assert_eq!(resolve_task_id("1", &runs).unwrap(), 1);
+        assert!(resolve_task_id("2", &runs).is_err());
+        assert!(resolve_task_id("-1", &runs).is_err());
+    }
+
+    fn make_run(goal: &str) -> RunRecord {
+        RunRecord {
+            token_usage: None,
+            char_usage: None,
+            id: goal.to_string(),
+            goal: goal.to_string(),
+            created: "now".into(),
+            model: "mock".into(),
+            mock: true,
+            steps: vec![],
+        }
+    }
+
+    #[test]
+    fn resolve_task_id_title_slug_match_ambiguity_and_missing() {
+        let runs = vec![make_run("Release v1.0 版本"), make_run("Other Task")];
+        assert_eq!(resolve_task_id("release v1.0 版本", &runs).unwrap(), 0);
+        assert_eq!(resolve_task_id(" Release-V1.0_版本 ", &runs).unwrap(), 0);
+        let duplicate_runs = vec![make_run("My Task"), make_run("my-task")];
+        let err = resolve_task_id("my task", &duplicate_runs).unwrap_err();
+        assert!(err.contains("匹配到多个任务"));
+        let missing_runs = vec![make_run("存在的任务")];
+        let err = resolve_task_id("不存在的任务", &missing_runs).unwrap_err();
+        assert!(err.contains("未找到任务"));
+    }
+
+    #[test]
+    fn resolve_task_id_workspace_numeric_index() {
+        let tmp = std::env::temp_dir().join(format!("wb-resolve-numeric-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         create_task_dir(&tmp, "task-a", "alpha");
