@@ -84,6 +84,7 @@ const CONFIG_KEYS: &[&str] = &[
     "max_budget",
     "cost_per_1k_tokens",
     "webhook_url",
+    "webhook_enabled",
     "webhook_retry",
     "webhook_timeout_secs",
 ];
@@ -253,6 +254,12 @@ impl Config {
                     self.webhook_url = Some(value.to_string());
                 }
             }
+            "webhook_enabled" => {
+                let b: bool = value
+                    .parse()
+                    .with_context(|| format!("{key} 需要是布尔值 true/false"))?;
+                self.webhook_enabled = b;
+            }
             "api_key" => self.api_key = Some(value.to_string()),
             "model" => {
                 if value.trim().is_empty() {
@@ -415,6 +422,12 @@ fn parse_config_set_value(key: &str, raw: &str) -> Result<toml_edit::Item> {
             validate_url_value(key, raw)?;
             Ok(toml_edit::value(raw.to_string()))
         }
+        "webhook_enabled" => {
+            let b: bool = raw
+                .parse()
+                .with_context(|| format!("{key} 需要是布尔值 true/false"))?;
+            Ok(toml_edit::value(b))
+        }
         "api_key" | "model" | "workspace_dir" | "repo_dir" => {
             if (key == "model" || key == "workspace_dir" || key == "repo_dir") && raw.trim().is_empty() {
                 anyhow::bail!("{key} 不能为空");
@@ -470,6 +483,7 @@ fn normalize_config_key(key: &str) -> Result<&str> {
         "llm.api_key" => Ok("api_key"),
         "llm.max_parallel" => Ok("max_parallel"),
         "webhook.url" => Ok("webhook_url"),
+        "webhook.enabled" => Ok("webhook_enabled"),
         "webhook.retry" => Ok("webhook_retry"),
         "webhook.timeout_secs" => Ok("webhook_timeout_secs"),
         _ if CONFIG_KEYS.contains(&key) => Ok(key),
@@ -1506,5 +1520,109 @@ mod config_update_tests {
         let _ = original.updated("max_parallel", "zero");
         assert_eq!(original.max_parallel, snapshot.max_parallel);
         assert_eq!(original.model, snapshot.model);
+    }
+}
+#[cfg(test)]
+mod config_set_tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn parse_config_set_value_parses_scalars() {
+        assert_eq!(
+            parse_config_set_value("max_parallel", "8").unwrap().to_string(),
+            "8"
+        );
+        assert_eq!(
+            parse_config_set_value("max_budget", "12.5").unwrap().to_string(),
+            "12.5"
+        );
+        assert_eq!(
+            parse_config_set_value("webhook_enabled", "true")
+                .unwrap()
+                .to_string(),
+            "true"
+        );
+        assert_eq!(
+            parse_config_set_value("model", "qwen-plus").unwrap().to_string(),
+            "\"qwen-plus\""
+        );
+        assert_eq!(
+            parse_config_set_value("webhook_url", "https://example.com/hook")
+                .unwrap()
+                .to_string(),
+            "\"https://example.com/hook\""
+        );
+    }
+
+    #[test]
+    fn parse_config_set_value_rejects_invalid_types_and_unknown_keys() {
+        let err = parse_config_set_value("max_budget", "not-a-number").unwrap_err();
+        assert!(format!("{err}").contains("需要是数字"));
+
+        let err = parse_config_set_value("max_parallel", "not-an-int").unwrap_err();
+        assert!(format!("{err}").contains("需要是整数"));
+
+        let err = parse_config_set_value("webhook_enabled", "yes").unwrap_err();
+        assert!(format!("{err}").contains("布尔值"));
+
+        let err = parse_config_set_value("webhook_retry", "-1").unwrap_err();
+        assert!(format!("{err}").contains("不能为负数"));
+
+        let err = parse_config_set_value("unknown_key", "value").unwrap_err();
+        assert!(format!("{err}").contains("未知配置键"));
+    }
+
+    #[test]
+    fn set_config_value_file_writes_scalar_values() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+
+        set_config_value_file(&path, "max_parallel", "8").unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("max_parallel = 8"));
+
+        set_config_value_file(&path, "webhook_enabled", "true").unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("webhook_enabled = true"));
+    }
+
+    #[test]
+    fn set_config_value_file_rejects_unknown_key_without_modifying_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        let original = "model = \"old\"\n";
+        fs::write(&path, original).unwrap();
+
+        let err = set_config_value_file(&path, "unknown_key", "value").unwrap_err();
+        assert!(format!("{err}").contains("未知配置键"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn atomic_write_cleans_temp_file_when_rename_fails() {
+        let dir = TempDir::new().unwrap();
+        let target_dir = dir.path().join("target-dir");
+        fs::create_dir(&target_dir).unwrap();
+        let marker = target_dir.join("marker");
+        fs::write(&marker, "ok").unwrap();
+
+        let err = atomic_write(&target_dir, "new contents").unwrap_err();
+        assert!(format!("{err}").contains("替换配置文件失败"));
+        assert!(marker.exists());
+
+        let temp_count = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path()
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .ends_with(".tmp")
+            })
+            .count();
+        assert_eq!(temp_count, 0, "临时文件应被清理");
     }
 }
