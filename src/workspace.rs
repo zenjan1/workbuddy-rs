@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::plan::Plan;
+use crate::config::TokenPrices;
 use crate::utils::{parse_task_id, slugify, unique_slug};
 
 /// 任务工作区:每次 run 在 workspace_dir 下生成独立目录,
@@ -25,10 +26,88 @@ pub struct StepRecord {
     pub output_preview: String,
 }
 
+#[derive(Serialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TokenUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+impl<'de> Deserialize<'de> for TokenUsage {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct TokenUsageVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for TokenUsageVisitor {
+            type Value = TokenUsage;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "a token usage object or integer")
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(TokenUsage {
+                    input_tokens: 0,
+                    output_tokens: value,
+                })
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                if value < 0 {
+                    return Err(E::custom("token usage cannot be negative"));
+                }
+                self.visit_u64(value as u64)
+            }
+
+            fn visit_map<V>(self, mut map: V) -> Result<Self::Value, V::Error>
+            where
+                V: serde::de::MapAccess<'de>,
+            {
+                let mut input_tokens = 0u64;
+                let mut output_tokens = 0u64;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "input_tokens" => input_tokens = map.next_value()?,
+                        "output_tokens" => output_tokens = map.next_value()?,
+                        _ => {
+                            let _: serde::de::IgnoredAny = map.next_value()?;
+                        }
+                    }
+                }
+                Ok(TokenUsage {
+                    input_tokens,
+                    output_tokens,
+                })
+            }
+        }
+
+        deserializer.deserialize_any(TokenUsageVisitor)
+    }
+}
+
+impl std::fmt::Display for TokenUsage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "input={}, output={}, total={}",
+            self.input_tokens,
+            self.output_tokens,
+            self.input_tokens + self.output_tokens
+        )
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct RunRecord {
     #[serde(default)]
-    pub token_usage: Option<u64>,
+    pub token_usage: Option<TokenUsage>,
     #[serde(default)]
     pub char_usage: Option<u64>,
     pub id: String,
@@ -37,6 +116,18 @@ pub struct RunRecord {
     pub model: String,
     pub mock: bool,
     pub steps: Vec<StepRecord>,
+}
+
+impl RunRecord {
+    /// 根据 token 用量与 per-token 价格计算估算成本。
+    /// token 用量缺失或价格为 0.0 时返回 0.0。
+    pub fn estimated_cost(&self, prices: &TokenPrices) -> f64 {
+        let Some(usage) = self.token_usage else {
+            return 0.0;
+        };
+        usage.input_tokens as f64 * prices.input_price
+            + usage.output_tokens as f64 * prices.output_price
+    }
 }
 
 impl Workspace {
@@ -512,6 +603,50 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         assert_eq!(Workspace::status_summary(&tmp), "not running");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn estimated_cost_handles_zero_normal_and_missing_prices() {
+        let make_run = |token_usage: Option<TokenUsage>| RunRecord {
+            token_usage,
+            char_usage: None,
+            id: "cost-test".into(),
+            goal: "cost-test".into(),
+            created: "now".into(),
+            model: "mock".into(),
+            mock: true,
+            steps: vec![],
+        };
+        let prices = TokenPrices {
+            input_price: 0.01,
+            output_price: 0.03,
+        };
+
+        let zero = make_run(Some(TokenUsage {
+            input_tokens: 0,
+            output_tokens: 0,
+        }));
+        assert_eq!(zero.estimated_cost(&prices), 0.0);
+
+        let normal = make_run(Some(TokenUsage {
+            input_tokens: 100,
+            output_tokens: 50,
+        }));
+        let expected = 100.0 * 0.01 + 50.0 * 0.03;
+        assert!((normal.estimated_cost(&prices) - expected).abs() < f64::EPSILON);
+
+        let no_usage = make_run(None);
+        assert_eq!(no_usage.estimated_cost(&prices), 0.0);
+
+        let zero_prices = TokenPrices {
+            input_price: 0.0,
+            output_price: 0.0,
+        };
+        let missing_price = make_run(Some(TokenUsage {
+            input_tokens: 100,
+            output_tokens: 50,
+        }));
+        assert_eq!(missing_price.estimated_cost(&zero_prices), 0.0);
     }
 
     #[test]

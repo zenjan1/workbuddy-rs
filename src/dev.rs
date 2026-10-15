@@ -631,7 +631,10 @@ pub async fn run_dev_loop(
         }
         let total_tokens: u64 = results.iter().filter_map(|r| r.token_usage).sum();
         let total_chars: u64 = results.iter().filter_map(|r| r.char_usage).sum();
-        run.token_usage = Some(total_tokens);
+        run.token_usage = Some(crate::workspace::TokenUsage {
+            input_tokens: 0,
+            output_tokens: total_tokens,
+        });
         run.char_usage = Some(total_chars);
         ws.finish_run(&mut run, &summary)?;
 

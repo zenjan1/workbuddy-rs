@@ -14,6 +14,16 @@ pub struct WebhookConfig {
     // 预留扩展字段：例如 retry、timeout_secs、headers 等。
 }
 
+/// 按 token 单价计费的配置。单位：美元/token。
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct TokenPrices {
+    /// 输入 token 单价。
+    pub input_price: f64,
+    /// 输出 token 单价。
+    pub output_price: f64,
+}
+
 /// 运行时配置。优先级:命令行 > 环境变量 > 配置文件 > 默认值。
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -51,6 +61,7 @@ struct FileConfig {
     price: Option<f64>,
     max_budget: Option<f64>,
     cost_per_1k_tokens: f64,
+    token_prices: TokenPrices,
     webhook_enabled: Option<bool>,
     webhook_url: Option<String>,
     webhook_retry: Option<u32>,

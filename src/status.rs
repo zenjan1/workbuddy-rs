@@ -149,7 +149,7 @@ fn usage_from_json(raw: &serde_json::Value, record: &RunRecord) -> RunUsage {
             .or_else(|| read_last_step("completion_tokens")),
         total_tokens: read_root("total_tokens")
             .or_else(|| read_last_step("total_tokens"))
-            .or(record.token_usage),
+            .or(record.token_usage.map(|usage| usage.input_tokens + usage.output_tokens)),
         char_usage: read_root("char_usage")
             .or_else(|| read_last_step("char_usage"))
             .or(record.char_usage),
@@ -355,7 +355,7 @@ fn format_usage(usage: RunUsage, cost: Option<f64>) -> String {
         prompt_tokens, completion_tokens, total_tokens, chars
     );
     if let Some(cost) = cost {
-        result.push_str(&format!(", cost: ${:.4}", cost));
+        result.push_str(&format!(", estimated cost: ${:.4}", cost));
     }
     result.push(')');
     result
@@ -893,5 +893,73 @@ mod status_extra_tests {
         let rendered = format_status(&summary);
         assert!(rendered.contains("No run history."));
         assert!(rendered.contains("Recent logs: (none)"));
+    }
+}
+
+#[cfg(test)]
+mod cost_display_tests {
+    use super::*;
+    use crate::workspace::{RunRecord, StepRecord};
+    use std::fs;
+
+    #[test]
+    fn show_output_includes_estimated_cost() {
+        let mut path = std::env::temp_dir();
+        let unique = format!(
+            "workbuddy_status_cost_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        path.push(unique);
+        fs::create_dir_all(path.join("runs")).unwrap();
+
+        fs::write(
+            path.join("config.json"),
+            serde_json::to_string(&serde_json::json!({
+                "cost_per_1k_tokens": 0.1234
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let record = RunRecord {
+            id: "run-cost".to_string(),
+            goal: "test goal".to_string(),
+            created: "2024-01-01T00:00:00Z".to_string(),
+            model: "test-model".to_string(),
+            mock: false,
+            steps: vec![StepRecord {
+                id: 1,
+                name: "plan".to_string(),
+                agent: "test-agent".to_string(),
+                skill: "test-skill".to_string(),
+                kind: "test-kind".to_string(),
+                ok: true,
+                error: None,
+                seconds: 0.1,
+                output_preview: "planned".to_string(),
+            }],
+            token_usage: Some(crate::workspace::TokenUsage {
+                input_tokens: 1000,
+                output_tokens: 0,
+            }),
+            char_usage: None,
+        };
+
+        let run_path = path.join("runs").join("run-cost.json");
+        fs::write(run_path, serde_json::to_string_pretty(&record).unwrap()).unwrap();
+
+        let summary = parse_status(&path).unwrap();
+        let rendered = format_status(&summary);
+
+        assert!(
+            rendered.contains("estimated cost: $0.1234"),
+            "rendered output: {rendered}"
+        );
+
+        fs::remove_dir_all(&path).unwrap();
     }
 }

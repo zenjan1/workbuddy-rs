@@ -602,7 +602,10 @@ async fn run_task(cfg: Config, goal: &str) -> Result<()> {
     }
     let total_tokens: u64 = results.iter().filter_map(|r| r.token_usage).sum();
     let total_chars: u64 = results.iter().filter_map(|r| r.char_usage).sum();
-    run.token_usage = Some(total_tokens);
+    run.token_usage = Some(crate::workspace::TokenUsage {
+        input_tokens: 0,
+        output_tokens: total_tokens,
+    });
     run.char_usage = Some(total_chars);
     ws.finish_run(&mut run, &report)?;
 
@@ -658,11 +661,28 @@ fn cmd_show(cfg: Config, id: &str) -> Result<()> {
     let rec = runs.get(idx).ok_or_else(|| anyhow::anyhow!("任务 {} 不存在", id))?;
     let ws = Workspace::open(&cfg.workspace_dir, &rec.id)?;
     let rec = ws.load_record()?;
+    let total_tokens = rec
+        .token_usage
+        .map(|t| t.input_tokens + t.output_tokens)
+        .unwrap_or(0);
+    let estimated_cost = cfg.estimate_cost(total_tokens);
     let usage_line = match (rec.token_usage, rec.char_usage) {
-        (Some(t), Some(c)) => format!("Token 用量: {} | 字符用量: {}", t, c),
-        (Some(t), None) => format!("Token 用量: {} | 字符用量: 未记录", t),
-        (None, Some(c)) => format!("Token 用量: 未记录 | 字符用量: {}", c),
-        (None, None) => "Token 用量: 未记录 | 字符用量: 未记录".to_string(),
+        (Some(t), Some(c)) => format!(
+            "Token 用量: {} | 字符用量: {} | 成本估算: ${:.4}",
+            t, c, estimated_cost
+        ),
+        (Some(t), None) => format!(
+            "Token 用量: {} | 字符用量: 未记录 | 成本估算: ${:.4}",
+            t, estimated_cost
+        ),
+        (None, Some(c)) => format!(
+            "Token 用量: 未记录 | 字符用量: {} | 成本估算: ${:.4}",
+            c, estimated_cost
+        ),
+        (None, None) => format!(
+            "Token 用量: 未记录 | 字符用量: 未记录 | 成本估算: ${:.4}",
+            estimated_cost
+        ),
     };
     println!("# 任务 {}\n\n目标: {}\n模型: {}\n时间: {}\n{}\n\n## 步骤\n", rec.id, rec.goal, rec.model, rec.created, usage_line);
     for s in &rec.steps {
