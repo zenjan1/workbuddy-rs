@@ -113,6 +113,11 @@ impl MemoryStore {
         self.save()
     }
 
+    /// Sets a key-value pair. This is an alias for `add`.
+    pub fn set(&self, key: &str, value: &str) -> Result<(), MemoryError> {
+        self.add(key, value)
+    }
+
     /// Gets a value by key.
     pub fn get(&self, key: &str) -> Option<String> {
         let data = self.data.read().unwrap();
@@ -472,6 +477,85 @@ mod tests {
     fn command_parse_get_invalid_args_is_error() {
         let args = vec!["get".to_string()];
         assert!(MemoryCommand::parse(&args).is_err());
+    }
+
+    #[test]
+    fn set_adds_new_key_and_overwrites_existing_key() {
+        let path = temp_memory_path();
+        let store = MemoryStore::new(&path).unwrap();
+
+        store.set("new", "first").unwrap();
+        assert_eq!(store.get("new"), Some("first".to_string()));
+
+        store.set("new", "second").unwrap();
+        assert_eq!(store.get("new"), Some("second".to_string()));
+        assert_eq!(store.list(), vec![("new".to_string(), "second".to_string())]);
+
+        store.set("another", "value").unwrap();
+        let entries = store.list();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(store.get("another"), Some("value".to_string()));
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn get_missing_key_returns_none_after_reload() {
+        let path = temp_memory_path();
+        let store = MemoryStore::new(&path).unwrap();
+        assert!(store.get("missing").is_none());
+
+        store.add("present", "value").unwrap();
+        drop(store);
+
+        let store = MemoryStore::new(&path).unwrap();
+        assert!(store.get("missing").is_none());
+        assert_eq!(store.get("present"), Some("value".to_string()));
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn remove_persists_and_missing_remove_returns_none() {
+        let path = temp_memory_path();
+        let store = MemoryStore::new(&path).unwrap();
+
+        store.add("to-remove", "value").unwrap();
+        assert_eq!(store.remove("to-remove"), Some("value".to_string()));
+        assert_eq!(store.remove("to-remove"), None);
+
+        drop(store);
+
+        let store = MemoryStore::new(&path).unwrap();
+        assert!(store.get("to-remove").is_none());
+        assert!(store.list().is_empty());
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn corrupt_file_is_backed_up_and_store_starts_empty() {
+        let path = temp_memory_path();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "{not valid json").unwrap();
+
+        let store = MemoryStore::new(&path).unwrap();
+        assert!(store.list().is_empty());
+        assert!(store.get("any").is_none());
+        assert!(!path.exists());
+
+        let parent = path.parent().unwrap();
+        let mut backup_count = 0;
+        for entry in fs::read_dir(parent).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with("memory.json.corrupt-") {
+                backup_count += 1;
+            }
+        }
+        assert_eq!(backup_count, 1);
+
+        cleanup(&path);
     }
 }
 

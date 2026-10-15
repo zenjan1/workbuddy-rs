@@ -324,6 +324,7 @@ async fn main() -> Result<()> {
         }
         Cmd::Selfcheck => cmd_selfcheck(),
         Cmd::Memory { action } => {
+            let action = parse_memory_args(action)?;
             let store = memory::MemoryStore::open_default()
                 .map_err(|e| anyhow::anyhow!("打开记忆存储失败: {e}"))?;
             match action {
@@ -385,6 +386,111 @@ async fn main() -> Result<()> {
                 .map_err(|e| anyhow::anyhow!("推进路线图失败: {e:#}"))?;
             Ok(())
         },
+    }
+}
+
+fn parse_memory_args(action: MemoryAction) -> Result<MemoryAction> {
+    match &action {
+        MemoryAction::Add { key, .. } if key.trim().is_empty() => {
+            anyhow::bail!("记忆键不能为空");
+        }
+        MemoryAction::Get { key } if key.trim().is_empty() => {
+            anyhow::bail!("记忆键不能为空");
+        }
+        _ => {}
+    }
+    Ok(action)
+}
+
+#[cfg(test)]
+mod memory_tests {
+    use super::*;
+    use clap::error::ErrorKind;
+
+    #[test]
+    fn parse_memory_add_extracts_key_value() {
+        let action = parse_memory_args(MemoryAction::Add {
+            key: "greeting".to_string(),
+            value: "hello".to_string(),
+        })
+        .unwrap();
+        match action {
+            MemoryAction::Add { key, value } => {
+                assert_eq!(key, "greeting");
+                assert_eq!(value, "hello");
+            }
+            _ => panic!("expected add"),
+        }
+    }
+
+    #[test]
+    fn parse_memory_list_ok() {
+        assert!(matches!(
+            parse_memory_args(MemoryAction::List).unwrap(),
+            MemoryAction::List
+        ));
+    }
+
+    #[test]
+    fn parse_memory_get_extracts_key() {
+        let action = parse_memory_args(MemoryAction::Get {
+            key: "greeting".to_string(),
+        })
+        .unwrap();
+        match action {
+            MemoryAction::Get { key } => assert_eq!(key, "greeting"),
+            _ => panic!("expected get"),
+        }
+    }
+
+    #[test]
+    fn parse_memory_rejects_missing_key() {
+        match parse_memory_args(MemoryAction::Get {
+            key: "   ".to_string(),
+        }) {
+            Ok(_) => panic!("expected error"),
+            Err(e) => assert!(e.to_string().contains("记忆键不能为空")),
+        }
+    }
+
+    #[test]
+    fn cli_parses_memory_subcommands() {
+        let cli = Cli::try_parse_from(["workbuddy", "memory", "add", "key", "value"])
+            .expect("parse memory add");
+        match cli.cmd {
+            Cmd::Memory { action } => match action {
+                MemoryAction::Add { key, value } => {
+                    assert_eq!(key, "key");
+                    assert_eq!(value, "value");
+                }
+                _ => panic!("expected add"),
+            },
+            _ => panic!("expected memory"),
+        }
+
+        let cli = Cli::try_parse_from(["workbuddy", "memory", "list"]).expect("parse memory list");
+        match cli.cmd {
+            Cmd::Memory { action } => assert!(matches!(action, MemoryAction::List)),
+            _ => panic!("expected memory"),
+        }
+
+        let cli = Cli::try_parse_from(["workbuddy", "memory", "get", "key"]).expect("parse memory get");
+        match cli.cmd {
+            Cmd::Memory { action } => match action {
+                MemoryAction::Get { key } => assert_eq!(key, "key"),
+                _ => panic!("expected get"),
+            },
+            _ => panic!("expected memory"),
+        }
+    }
+
+    #[test]
+    fn cli_memory_requires_key_arg() {
+        let result = Cli::try_parse_from(["workbuddy", "memory", "get"]);
+        match result {
+            Ok(_) => panic!("expected missing key error"),
+            Err(e) => assert_eq!(e.kind(), ErrorKind::MissingRequiredArgument),
+        }
     }
 }
 
