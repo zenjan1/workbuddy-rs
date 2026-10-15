@@ -71,7 +71,7 @@ pub fn parse_status(workspace_dir: &Path) -> anyhow::Result<StatusSummary> {
     let pid = read_supervisor_pid(workspace_dir)?;
     let cost_per_1k_tokens = read_cost_per_1k_tokens(workspace_dir);
     let history = load_history(workspace_dir, cost_per_1k_tokens)?;
-    let mut summary = StatusSummary::from_history_with_limit(&history, 10);
+    let mut summary = StatusSummary::from_history_with_limit(&history, 5);
     summary.supervisor_running = supervisor_running;
     summary.pid = pid;
 
@@ -381,7 +381,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     #[test]
-    fn parse_status_limits_recent_logs_to_ten() {
+    fn parse_status_limits_recent_logs_to_five() {
         let workspace = test_workspace("limits-recent");
         for i in 1..=11 {
             let file_name = format!("run-{}.json", i);
@@ -398,16 +398,16 @@ mod tests {
         let summary = parse_status(&workspace).unwrap();
         assert_eq!(summary.completed_runs, 11);
         assert_eq!(summary.failed_runs, 0);
-        assert_eq!(summary.recent_logs.len(), 10);
-        assert!(summary.recent_logs.iter().any(|log| log.contains("run-2")));
+        assert_eq!(summary.recent_logs.len(), 5);
+        assert!(summary.recent_logs.iter().any(|log| log.contains("run-7")));
         assert!(summary.recent_logs.iter().any(|log| log.contains("run-11")));
-        assert!(!summary.recent_logs.iter().any(|log| log.starts_with("[run-1]")));
+        assert!(!summary.recent_logs.iter().any(|log| log.starts_with("[run-6]")));
 
         let rendered = format_status(&summary);
         assert!(rendered.contains("Last run: 11 completed, 0 failed"));
         assert!(rendered.contains("Recent logs:"));
         let log_lines = rendered.lines().filter(|line| line.starts_with("  - ")).count();
-        assert_eq!(log_lines, 10);
+        assert_eq!(log_lines, 5);
 
         fs::remove_dir_all(&workspace).unwrap();
     }
@@ -605,6 +605,8 @@ mod tests {
         assert!(summary.recent_logs.is_empty());
 
         let rendered = format_status(&summary);
+        assert!(rendered.contains("Supervisor: stopped"));
+        assert!(rendered.contains("Last run: 0 completed, 0 failed"));
         assert!(rendered.contains("No run history."));
         assert!(rendered.contains("Recent logs: (none)"));
 
@@ -889,8 +891,6 @@ mod status_extra_tests {
     fn format_status_empty_history_reports_no_run_history() {
         let summary = StatusSummary::from_history(&[]);
         let rendered = format_status(&summary);
-        assert!(rendered.contains("Supervisor: stopped"));
-        assert!(rendered.contains("Last run: 0 completed, 0 failed"));
         assert!(rendered.contains("No run history."));
         assert!(rendered.contains("Recent logs: (none)"));
     }
