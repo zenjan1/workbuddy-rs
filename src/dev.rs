@@ -788,6 +788,7 @@ mod tests {
         .unwrap();
 
         let cfg = Config {
+            cost_per_1k_tokens: 0.0,
             price: 0.0,
             max_budget: 0.0,
             api_key: None,
@@ -871,6 +872,7 @@ mod tests {
         std::fs::write(dir.join("code.rs"), "fn main() {\n    let x = 1;\n    let y = x;\n}\n").unwrap();
 
         let cfg = Config {
+            cost_per_1k_tokens: 0.0,
             price: 0.0,
             max_budget: 0.0,
             api_key: None,

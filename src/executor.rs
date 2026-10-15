@@ -231,6 +231,10 @@ impl Executor {
             failed_count
         ));
 
+        let total_tokens: u64 = results.iter().filter_map(|r| r.token_usage).sum();
+        let cost = crate::llm::estimate_cost(total_tokens, self.cfg.cost_per_1k_tokens);
+        summary.push_str(&format!("\n估算成本: ${:.4} ({} tokens)\n", cost, total_tokens));
+
         results.sort_by_key(|r| r.id);
         Ok((results, summary))
     }
@@ -646,6 +650,7 @@ mod tests {
             webhook_url: None,
             webhook_timeout_secs: 1,
             webhook_retry: 0,
+            cost_per_1k_tokens: 0.0,
             mock: true,
         }
     }

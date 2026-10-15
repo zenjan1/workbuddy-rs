@@ -18,6 +18,7 @@ pub struct Config {
     pub request_timeout_secs: u64,
     pub price: f64,
     pub max_budget: f64,
+    pub cost_per_1k_tokens: f64,
     pub mock: bool,
     pub webhook_url: Option<String>,
     pub webhook_retry: u32,
@@ -36,6 +37,7 @@ struct FileConfig {
     request_timeout_secs: Option<u64>,
     price: Option<f64>,
     max_budget: Option<f64>,
+    cost_per_1k_tokens: f64,
     webhook_url: Option<String>,
     webhook_retry: Option<u32>,
     webhook_timeout_secs: Option<u64>,
@@ -112,6 +114,7 @@ impl Config {
             request_timeout_secs: file.request_timeout_secs.unwrap_or(300),
             price: file.price.unwrap_or(0.0),
             max_budget: file.max_budget.unwrap_or(0.0),
+            cost_per_1k_tokens: file.cost_per_1k_tokens,
             mock: false,
             webhook_url: file.webhook_url.filter(|u| !u.trim().is_empty()),
             webhook_retry: file.webhook_retry.unwrap_or(3),
@@ -283,6 +286,9 @@ pub fn validate_config(config: &Config) -> Vec<String> {
     if config.price < 0.0 {
         errors.push("price 不能为负数".to_string());
     }
+    if config.cost_per_1k_tokens < 0.0 {
+        errors.push("cost_per_1k_tokens 不能为负数".to_string());
+    }
     if config.max_budget <= 0.0 {
         errors.push("max_budget 必须为正数".to_string());
     }
@@ -327,11 +333,24 @@ mod tests {
             request_timeout_secs: 120,
             price: 0.0,
             max_budget: 100.0,
+            cost_per_1k_tokens: 0.0,
             mock: false,
             webhook_url: None,
             webhook_retry: 3,
             webhook_timeout_secs: 5,
         }
+    }
+
+    #[test]
+    fn parse_file_config_reads_cost_per_1k_tokens() {
+        let c: FileConfig = toml::from_str("cost_per_1k_tokens = 0.42")
+            .unwrap();
+        assert_eq!(c.cost_per_1k_tokens, 0.42);
+    }
+
+    #[test]
+    fn file_config_default_cost_is_zero() {
+        assert_eq!(FileConfig::default().cost_per_1k_tokens, 0.0);
     }
 
     #[test]

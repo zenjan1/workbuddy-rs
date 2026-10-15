@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use serde::Deserialize;
 
+use crate::llm::estimate_cost;
 use crate::workspace::RunRecord;
 
 #[derive(Debug, Deserialize, Default)]
@@ -52,6 +53,8 @@ pub fn parse_status(workspace_dir: &Path) -> anyhow::Result<StatusSummary> {
         None
     };
 
+    let cost_per_1k_tokens = read_cost_per_1k_tokens(workspace_dir);
+
     let mut run_files = collect_run_files(workspace_dir)?;
     run_files.sort_by_key(|path| {
         fs::metadata(path)
@@ -91,7 +94,10 @@ pub fn parse_status(workspace_dir: &Path) -> anyhow::Result<StatusSummary> {
                     .clone()
                     .unwrap_or_else(|| last_step.output_preview.clone());
                 let content = truncate_chars(&content, 80);
-                let usage = format_usage(record.token_usage, record.char_usage);
+                let cost = record.token_usage.and_then(|tokens| {
+                    cost_per_1k_tokens.map(|price| estimate_cost(tokens, price))
+                });
+                let usage = format_usage(record.token_usage, record.char_usage, cost);
                 recent_logs.push(format!("[{}] {}: {} {}", record.id, last_step.name, content, usage));
             }
         }
@@ -182,14 +188,26 @@ fn truncate_chars(input: &str, max_chars: usize) -> String {
     }
 }
 
-fn format_usage(token_usage: Option<u64>, char_usage: Option<u64>) -> String {
+fn read_cost_per_1k_tokens(workspace_dir: &Path) -> Option<f64> {
+    let config_path = workspace_dir.join("config.json");
+    let data = fs::read_to_string(config_path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&data).ok()?;
+    json.get("cost_per_1k_tokens")?.as_f64()
+}
+
+fn format_usage(token_usage: Option<u64>, char_usage: Option<u64>, cost: Option<f64>) -> String {
     let tokens = token_usage
         .map(|v| v.to_string())
         .unwrap_or_else(|| "N/A".to_string());
     let chars = char_usage
         .map(|v| v.to_string())
         .unwrap_or_else(|| "N/A".to_string());
-    format!("(tokens: {}, chars: {})", tokens, chars)
+    let mut result = format!("(tokens: {}, chars: {}", tokens, chars);
+    if let Some(cost) = cost {
+        result.push_str(&format!(", cost: ${:.4}", cost));
+    }
+    result.push(')');
+    result
 }
 
 #[cfg(test)]
@@ -415,6 +433,50 @@ mod tests {
         let rendered = format_status(&summary);
         assert!(rendered.contains("tokens: N/A"));
         assert!(rendered.contains("chars: N/A"));
+
+        fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn parse_status_shows_cost_when_config_present() {
+        let workspace = test_workspace("cost-config");
+        fs::write(
+            workspace.join("config.json"),
+            serde_json::to_string(&serde_json::json!({
+                "cost_per_1k_tokens": 0.02
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let json = serde_json::json!({
+            "id": "run-with-cost",
+            "goal": "test goal",
+            "created": "2024-01-01T00:00:00Z",
+            "model": "test-model",
+            "mock": false,
+            "token_usage": 1000,
+            "char_usage": 500,
+            "steps": [
+                {
+                    "id": 1,
+                    "name": "plan",
+                    "agent": "test-agent",
+                    "skill": "test-skill",
+                    "kind": "test-kind",
+                    "ok": true,
+                    "error": null,
+                    "seconds": 0.1,
+                    "output_preview": "planned"
+                }
+            ]
+        });
+        let path = workspace.join("runs").join("run-with-cost.json");
+        fs::write(&path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+
+        let summary = parse_status(&workspace).unwrap();
+        let rendered = format_status(&summary);
+        assert!(rendered.contains("tokens: 1000"));
+        assert!(rendered.contains("cost: $0.0200"));
 
         fs::remove_dir_all(&workspace).unwrap();
     }

@@ -7,6 +7,13 @@ use serde_json::json;
 use crate::config::Config;
 use crate::util::clip;
 
+/// 成本估算:根据 token 用量和每千 token 单价估算成本。
+/// 计算公式: tokens * cost_per_1k_tokens / 1000.0
+/// 返回 f64,保留浮点精度,不在此处格式化展示。
+pub fn estimate_cost(tokens: u64, cost_per_1k_tokens: f64) -> f64 {
+    tokens as f64 * cost_per_1k_tokens / 1000.0
+}
+
 /// LLM 抽象:OpenAI 兼容接口 + 离线 Mock。
 /// 手动装箱为 dyn Future 以保证 trait 对象安全(无需 async-trait 依赖)。
 pub trait Llm: Send + Sync {
@@ -230,5 +237,34 @@ mod tests {
         let llm = MockLlm;
         let out = llm.chat("专家", "第一步调研").await.unwrap();
         assert!(out.starts_with("[mock]"));
+    }
+
+    #[test]
+    fn estimate_cost_zero_tokens_returns_zero() {
+        assert_eq!(estimate_cost(0, 10.0), 0.0);
+    }
+
+    #[test]
+    fn estimate_cost_regular_tokens_and_prices() {
+        let cost = estimate_cost(1000, 10.0);
+        assert!((cost - 10.0).abs() < 1e-12, "cost={cost}");
+        let cost = estimate_cost(2000, 0.5);
+        assert!((cost - 1.0).abs() < 1e-12, "cost={cost}");
+        let cost = estimate_cost(1234, 7.5);
+        assert!((cost - 1234.0 * 7.5 / 1000.0).abs() < 1e-12, "cost={cost}");
+    }
+
+    #[test]
+    fn estimate_cost_small_token_count_keeps_precision() {
+        let cost = estimate_cost(1, 10.0);
+        assert!((cost - 0.01).abs() < 1e-12, "cost={cost}");
+        let cost = estimate_cost(5, 2.0);
+        assert!((cost - 0.01).abs() < 1e-12, "cost={cost}");
+    }
+
+    #[test]
+    fn estimate_cost_with_high_price() {
+        let cost = estimate_cost(100, 1000.0);
+        assert!((cost - 100.0).abs() < 1e-12, "cost={cost}");
     }
 }
