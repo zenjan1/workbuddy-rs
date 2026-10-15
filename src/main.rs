@@ -136,7 +136,6 @@ enum ConfigAction {
     /// 设置配置项
     Set {
         /// 配置键
-        #[arg(long)]
         key: String,
         /// 配置值（位置参数）
         value: String,

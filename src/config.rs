@@ -245,6 +245,48 @@ impl Config {
     }
 }
 
+/// 使用 toml_edit 更新配置文件，保留注释和未知键。
+pub fn set_config_value(path: &Path, key: &str, value: &str) -> Result<()> {
+    let mut doc = if path.exists() {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("读取配置文件失败: {}", path.display()))?;
+        text.parse::<toml_edit::DocumentMut>()
+            .with_context(|| format!("解析配置文件失败: {}", path.display()))?
+    } else {
+        toml_edit::DocumentMut::new()
+    };
+
+    let parsed = parse_config_set_value(key, value)?;
+    doc.as_table_mut().insert(key, parsed);
+
+    std::fs::write(path, doc.to_string())
+        .with_context(|| format!("写入配置文件失败: {}", path.display()))?;
+    Ok(())
+}
+
+fn parse_config_set_value(key: &str, raw: &str) -> Result<toml_edit::Item> {
+    match key {
+        "max_budget" | "cost_per_1k_tokens" => {
+            let n: f64 = raw
+                .parse()
+                .with_context(|| format!("{key} 需要是非负数字"))?;
+            if !n.is_finite() || n < 0.0 {
+                anyhow::bail!("{key} 必须是非负数字");
+            }
+            Ok(toml_edit::value(n))
+        }
+        "model" => {
+            if raw.trim().is_empty() {
+                anyhow::bail!("model 不能为空");
+            }
+            Ok(toml_edit::value(raw.to_string()))
+        }
+        _ => anyhow::bail!(
+            "未知配置键: {key}; 可用键: max_budget, cost_per_1k_tokens, model"
+        ),
+    }
+}
+
 pub fn validate_config(config: &Config) -> Vec<String> {
     let mut errors = Vec::new();
 
@@ -523,6 +565,80 @@ mod tests {
 
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(text, initial);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn set_config_value_preserves_comments_and_unknown_keys() {
+        let path = temp_config_path("set_comments");
+        let initial = "# top comment\nmodel = \"old\" # inline comment\nunknown_key = \"keepme\"\n";
+        std::fs::write(&path, initial).unwrap();
+
+        set_config_value(&path, "max_budget", "12.5").unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# top comment"), "顶部注释应保留: {text}");
+        assert!(text.contains("# inline comment"), "行尾注释应保留: {text}");
+        assert!(text.contains("unknown_key"), "未知键应保留: {text}");
+
+        let parsed: toml::Value = toml::from_str(&text).unwrap();
+        assert_eq!(parsed["max_budget"].as_float(), Some(12.5));
+        assert_eq!(parsed["model"].as_str(), Some("old"));
+        assert_eq!(parsed["unknown_key"].as_str(), Some("keepme"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn set_config_value_accepts_non_negative_numbers() {
+        let path = temp_config_path("numbers_ok");
+        std::fs::write(&path, "").unwrap();
+
+        set_config_value(&path, "max_budget", "100.5").unwrap();
+        set_config_value(&path, "cost_per_1k_tokens", "0.001").unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let parsed: toml::Value = toml::from_str(&text).unwrap();
+        assert_eq!(parsed["max_budget"].as_float(), Some(100.5));
+        assert_eq!(parsed["cost_per_1k_tokens"].as_float(), Some(0.001));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn set_config_value_rejects_invalid_numbers() {
+        let path = temp_config_path("numbers_bad");
+        std::fs::write(&path, "model = \"keep\"\n").unwrap();
+
+        let err = set_config_value(&path, "max_budget", "-1.0").unwrap_err();
+        assert!(err.to_string().contains("非负"), "负 max_budget 应报错: {err}");
+        let err = set_config_value(&path, "cost_per_1k_tokens", "abc").unwrap_err();
+        assert!(err.to_string().contains("cost_per_1k_tokens"), "非数字 cost 应报错: {err}");
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("model = \"keep\""), "失败写入不应破坏已有配置");
+        assert!(!text.contains("max_budget"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn set_config_value_rejects_empty_model() {
+        let path = temp_config_path("empty_model");
+        std::fs::write(&path, "").unwrap();
+
+        let err = set_config_value(&path, "model", "   ").unwrap_err();
+        assert!(err.to_string().contains("model 不能为空"), "空 model 应报错: {err}");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn set_config_value_updates_model_string() {
+        let path = temp_config_path("model_ok");
+        std::fs::write(&path, "model = \"old\"\n").unwrap();
+
+        set_config_value(&path, "model", "new-model").unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let parsed: toml::Value = toml::from_str(&text).unwrap();
+        assert_eq!(parsed["model"].as_str(), Some("new-model"));
         std::fs::remove_file(&path).ok();
     }
 }
