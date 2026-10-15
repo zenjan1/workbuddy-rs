@@ -49,6 +49,7 @@ mod review {
         Ok(())
     }
 }
+mod resolver;
 mod util;
 mod utils;
 mod webhook;
@@ -61,7 +62,7 @@ use clap::{Parser, Subcommand};
 use config::Config;
 use executor::Executor;
 use llm::{Llm, MockLlm, OpenAiCompat};
-use workspace::{resolve_task_id, RunRecord, StepRecord, Workspace};
+use workspace::{RunRecord, StepRecord, Workspace};
 
 #[derive(Parser)]
 #[command(
@@ -652,10 +653,16 @@ fn cmd_list(cfg: Config, since: Option<&str>) -> Result<()> {
 
 fn cmd_show(cfg: Config, id: &str) -> Result<()> {
     let runs = Workspace::root(&cfg.workspace_dir);
-    let idx = match resolve_task_id(id, &runs) {
+    let idx = match resolver::resolve_task_id(&runs, id, |run: &RunRecord| run.goal.as_str()) {
         Ok(idx) => idx,
-        Err(e) => {
-            anyhow::bail!("{} 提示：若任务标题存在冲突，请使用任务索引（数字 id）引用任务。", e);
+        Err(resolver::ResolveError::Ambiguous(_)) => {
+            anyhow::bail!(
+                "任务标识 '{}' 不唯一，存在多个匹配任务。提示：若任务标题存在冲突，请使用任务索引（数字 id）引用任务。",
+                id
+            );
+        }
+        Err(resolver::ResolveError::NotFound) => {
+            anyhow::bail!("未找到任务 '{}'", id);
         }
     };
     let rec = runs.get(idx).ok_or_else(|| anyhow::anyhow!("任务 {} 不存在", id))?;
