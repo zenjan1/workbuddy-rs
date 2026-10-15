@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use serde::Deserialize;
 
-use crate::llm::estimate_cost;
 use crate::workspace::RunRecord;
 
 #[derive(Debug, Deserialize, Default)]
@@ -95,7 +94,7 @@ pub fn parse_status(workspace_dir: &Path) -> anyhow::Result<StatusSummary> {
                     .unwrap_or_else(|| last_step.output_preview.clone());
                 let content = truncate_chars(&content, 80);
                 let cost = record.token_usage.and_then(|tokens| {
-                    cost_per_1k_tokens.map(|price| estimate_cost(tokens, price))
+                    cost_per_1k_tokens.map(|price| price * (tokens as f64 / 1000.0))
                 });
                 let usage = format_usage(record.token_usage, record.char_usage, cost);
                 recent_logs.push(format!("[{}] {}: {} {}", record.id, last_step.name, content, usage));

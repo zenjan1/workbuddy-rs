@@ -147,6 +147,11 @@ impl Config {
         }
     }
 
+    /// 按每千 token 单价估算成本。
+    pub fn estimate_cost(&self, total_tokens: u64) -> f64 {
+        self.cost_per_1k_tokens * (total_tokens as f64 / 1000.0)
+    }
+
     fn load_file() -> Result<FileConfig> {
         for path in Self::config_candidates() {
             if let Ok(text) = std::fs::read_to_string(&path) {
@@ -393,6 +398,34 @@ mod tests {
     #[test]
     fn file_config_default_cost_is_zero() {
         assert_eq!(FileConfig::default().cost_per_1k_tokens, 0.0);
+    }
+
+    #[test]
+    fn estimate_cost_for_zero_tokens_is_zero() {
+        let mut config = valid_config();
+        config.cost_per_1k_tokens = 0.42;
+        assert_eq!(config.estimate_cost(0), 0.0);
+    }
+
+    #[test]
+    fn estimate_cost_for_one_token_uses_one_thousandth_price() {
+        let mut config = valid_config();
+        config.cost_per_1k_tokens = 0.42;
+        assert!((config.estimate_cost(1) - 0.00042).abs() < 1e-12);
+    }
+
+    #[test]
+    fn estimate_cost_for_1000_tokens_equals_price_per_1k() {
+        let mut config = valid_config();
+        config.cost_per_1k_tokens = 0.42;
+        assert!((config.estimate_cost(1000) - 0.42).abs() < 1e-12);
+    }
+
+    #[test]
+    fn estimate_cost_for_fractional_thousand_tokens_is_linear() {
+        let mut config = valid_config();
+        config.cost_per_1k_tokens = 0.42;
+        assert!((config.estimate_cost(2500) - 1.05).abs() < 1e-12);
     }
 
     #[test]
