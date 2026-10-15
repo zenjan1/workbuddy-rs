@@ -186,10 +186,17 @@ pub fn run_tui(tasks: Vec<Task>) -> Result<()> {
 }
 
 fn draw_ui(frame: &mut Frame, items: &[BacklogItem], selected: usize) {
+    let existing_slugs: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let rows = if items.is_empty() {
         vec!["No backlog tasks".to_string()]
     } else {
-        render_backlog_tasks(items)
+        items
+            .iter()
+            .map(|item| {
+                let slug = crate::task_id::TaskId::from_title(&item.title, item.id, &existing_slugs).to_string();
+                format!("[{}] {:>3}. {} [{}]", slug, item.id, item.title, item.status)
+            })
+            .collect()
     };
 
     let list_items: Vec<ListItem> = rows

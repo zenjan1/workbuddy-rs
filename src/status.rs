@@ -5,6 +5,7 @@ use anyhow::Context;
 use serde::Deserialize;
 
 use crate::workspace::RunRecord;
+use crate::task_id::TaskId;
 
 const STATUS_FILE_NAME: &str = "status.json";
 
@@ -214,9 +215,10 @@ fn history_entries_from_run(
     };
     let content = truncate_chars(&content, 80);
     let state = if success { "completed" } else { "failed" };
+    let task_id_display = TaskId::from_slug(record.id.as_str()).to_string();
     let log = format!(
         "[{}] {} ({} steps): {} {}",
-        record.id,
+        task_id_display,
         state,
         record.steps.len(),
         content,

@@ -9,6 +9,7 @@ mod plan;
 mod planner;
 mod serve;
 mod status;
+mod task_id;
 mod tui;
 mod review {
     use super::*;
@@ -226,8 +227,15 @@ async fn main() -> Result<()> {
             cfg.mock = mock;
             run_task(cfg, &goal).await
         }
-        Cmd::List { since } => cmd_list(cfg, since.as_deref()),
-        Cmd::Show { id } => cmd_show(cfg, &id),
+        Cmd::List { since } => cmd_list_with_slug(cfg, since.as_deref()),
+        Cmd::Show { id } => {
+            if id.parse::<usize>().is_ok() {
+                cmd_show(cfg, &id)
+            } else {
+                let slug = crate::task_id::TaskId::from_slug(id.as_str()).to_string();
+                cmd_show_by_slug(cfg, &slug)
+            }
+        }
         Cmd::Agents => cmd_agents(),
         Cmd::Review => review::review(cfg).await,
         Cmd::Config { action } => match action {
@@ -1103,4 +1111,27 @@ mod tests {
     fn mock_health_returns_ok() {
         assert_eq!(mock_health_ok(), "ok");
     }
+}
+
+fn cmd_list_with_slug(cfg: Config, since: Option<&str>) -> Result<()> {
+    let runs = Workspace::list_runs(&cfg.workspace_dir);
+    if runs.is_empty() {
+        println!("(暂无历史任务)");
+        return Ok(());
+    }
+
+    for run in runs {
+        let slug = crate::task_id::TaskId::from_title(&run.goal, run.id.parse::<usize>().unwrap_or(0), &std::collections::HashSet::new());
+        println!("[{}] [id:{}] {}", slug, run.id, run.goal);
+    }
+    Ok(())
+}
+
+fn cmd_show_by_slug(cfg: Config, slug: &str) -> Result<()> {
+    let runs = Workspace::list_runs(&cfg.workspace_dir);
+    let run = runs
+        .into_iter()
+        .find(|r| r.id == slug)
+        .ok_or_else(|| anyhow::anyhow!("未找到 slug 为 '{}' 的任务", slug))?;
+    cmd_show(cfg, &run.id.to_string())
 }
