@@ -36,6 +36,7 @@ struct FileConfig {
     max_parallel: Option<usize>,
     workspace_dir: Option<PathBuf>,
     repo_dir: Option<PathBuf>,
+    memory_path: Option<PathBuf>,
     request_timeout_secs: Option<u64>,
     price: Option<f64>,
     max_budget: Option<f64>,
@@ -106,7 +107,6 @@ impl Config {
             .repo_dir
             .or_else(|| env::var("WORKBUDDY_REPO").ok().map(PathBuf::from))
             .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-
         Ok(Config {
             api_key,
             base_url,

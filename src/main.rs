@@ -92,17 +92,19 @@ enum ConfigAction {
 
 #[derive(Subcommand)]
 enum MemoryAction {
-    /// 添加一条记忆（文本）
+    /// 添加一条键值记忆
     Add {
-        /// 记忆文本
-        text: String,
+        /// 键
+        key: String,
+        /// 值
+        value: String,
     },
-    /// 列出所有记忆摘要（按时间倒序）
+    /// 列出所有键值记忆
     List,
-    /// 按 id 获取完整记忆
+    /// 按键获取记忆值
     Get {
-        /// 记忆 id
-        id: u64,
+        /// 键
+        key: String,
     },
 }
 
@@ -325,33 +327,27 @@ async fn main() -> Result<()> {
             let store = memory::MemoryStore::open_default()
                 .map_err(|e| anyhow::anyhow!("打开记忆存储失败: {e}"))?;
             match action {
-                MemoryAction::Add { text } => {
-                    let entry = store.add(&text)
+                MemoryAction::Add { key, value } => {
+                    store.add(&key, &value)
                         .map_err(|e| anyhow::anyhow!("添加记忆失败: {e}"))?;
-                    println!("已添加记忆，id: {}", entry.id);
+                    println!("已保存记忆: {} = {}", key, value);
                 }
                 MemoryAction::List => {
-                    let entries = store.list()
-                        .map_err(|e| anyhow::anyhow!("列出记忆失败: {e}"))?;
+                    let entries = store.list();
                     if entries.is_empty() {
                         println!("(暂无记忆)");
                     } else {
-                        for m in &entries {
-                            println!("id: {} | 内容: {} | 创建时间: {}", m.id, m.text, m.created_at.as_deref().unwrap_or("-"));
+                        for (k, v) in entries {
+                            println!("{} = {}", k, v);
                         }
                     }
                 }
-                MemoryAction::Get { id } => {
-                    match store.get(id) {
-                        Ok(m) => {
-                            println!("id: {}\n内容: {}\n创建时间: {}", m.id, m.text, m.created_at.as_deref().unwrap_or("-"));
-                        }
-                        Err(memory::MemoryError::NotFound(_)) => {
-                            eprintln!("错误: 未找到记忆 id={}", id);
+                MemoryAction::Get { key } => {
+                    match store.get(&key) {
+                        Some(value) => println!("{}", value),
+                        None => {
+                            eprintln!("错误: 未找到记忆键 '{}'", key);
                             std::process::exit(1);
-                        }
-                        Err(e) => {
-                            return Err(anyhow::anyhow!("获取记忆失败: {e}"));
                         }
                     }
                 }
