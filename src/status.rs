@@ -67,10 +67,35 @@ pub fn run(workspace_dir: &Path) -> anyhow::Result<()> {
 }
 
 pub fn parse_status(workspace_dir: &Path) -> anyhow::Result<StatusSummary> {
+    parse_status_inner(workspace_dir, None)
+}
+
+pub fn parse_status_from_run_log(
+    workspace_dir: &Path,
+    run_log_path: &Path,
+) -> anyhow::Result<StatusSummary> {
+    parse_status_inner(workspace_dir, Some(run_log_path))
+}
+
+fn parse_status_inner(
+    workspace_dir: &Path,
+    run_log_path: Option<&Path>,
+) -> anyhow::Result<StatusSummary> {
     let supervisor_running = read_supervisor_running(workspace_dir)?;
     let pid = read_supervisor_pid(workspace_dir)?;
     let cost_per_1k_tokens = read_cost_per_1k_tokens(workspace_dir);
-    let history = load_history(workspace_dir, cost_per_1k_tokens)?;
+    let history = match run_log_path {
+        Some(path) => {
+            let data = fs::read_to_string(path)
+                .with_context(|| format!("读取运行日志失败 {}", path.display()))?;
+            let record: RunRecord = serde_json::from_str(&data)
+                .with_context(|| format!("解析运行日志失败 {}", path.display()))?;
+            let raw: serde_json::Value = serde_json::from_str(&data)
+                .with_context(|| format!("解析运行日志失败 {}", path.display()))?;
+            history_entries_from_run(&record, &raw, cost_per_1k_tokens)
+        }
+        None => load_history(workspace_dir, cost_per_1k_tokens)?,
+    };
     let mut summary = StatusSummary::from_history_with_limit(&history, 5);
     summary.supervisor_running = supervisor_running;
     summary.pid = pid;
@@ -589,6 +614,25 @@ mod tests {
         let summary = parse_status(&workspace).unwrap();
         assert!(summary.supervisor_running);
         assert_eq!(summary.pid, None);
+
+        fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn parse_status_from_run_log_reads_injected_path() {
+        let workspace = test_workspace("injected-log");
+        let log_path = workspace.join("custom-run.json");
+        let record = run_record(
+            "injected-run",
+            vec![step(1, "plan", true, None, "planned")],
+        );
+        fs::write(&log_path, serde_json::to_string_pretty(&record).unwrap()).unwrap();
+
+        let summary = parse_status_from_run_log(&workspace, &log_path).unwrap();
+        assert_eq!(summary.completed_runs, 1);
+        assert_eq!(summary.failed_runs, 0);
+        assert_eq!(summary.recent_logs.len(), 1);
+        assert!(summary.recent_logs[0].contains("injected-run"));
 
         fs::remove_dir_all(&workspace).unwrap();
     }
