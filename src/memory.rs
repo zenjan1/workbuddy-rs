@@ -150,6 +150,7 @@ impl MemoryStore {
     pub fn load(&self) -> Result<(), MemoryError> {
         let _guard = self.acquire_lock()?;
         if !self.path.exists() {
+            fs::write(&self.path, "{}").map_err(MemoryError::Io)?;
             let mut data = self.data.write().unwrap();
             data.clear();
             return Ok(());
@@ -165,6 +166,7 @@ impl MemoryStore {
                 // Do not panic on corrupt JSON; rename the bad file and start fresh.
                 let backup = self.corrupt_backup_path();
                 let _ = fs::rename(&self.path, &backup);
+                fs::write(&self.path, "{}").map_err(MemoryError::Io)?;
                 let mut data = self.data.write().unwrap();
                 data.clear();
                 Ok(())
@@ -378,6 +380,9 @@ mod tests {
         let store = MemoryStore::new(&path).unwrap();
 
         assert!(path.parent().unwrap().exists());
+        assert!(path.exists());
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(serde_json::from_str::<HashMap<String, String>>(&content).unwrap().is_empty());
         assert!(store.get("missing").is_none());
         assert!(store.list().is_empty());
 
@@ -542,7 +547,9 @@ mod tests {
         let store = MemoryStore::new(&path).unwrap();
         assert!(store.list().is_empty());
         assert!(store.get("any").is_none());
-        assert!(!path.exists());
+        assert!(path.exists());
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(serde_json::from_str::<HashMap<String, String>>(&content).unwrap().is_empty());
 
         let parent = path.parent().unwrap();
         let mut backup_count = 0;
