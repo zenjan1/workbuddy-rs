@@ -133,7 +133,7 @@ fn draw_ui(frame: &mut Frame, items: &[BacklogItem], selected: usize) {
     if !items.is_empty() {
         state.select(Some(selected));
     }
-    frame.render_stateful_widget(list, frame.size(), &mut state);
+    frame.render_stateful_widget(list, frame.area(), &mut state);
 }
 
 #[cfg(test)]
@@ -176,4 +176,65 @@ mod tests {
         assert_eq!(handle_key(KeyCode::Char('q'), 2, 5), (2, KeyAction::Quit));
         assert_eq!(handle_key(KeyCode::Char('a'), 1, 5), (1, KeyAction::None));
     }
+
+    #[test]
+    fn maps_backlog_to_rows_empty_list() {
+        let items: Vec<BacklogItem> = vec![];
+        let rows = map_backlog_to_rows(&items);
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn maps_backlog_to_rows_preserves_special_characters() {
+        let items = vec![
+            BacklogItem::new(1, "Fix \"quotes\" & <angles>", "done"),
+            BacklogItem::new(2, "Unicode: 任务 ✓", "pending"),
+            BacklogItem::new(3, "Line\nbreak", "todo"),
+        ];
+        let rows = map_backlog_to_rows(&items);
+        assert_eq!(
+            rows,
+            vec![
+                "  1. Fix \"quotes\" & <angles> [done]".to_string(),
+                "  2. Unicode: 任务 ✓ [pending]".to_string(),
+                "  3. Line\nbreak [todo]".to_string(),
+            ]
+        );
+    }
+}
+
+pub fn run(workspace_dir: &std::path::Path) -> Result<()> {
+    let backlog_path = workspace_dir.join("backlog.json");
+    let items = if backlog_path.exists() {
+        let data = std::fs::read_to_string(&backlog_path)?;
+        let parsed: serde_json::Value = serde_json::from_str(&data)?;
+        let mut items = Vec::new();
+        if let Some(tasks) = parsed.get("tasks").and_then(|v| v.as_array()) {
+            for (idx, task) in tasks.iter().enumerate() {
+                let title = task
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(无标题)")
+                    .to_string();
+                let priority = task
+                    .get("priority")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                let skip = task
+                    .get("skip")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let status = if skip {
+                    "skip".to_string()
+                } else {
+                    format!("优先级 {}", priority)
+                };
+                items.push(BacklogItem::new(idx + 1, title, status));
+            }
+        }
+        items
+    } else {
+        Vec::new()
+    };
+    run_tui(&items)
 }

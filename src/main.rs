@@ -69,11 +69,7 @@ mod serve {
     }
 }
 mod status;
-mod tui {
-    pub fn run(_workspace_dir: &std::path::Path) -> anyhow::Result<()> {
-        Ok(())
-    }
-}
+mod tui;
 mod review {
     use super::*;
     use anyhow::anyhow;
