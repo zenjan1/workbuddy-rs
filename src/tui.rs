@@ -31,15 +31,90 @@ impl BacklogItem {
     }
 }
 
+/// Task alias for external callers that already use the name `Task`.
+pub type Task = BacklogItem;
+
 /// Pure mapping from backlog data to list row strings.
 ///
 /// The UI reuses this function so a test on this function is also a test on
 /// the basic list content.
-pub fn map_backlog_to_rows(items: &[BacklogItem]) -> Vec<String> {
+pub fn map_backlog_to_rows(items: &[Task]) -> Vec<String> {
     items
         .iter()
         .map(|item| format!("{:>3}. {} [{}]", item.id, item.title, item.status))
         .collect()
+}
+
+/// Load backlog items from the workspace backlog file.
+///
+/// Returns an empty list when the file does not exist.
+pub fn load_backlog(workspace_dir: &std::path::Path) -> Result<Vec<Task>> {
+    let backlog_path = workspace_dir.join("backlog.json");
+    if !backlog_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let data = std::fs::read_to_string(&backlog_path)?;
+    let parsed: serde_json::Value = serde_json::from_str(&data)?;
+    let mut items = Vec::new();
+    if let Some(tasks) = parsed.get("tasks").and_then(|v| v.as_array()) {
+        for (idx, task) in tasks.iter().enumerate() {
+            let title = task
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(无标题)")
+                .to_string();
+            let priority = task
+                .get("priority")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            let skip = task
+                .get("skip")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let status = if skip {
+                "skip".to_string()
+            } else {
+                format!("优先级 {}", priority)
+            };
+            items.push(Task::new(idx + 1, title, status));
+        }
+    }
+    Ok(items)
+}
+
+/// Pure rendering function: draws the backlog list with ratatui's TestBackend
+/// and returns the resulting static snapshot as a string. It includes the
+/// "Backlog" title and task count in the output.
+pub fn render_backlog(tasks: &[Task]) -> String {
+    let rows = if tasks.is_empty() {
+        vec!["No backlog tasks".to_string()]
+    } else {
+        map_backlog_to_rows(tasks)
+    };
+
+    let list_items: Vec<ListItem> = rows.iter().map(|row| ListItem::new(row.clone())).collect();
+    let title = format!(" Backlog ({} tasks) ", tasks.len());
+    let list = List::new(list_items).block(Block::default().borders(Borders::ALL).title(title));
+
+    let height = (rows.len() as u16 + 4).max(10);
+    let backend = ratatui::backend::TestBackend::new(80, height);
+    let mut terminal = Terminal::new(backend).expect("failed to create test terminal");
+    terminal
+        .draw(|frame| {
+            frame.render_widget(list, frame.area());
+        })
+        .expect("failed to draw backlog snapshot");
+
+    let buffer = terminal.backend().buffer();
+    let mut output = String::new();
+    for y in 0..buffer.area.height {
+        for x in 0..buffer.area.width {
+            output.push_str(buffer[(x, y)].symbol());
+        }
+        output.push('\n');
+    }
+    output.trim().to_string()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,7 +148,8 @@ pub fn handle_key(key: KeyCode, selected: usize, item_count: usize) -> (usize, K
 
 /// Run the blocking TUI. Renders `items` as a selectable list, supports
 /// Up/Down to move the cursor and `q` to quit.
-pub fn run_tui(items: &[BacklogItem]) -> Result<()> {
+pub fn run_tui(tasks: Vec<Task>) -> Result<()> {
+    let items = &tasks;
     enable_raw_mode()?;
     let mut stdout = stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -126,7 +202,7 @@ fn draw_ui(frame: &mut Frame, items: &[BacklogItem], selected: usize) {
     let list = List::new(list_items).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(" Backlog (Up/Down: move, q: quit) "),
+            .title(format!(" Backlog ({} tasks, Up/Down: move, q: quit) ", items.len())),
     );
 
     let mut state = ListState::default();
@@ -201,40 +277,29 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn render_backlog_contains_title_and_count() {
+        let tasks = sample_items();
+        let output = render_backlog(&tasks);
+
+        assert!(output.contains("Backlog"), "output should contain title: {output}");
+        assert!(output.contains("3"), "output should contain task count: {output}");
+        assert!(output.contains("  1. Design TUI module [pending]"), "output should contain first row: {output}");
+    }
+
+    #[test]
+    fn render_backlog_empty_does_not_panic() {
+        let tasks: Vec<Task> = vec![];
+        let output = render_backlog(&tasks);
+
+        assert!(output.contains("Backlog"), "output should contain title: {output}");
+        assert!(output.contains("0"), "output should contain zero task count: {output}");
+        assert!(output.contains("No backlog tasks"), "output should contain empty placeholder: {output}");
+    }
 }
 
 pub fn run(workspace_dir: &std::path::Path) -> Result<()> {
-    let backlog_path = workspace_dir.join("backlog.json");
-    let items = if backlog_path.exists() {
-        let data = std::fs::read_to_string(&backlog_path)?;
-        let parsed: serde_json::Value = serde_json::from_str(&data)?;
-        let mut items = Vec::new();
-        if let Some(tasks) = parsed.get("tasks").and_then(|v| v.as_array()) {
-            for (idx, task) in tasks.iter().enumerate() {
-                let title = task
-                    .get("title")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("(无标题)")
-                    .to_string();
-                let priority = task
-                    .get("priority")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0);
-                let skip = task
-                    .get("skip")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let status = if skip {
-                    "skip".to_string()
-                } else {
-                    format!("优先级 {}", priority)
-                };
-                items.push(BacklogItem::new(idx + 1, title, status));
-            }
-        }
-        items
-    } else {
-        Vec::new()
-    };
-    run_tui(&items)
+    let items = load_backlog(workspace_dir)?;
+    run_tui(items)
 }

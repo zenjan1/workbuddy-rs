@@ -354,7 +354,10 @@ async fn main() -> Result<()> {
         Cmd::Status => status::run(&cfg.workspace_dir)
             .map_err(|e| anyhow::anyhow!("查看 workspace 运行状态失败: {e:#}")),
         Cmd::Tui => {
-            tui::run(&cfg.workspace_dir)
+            let backlog_dir = cfg.repo_dir.join(".workbuddy");
+            let tasks = tui::load_backlog(&backlog_dir)
+                .map_err(|e| anyhow::anyhow!("加载 backlog 失败: {e:#}"))?;
+            tui::run_tui(tasks)
                 .map_err(|e| anyhow::anyhow!("启动 TUI 失败: {e:#}"))
         }
         Cmd::Serve { listen } => {
