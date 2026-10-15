@@ -53,6 +53,39 @@ fn parse_limit(query: &str) -> Option<usize> {
     })
 }
 
+fn parse_offset(query: &str) -> Option<usize> {
+    query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        if key == "offset" {
+            value.parse::<usize>().ok()
+        } else {
+            None
+        }
+    })
+}
+
+const DEFAULT_LIMIT: usize = 20;
+const MAX_LIMIT: usize = 100;
+
+fn parse_pagination(query: Option<&str>) -> (usize, usize) {
+    let Some(query) = query else {
+        return (DEFAULT_LIMIT, 0);
+    };
+    let limit = parse_limit(query)
+        .unwrap_or(DEFAULT_LIMIT)
+        .min(MAX_LIMIT);
+    let offset = parse_offset(query).unwrap_or(0);
+    (limit, offset)
+}
+
+#[derive(serde::Serialize)]
+struct RunsResponse {
+    runs: Vec<RunRecord>,
+    limit: usize,
+    offset: usize,
+    total: usize,
+}
+
 #[derive(Clone)]
 struct AppState {
     workspace_dir: Arc<PathBuf>,
@@ -65,14 +98,17 @@ async fn health() -> impl axum::response::IntoResponse {
 async fn list_runs(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
-) -> Result<Json<Vec<RunRecord>>, (StatusCode, Json<serde_json::Value>)> {
-    let mut runs = Workspace::root(&state.workspace_dir);
-    if let Some(query) = query {
-        if let Some(limit) = parse_limit(&query) {
-            runs.truncate(limit);
-        }
-    }
-    Ok(Json(runs))
+) -> Result<Json<RunsResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let all_runs = Workspace::root(&state.workspace_dir);
+    let total = all_runs.len();
+    let (limit, offset) = parse_pagination(query.as_deref());
+    let runs = all_runs.into_iter().skip(offset).take(limit).collect();
+    Ok(Json(RunsResponse {
+        runs,
+        limit,
+        offset,
+        total,
+    }))
 }
 
 async fn get_run(
@@ -210,6 +246,15 @@ mod tests {
         assert_eq!(parse_limit("foo=bar"), None);
     }
 
+    #[test]
+    fn test_parse_pagination_defaults_and_bounds() {
+        assert_eq!(parse_pagination(None), (20, 0));
+        assert_eq!(parse_pagination(Some("")), (20, 0));
+        assert_eq!(parse_pagination(Some("limit=5&offset=2")), (5, 2));
+        assert_eq!(parse_pagination(Some("limit=999&offset=10")), (100, 10));
+        assert_eq!(parse_pagination(Some("limit=abc&offset=xyz")), (20, 0));
+    }
+
     #[tokio::test]
     async fn test_axum_http_routes() {
         let (workspace_dir, run_id) = create_test_workspace();
@@ -242,7 +287,30 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let json: Value = serde_json::from_slice(&body).unwrap();
-        assert!(json.is_array());
+        assert_eq!(json["limit"].as_u64(), Some(20));
+        assert_eq!(json["offset"].as_u64(), Some(0));
+        assert_eq!(json["total"].as_u64(), Some(1));
+        let runs = json["runs"].as_array().unwrap();
+        assert_eq!(runs.len(), 1);
+
+        // runs with pagination query: offset=1 should skip the only run
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/runs?limit=5&offset=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["limit"].as_u64(), Some(5));
+        assert_eq!(json["offset"].as_u64(), Some(1));
+        assert_eq!(json["total"].as_u64(), Some(1));
+        assert_eq!(json["runs"].as_array().unwrap().len(), 0);
 
         // runs/{id}
         let response = app
