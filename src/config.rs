@@ -163,6 +163,94 @@ impl Config {
         Ok(FileConfig::default())
     }
 
+    pub fn set_value(&mut self, key: &str, value: &str) -> Result<()> {
+        Self::validate_config_key(key)?;
+        let path = Self::config_file_path();
+        // 先持久化，成功后再更新内存配置，避免部分更新。
+        Self::update_config_file(&path, key, value)?;
+        self.apply_value(key, value)?;
+        Ok(())
+    }
+
+    fn apply_value(&mut self, key: &str, value: &str) -> Result<()> {
+        match key {
+            "max_budget" | "price" | "cost_per_1k_tokens" => {
+                let n: f64 = value
+                    .parse()
+                    .with_context(|| format!("{key} 需要是数字"))?;
+                if !n.is_finite() {
+                    anyhow::bail!("{key} 必须是有限数字");
+                }
+                match key {
+                    "max_budget" if n <= 0.0 => anyhow::bail!("max_budget 必须为非负数"),
+                    "price" | "cost_per_1k_tokens" if n < 0.0 => {
+                        anyhow::bail!("{key} 不能为负数")
+                    }
+                    _ => {}
+                }
+                match key {
+                    "max_budget" => self.max_budget = n,
+                    "price" => self.price = n,
+                    "cost_per_1k_tokens" => self.cost_per_1k_tokens = n,
+                    _ => unreachable!(),
+                }
+            }
+            "max_parallel" | "request_timeout_secs" | "webhook_retry" | "webhook_timeout_secs" => {
+                let n: i64 = value
+                    .parse()
+                    .with_context(|| format!("{key} 需要是整数"))?;
+                if matches!(
+                    key,
+                    "max_parallel" | "request_timeout_secs" | "webhook_timeout_secs"
+                ) && n <= 0 {
+                    anyhow::bail!("{key} 必须大于 0");
+                }
+                if key == "webhook_retry" && n < 0 {
+                    anyhow::bail!("{key} 不能为负数");
+                }
+                match key {
+                    "max_parallel" => self.max_parallel = n as usize,
+                    "request_timeout_secs" => self.request_timeout_secs = n as u64,
+                    "webhook_retry" => self.webhook_retry = n as u32,
+                    "webhook_timeout_secs" => self.webhook_timeout_secs = n as u64,
+                    _ => unreachable!(),
+                }
+            }
+            "base_url" | "webhook_url" => {
+                validate_url_value(key, value)?;
+                if key == "base_url" {
+                    self.base_url = value.to_string();
+                } else {
+                    self.webhook_url = Some(value.to_string());
+                }
+            }
+            "api_key" => self.api_key = Some(value.to_string()),
+            "model" => {
+                if value.trim().is_empty() {
+                    anyhow::bail!("model 不能为空");
+                }
+                self.model = value.to_string();
+            }
+            "workspace_dir" => {
+                if value.trim().is_empty() {
+                    anyhow::bail!("workspace_dir 不能为空");
+                }
+                self.workspace_dir = PathBuf::from(value);
+            }
+            "repo_dir" => {
+                if value.trim().is_empty() {
+                    anyhow::bail!("repo_dir 不能为空");
+                }
+                self.repo_dir = PathBuf::from(value);
+            }
+            _ => anyhow::bail!(
+                "未知配置键: {key}; 可用键: {}",
+                CONFIG_KEYS.join(", ")
+            ),
+        }
+        Ok(())
+    }
+
     pub fn set_config_value(key: &str, value: &str) -> Result<()> {
         Self::validate_config_key(key)?;
         let path = Self::config_file_path();
@@ -619,9 +707,42 @@ mod tests {
         let loaded: FileConfig = toml::from_str(&text).unwrap();
         assert_eq!(loaded.max_budget, Some(42.0));
         assert_eq!(loaded.base_url.as_deref(), Some("https://example.com/v1"));
+        std::fs::remove_file(&path).ok();
+    }
 
-        let reloaded: FileConfig = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(reloaded.max_budget, Some(42.0));
+    #[test]
+    fn config_apply_value_updates_memory() {
+        let mut config = valid_config();
+
+        config.apply_value("model", "qwen-max").unwrap();
+        assert_eq!(config.model, "qwen-max");
+
+        config.apply_value("max_budget", "123.45").unwrap();
+        assert!((config.max_budget - 123.45).abs() < 1e-12);
+
+        config.apply_value("max_parallel", "8").unwrap();
+        assert_eq!(config.max_parallel, 8);
+
+        config.apply_value("webhook_retry", "6").unwrap();
+        assert_eq!(config.webhook_retry, 6);
+
+        config.apply_value("webhook_url", "https://example.com/hook").unwrap();
+        assert_eq!(config.webhook_url.as_deref(), Some("https://example.com/hook"));
+    }
+
+    #[test]
+    fn config_set_config_value_rejects_unknown_key() {
+        let path = temp_config_path("unknown_key");
+        let err = Config::update_config_file(&path, "unknown_key", "value").unwrap_err();
+        assert!(err.to_string().contains("未知配置键"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn config_set_config_value_rejects_invalid_type() {
+        let path = temp_config_path("invalid_type");
+        let err = Config::update_config_file(&path, "max_budget", "not-a-number").unwrap_err();
+        assert!(err.to_string().contains("需要是数字"));
         std::fs::remove_file(&path).ok();
     }
 
