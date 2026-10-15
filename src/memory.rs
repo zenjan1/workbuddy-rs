@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -42,9 +41,9 @@ impl Error for MemoryError {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryEntry {
-    pub id: String,
-    pub content: String,
-    pub created_at: String,
+    pub id: u64,
+    pub text: String,
+    pub created_at: Option<String>,
 }
 
 pub struct MemoryStore {
@@ -65,7 +64,7 @@ impl Drop for LockGuard {
 }
 
 impl MemoryStore {
-    /// Creates a key-value memory store using `path` as the persistent JSON file.
+    /// Creates a memory store using `path` as the persistent JSON file.
     pub fn new(path: impl Into<PathBuf>) -> Result<Self, MemoryError> {
         let path = path.into();
         if let Some(parent) = path.parent() {
@@ -79,36 +78,59 @@ impl MemoryStore {
         })
     }
 
-    /// Opens the default memory store under `<workspace_dir>/.workbuddy/memory.json`.
+    /// Returns the default path `~/.workbuddy/memory.json`.
+    pub fn default_path() -> PathBuf {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| ".".to_string());
+        PathBuf::from(home).join(".workbuddy").join("memory.json")
+    }
+
+    /// Opens the default memory store at `~/.workbuddy/memory.json`.
+    pub fn open_default() -> Result<Self, MemoryError> {
+        Self::new(Self::default_path())
+    }
+
+    /// Opens a memory store rooted at `workspace_dir` (kept for compatibility).
     pub fn open(workspace_dir: impl AsRef<Path>) -> Result<Self, MemoryError> {
         Self::new(memory_file_path(workspace_dir.as_ref()))
     }
 
-    /// Adds or overwrites a key-value pair in the persistent store.
-    pub fn add(&self, key: &str, value: &str) -> Result<(), MemoryError> {
-        validate_key(key)?;
+    /// Adds a new memory entry with the given text. Returns the created entry.
+    pub fn add(&self, text: &str) -> Result<MemoryEntry, MemoryError> {
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return Err(MemoryError::Invalid("text must not be empty".to_owned()));
+        }
         let _guard = self.acquire_lock()?;
         let mut entries = self.read_entries_locked()?;
-        entries.insert(key.to_string(), value.to_string());
+        let next_id = entries.iter().map(|e| e.id).max().unwrap_or(0) + 1;
+        let entry = MemoryEntry {
+            id: next_id,
+            text,
+            created_at: Some(now_iso8601()),
+        };
+        entries.push(entry.clone());
         self.write_entries_atomic(&entries)?;
-        Ok(())
+        Ok(entry)
     }
 
-    /// Gets the value for `key`, if present.
-    pub fn get(&self, key: &str) -> Result<Option<String>, MemoryError> {
-        validate_key(key)?;
+    /// Gets a memory entry by ID.
+    pub fn get(&self, id: u64) -> Result<MemoryEntry, MemoryError> {
         let _guard = self.acquire_lock()?;
         let entries = self.read_entries_locked()?;
-        Ok(entries.get(key).cloned())
+        entries
+            .into_iter()
+            .find(|e| e.id == id)
+            .ok_or_else(|| MemoryError::NotFound(id.to_string()))
     }
 
-    /// Lists all keys sorted alphabetically.
-    pub fn list(&self) -> Result<Vec<String>, MemoryError> {
+    /// Lists all memory entries sorted by ID.
+    pub fn list(&self) -> Result<Vec<MemoryEntry>, MemoryError> {
         let _guard = self.acquire_lock()?;
-        let entries = self.read_entries_locked()?;
-        let mut keys: Vec<String> = entries.into_keys().collect();
-        keys.sort();
-        Ok(keys)
+        let mut entries = self.read_entries_locked()?;
+        entries.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(entries)
     }
 
     fn acquire_lock(&self) -> Result<LockGuard, MemoryError> {
@@ -129,24 +151,24 @@ impl MemoryStore {
         }
     }
 
-    fn read_entries_locked(&self) -> Result<HashMap<String, String>, MemoryError> {
+    fn read_entries_locked(&self) -> Result<Vec<MemoryEntry>, MemoryError> {
         if !self.path.exists() {
-            return Ok(HashMap::new());
+            return Ok(Vec::new());
         }
 
         let content = fs::read_to_string(&self.path).map_err(MemoryError::Io)?;
-        match serde_json::from_str::<HashMap<String, String>>(&content) {
+        match serde_json::from_str::<Vec<MemoryEntry>>(&content) {
             Ok(entries) => Ok(entries),
             Err(_err) => {
                 // Do not panic on corrupt JSON; rename the bad file and start fresh.
                 let backup = self.corrupt_backup_path();
                 let _ = fs::rename(&self.path, &backup);
-                Ok(HashMap::new())
+                Ok(Vec::new())
             }
         }
     }
 
-    fn write_entries_atomic(&self, entries: &HashMap<String, String>) -> Result<(), MemoryError> {
+    fn write_entries_atomic(&self, entries: &[MemoryEntry]) -> Result<(), MemoryError> {
         let tmp_path = unique_tmp_path(&self.path);
         let serialized = serde_json::to_string_pretty(entries)
             .map_err(|err| MemoryError::Parse(err.to_string()))?;
@@ -188,9 +210,9 @@ impl MemoryStore {
 }
 
 pub enum MemoryCommand {
-    Add { key: String, value: String },
+    Add { text: String },
     List,
-    Get { key: String },
+    Get { id: u64 },
 }
 
 pub fn run_memory_command(
@@ -198,39 +220,44 @@ pub fn run_memory_command(
     command: MemoryCommand,
 ) -> Result<String, MemoryError> {
     match command {
-        MemoryCommand::Add { key, value } => {
-            store.add(&key, &value)?;
-            Ok(format!("added {key}"))
+        MemoryCommand::Add { text } => {
+            let entry = store.add(&text)?;
+            Ok(format!("added memory #{}: {}", entry.id, entry.text))
         }
         MemoryCommand::List => {
-            let keys = store.list()?;
+            let entries = store.list()?;
+            if entries.is_empty() {
+                return Ok(String::new());
+            }
             let mut out = String::new();
-            for key in keys {
-                out.push_str(&key);
-                out.push('\n');
+            for entry in entries {
+                out.push_str(&format!("#{}\t{}\n", entry.id, entry.text));
             }
             Ok(out)
         }
-        MemoryCommand::Get { key } => match store.get(&key)? {
-            Some(value) => Ok(format!("{key}\t{value}")),
-            None => Err(MemoryError::NotFound(key)),
-        },
+        MemoryCommand::Get { id } => {
+            let entry = store.get(id)?;
+            let created = entry.created_at.as_deref().unwrap_or("-");
+            Ok(format!(
+                "#{}\t{}\tcreated_at: {}",
+                entry.id, entry.text, created
+            ))
+        }
     }
 }
 
 impl MemoryCommand {
     pub fn parse(args: &[String]) -> Result<Self, String> {
         if args.is_empty() {
-            return Err("用法: memory add <key> <value> | list | get <key>".to_string());
+            return Err("用法: memory add <text> | list | get <id>".to_string());
         }
         match args[0].as_str() {
             "add" => {
-                if args.len() < 3 {
-                    return Err("用法: memory add <key> <value>".to_string());
+                if args.len() < 2 {
+                    return Err("用法: memory add <text>".to_string());
                 }
-                let key = args[1].clone();
-                let value = args[2..].join(" ");
-                Ok(MemoryCommand::Add { key, value })
+                let text = args[1..].join(" ");
+                Ok(MemoryCommand::Add { text })
             }
             "list" => {
                 if args.len() != 1 {
@@ -240,9 +267,13 @@ impl MemoryCommand {
             }
             "get" => {
                 if args.len() != 2 {
-                    return Err("用法: memory get <key>".to_string());
+                    return Err("用法: memory get <id>".to_string());
                 }
-                Ok(MemoryCommand::Get { key: args[1].clone() })
+                let id = args[1]
+                    .trim()
+                    .parse::<u64>()
+                    .map_err(|_| "memory id 必须是正整数".to_string())?;
+                Ok(MemoryCommand::Get { id })
             }
             other => Err(format!("未知记忆子命令: {other}")),
         }
@@ -251,22 +282,6 @@ impl MemoryCommand {
 
 pub fn memory_file_path(workspace_dir: &Path) -> PathBuf {
     workspace_dir.join(".workbuddy").join("memory.json")
-}
-
-fn validate_key(key: &str) -> Result<(), MemoryError> {
-    if key.trim().is_empty() {
-        return Err(MemoryError::Invalid("key must not be empty".to_owned()));
-    }
-    Ok(())
-}
-
-fn validate_content(content: &str) -> Result<(), MemoryError> {
-    if content.is_empty() {
-        return Err(MemoryError::Invalid(
-            "content must not be empty".to_owned(),
-        ));
-    }
-    Ok(())
 }
 
 fn now_iso8601() -> String {
@@ -344,75 +359,74 @@ mod tests {
 
         assert!(path.parent().unwrap().exists());
         assert!(store.list().unwrap().is_empty());
-        assert!(store.get("missing").unwrap().is_none());
+        assert!(matches!(store.get(1), Err(MemoryError::NotFound(_))));
 
         cleanup(&path);
     }
 
     #[test]
-    fn add_persists_key_value_and_get_returns_it() {
+    fn add_persists_entry_and_get_returns_it() {
         let path = temp_memory_path();
         let store = MemoryStore::new(&path).unwrap();
-        store.add("theme", "dark").unwrap();
+        let entry = store.add("hello world").unwrap();
+        assert_eq!(entry.id, 1);
+        assert_eq!(entry.text, "hello world");
+        assert!(entry.created_at.is_some());
         drop(store);
 
         let store = MemoryStore::new(&path).unwrap();
-        assert_eq!(store.get("theme").unwrap(), Some("dark".to_string()));
+        let fetched = store.get(1).unwrap();
+        assert_eq!(fetched, entry);
 
         cleanup(&path);
     }
 
     #[test]
-    fn add_overwrites_existing_key() {
+    fn list_returns_all_entries_sorted_by_id() {
         let path = temp_memory_path();
         let store = MemoryStore::new(&path).unwrap();
 
-        store.add("key", "one").unwrap();
-        store.add("key", "two").unwrap();
-        assert_eq!(store.get("key").unwrap(), Some("two".to_string()));
+        let entry1 = store.add("first").unwrap();
+        let entry2 = store.add("second").unwrap();
+
+        let entries = store.list().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0], entry1);
+        assert_eq!(entries[1], entry2);
 
         cleanup(&path);
     }
 
     #[test]
-    fn add_rejects_empty_key() {
+    fn add_rejects_empty_text() {
         let path = temp_memory_path();
         let store = MemoryStore::new(&path).unwrap();
-        let err = store.add("", "value").unwrap_err();
+        let err = store.add("   ").unwrap_err();
         assert!(matches!(err, MemoryError::Invalid(_)));
 
         cleanup(&path);
     }
 
     #[test]
-    fn get_rejects_empty_key() {
+    fn get_returns_not_found_for_missing_id() {
         let path = temp_memory_path();
         let store = MemoryStore::new(&path).unwrap();
-        let err = store.get("").unwrap_err();
-        assert!(matches!(err, MemoryError::Invalid(_)));
+        let err = store.get(999).unwrap_err();
+        assert!(matches!(err, MemoryError::NotFound(_)));
 
         cleanup(&path);
     }
 
     #[test]
-    fn command_parse_add_missing_value_is_error() {
-        let args = vec!["add".to_string(), "key".to_string()];
+    fn command_parse_add_missing_text_is_error() {
+        let args = vec!["add".to_string()];
         assert!(MemoryCommand::parse(&args).is_err());
     }
 
     #[test]
-    fn list_returns_sorted_keys() {
-        let path = temp_memory_path();
-        let store = MemoryStore::new(&path).unwrap();
-
-        store.add("b", "2").unwrap();
-        store.add("a", "1").unwrap();
-        store.add("c", "3").unwrap();
-
-        let keys = store.list().unwrap();
-        assert_eq!(keys, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
-
-        cleanup(&path);
+    fn command_parse_get_invalid_id_is_error() {
+        let args = vec!["get".to_string(), "abc".to_string()];
+        assert!(MemoryCommand::parse(&args).is_err());
     }
 
     #[test]
@@ -422,7 +436,7 @@ mod tests {
         fs::write(&path, "{ definitely not json").unwrap();
 
         assert!(store.list().unwrap().is_empty());
-        assert!(store.get("anything").unwrap().is_none());
+        assert!(matches!(store.get(1), Err(MemoryError::NotFound(_))));
 
         let parent = path.parent().unwrap();
         let backups: Vec<_> = fs::read_dir(parent)

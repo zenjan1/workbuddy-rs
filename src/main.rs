@@ -302,32 +302,38 @@ async fn main() -> Result<()> {
         }
         Cmd::Selfcheck => cmd_selfcheck(),
         Cmd::Memory { action } => {
-            let memory_path = cfg.workspace_dir.join("memory.json");
-            if let Some(parent) = memory_path.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| anyhow::anyhow!("创建记忆存储目录失败: {e}"))?;
-            }
+            let store = memory::MemoryStore::open_default()
+                .map_err(|e| anyhow::anyhow!("打开记忆存储失败: {e}"))?;
             match action {
                 MemoryAction::Add { text } => {
-                    let id = util::add_memory(&memory_path, &text)
+                    let entry = store.add(&text)
                         .map_err(|e| anyhow::anyhow!("添加记忆失败: {e}"))?;
-                    println!("已添加记忆，id: {}", id.id);
+                    println!("已添加记忆，id: {}", entry.id);
                 }
                 MemoryAction::List => {
-                    let output = util::list_memories(&memory_path)
+                    let entries = store.list()
                         .map_err(|e| anyhow::anyhow!("列出记忆失败: {e}"))?;
-                    if output.is_empty() {
+                    if entries.is_empty() {
                         println!("(暂无记忆)");
                     } else {
-                        for m in &output {
-                            println!("id: {} | 内容: {} | 创建时间: {}", m.id, m.content, m.created_at);
+                        for m in &entries {
+                            println!("id: {} | 内容: {} | 创建时间: {}", m.id, m.text, m.created_at.as_deref().unwrap_or("-"));
                         }
                     }
                 }
                 MemoryAction::Get { id } => {
-                    let output = util::get_memory(&memory_path, id)
-                        .map_err(|e| anyhow::anyhow!("获取记忆失败: {e}"))?;
-                    println!("id: {}\n内容: {}\n创建时间: {}", output.id, output.content, output.created_at);
+                    match store.get(id) {
+                        Ok(m) => {
+                            println!("id: {}\n内容: {}\n创建时间: {}", m.id, m.text, m.created_at.as_deref().unwrap_or("-"));
+                        }
+                        Err(memory::MemoryError::NotFound(_)) => {
+                            eprintln!("错误: 未找到记忆 id={}", id);
+                            std::process::exit(1);
+                        }
+                        Err(e) => {
+                            return Err(anyhow::anyhow!("获取记忆失败: {e}"));
+                        }
+                    }
                 }
             }
             Ok(())
