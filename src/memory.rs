@@ -133,7 +133,22 @@ impl MemoryStore {
     pub fn add(&self, key: &str, value: &str) -> Result<(), MemoryError> {
         let key = key.to_string();
         if key.trim().is_empty() {
-            return Err(MemoryError::Invalid("key must not be empty".to_owned()));
+            return Err(MemoryError::Invalid("memory key must not be empty".to_owned()));
+        }
+        if value.trim().is_empty() {
+            return Err(MemoryError::Invalid("memory value must not be empty".to_owned()));
+        }
+        if let Some(pattern) = find_sensitive_pattern(&key) {
+            return Err(MemoryError::Invalid(format!(
+                "memory key contains sensitive information pattern '{}'; refusing to store secrets",
+                pattern
+            )));
+        }
+        if let Some(pattern) = find_sensitive_pattern(&value) {
+            return Err(MemoryError::Invalid(format!(
+                "memory value contains sensitive information pattern '{}'; refusing to store secrets",
+                pattern
+            )));
         }
         {
             let mut data = self.data.write().unwrap();
@@ -166,8 +181,9 @@ impl MemoryStore {
         removed
     }
 
-    /// Loads key-value pairs from the persistent file.
-    /// A missing file leaves an empty store; a malformed file returns an error.
+    /// Loads key-value pairs from the persistent JSON file.
+    /// A missing file leaves an empty store; a malformed JSON file returns a
+    /// `MemoryError::Parse` with a user-friendly message.
     pub fn load(&self) -> Result<(), MemoryError> {
         if !self.path.exists() {
             let mut data = self.data.write().unwrap();
@@ -176,47 +192,30 @@ impl MemoryStore {
         }
 
         let content = fs::read_to_string(&self.path).map_err(MemoryError::Io)?;
-        let mut entries = BTreeMap::new();
-        for (idx, line) in content.lines().enumerate() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            let (encoded_key, encoded_value) = line.split_once('\t').ok_or_else(|| {
-                MemoryError::Parse(format!("memory file line {} is missing a TAB separator", idx + 1))
-            })?;
-            let key = decode_component(encoded_key);
-            let value = decode_component(encoded_value);
-            if key.is_empty() {
-                return Err(MemoryError::Parse(format!(
-                    "memory file line {} has an empty key",
-                    idx + 1
-                )));
-            }
-            if entries.insert(key.clone(), value).is_some() {
-                return Err(MemoryError::Parse(format!(
-                    "memory file line {} contains a duplicate key: {}",
-                    idx + 1,
-                    key
-                )));
-            }
+        // An empty file is treated as an empty store; this can happen if a
+        // previous write was interrupted before any content was written.
+        if content.trim().is_empty() {
+            let mut data = self.data.write().unwrap();
+            data.clear();
+            return Ok(());
         }
+
+        let entries: BTreeMap<String, String> = serde_json::from_str(&content)
+            .map_err(|err| MemoryError::Parse(format!("invalid JSON in memory file: {err}")))?;
 
         let mut data = self.data.write().unwrap();
         *data = entries;
         Ok(())
     }
 
-    /// Saves the in-memory key-value pairs atomically to the persistent file.
+    /// Saves the in-memory key-value pairs atomically to the persistent JSON file.
     pub fn save(&self) -> Result<(), MemoryError> {
         let _guard = self.acquire_lock()?;
         let data = self.data.read().unwrap();
-        let mut out = String::new();
-        for (key, value) in data.iter() {
-            out.push_str(&encode_component(key));
-            out.push('\t');
-            out.push_str(&encode_component(value));
-            out.push('\n');
-        }
+        let json = serde_json::to_string_pretty(&*data)
+            .map_err(|err| MemoryError::Parse(format!("failed to serialize memory: {err}")))?;
+        let mut out = json.into_bytes();
+        out.push(b'\n');
 
         let tmp_path = unique_tmp_path(&self.path);
         let write_result = (|| -> Result<(), MemoryError> {
@@ -226,7 +225,7 @@ impl MemoryStore {
                 .truncate(true)
                 .open(&tmp_path)
                 .map_err(MemoryError::Io)?;
-            tmp.write_all(out.as_bytes()).map_err(MemoryError::Io)?;
+            tmp.write_all(&out).map_err(MemoryError::Io)?;
             tmp.sync_all().map_err(MemoryError::Io)?;
             Ok(())
         })();
@@ -261,6 +260,44 @@ impl MemoryStore {
             }
         }
     }
+}
+
+fn find_sensitive_pattern(s: &str) -> Option<&'static str> {
+    const SENSITIVE_PATTERNS: [&str; 10] = [
+        "password",
+        "secret",
+        "token",
+        "api_key",
+        "private_key",
+        "access_key",
+        "credential",
+        "passwd",
+        "pwd",
+        "auth_token",
+    ];
+
+    let lower = s.to_ascii_lowercase();
+    for pattern in SENSITIVE_PATTERNS {
+        if lower.contains(pattern) {
+            return Some(pattern);
+        }
+    }
+    None
+}
+
+pub fn add_memory(workspace_dir: &Path, key: &str, value: &str) -> Result<(), MemoryError> {
+    let store = MemoryStore::open(workspace_dir)?;
+    store.add(key, value)
+}
+
+pub fn list_memory(workspace_dir: &Path) -> Result<Vec<(String, String)>, MemoryError> {
+    let store = MemoryStore::open(workspace_dir)?;
+    Ok(store.list())
+}
+
+pub fn get_memory(workspace_dir: &Path, key: &str) -> Result<Option<String>, MemoryError> {
+    let store = MemoryStore::open(workspace_dir)?;
+    Ok(store.get(key))
 }
 
 pub enum MemoryCommand {
@@ -342,33 +379,6 @@ fn unique_tmp_path(path: &Path) -> PathBuf {
     path.with_file_name(tmp_name)
 }
 
-pub fn list_runs(workspace_dir: &std::path::Path) -> anyhow::Result<Vec<crate::workspace::RunRecord>> {
-    if !workspace_dir.exists() {
-        return Ok(Vec::new());
-    }
-    let mut runs = Vec::new();
-    for entry in std::fs::read_dir(workspace_dir)? {
-        let entry = entry?;
-        if !entry.path().is_dir() {
-            continue;
-        }
-        let id = entry.file_name().to_string_lossy().into_owned();
-        if let Ok(run) = get_run(workspace_dir, &id) {
-            runs.push(run);
-        }
-    }
-    runs.sort_by(|a, b| a.id.cmp(&b.id));
-    Ok(runs)
-}
-
-pub fn get_run(workspace_dir: &std::path::Path, id: &str) -> anyhow::Result<crate::workspace::RunRecord> {
-    let run_dir = workspace_dir.join(id);
-    if !run_dir.exists() {
-        return Err(anyhow::anyhow!("run {id} 不存在"));
-    }
-    let ws = crate::workspace::Workspace::open(workspace_dir, id)?;
-    ws.load_record()
-}
 
 #[cfg(any())]
 mod tests {
@@ -856,5 +866,120 @@ mod memory_store_tests {
 
         let err = MemoryStore::new(&path).unwrap_err();
         assert!(matches!(err, MemoryError::Parse(_)));
+    }
+}
+
+#[cfg(test)]
+mod memory_persistence_tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    fn temp_workspace() -> PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!(
+            "workbuddy-memory-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        dir
+    }
+
+    fn cleanup(dir: &Path) {
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn add_memory_creates_and_overwrites() {
+        let ws = temp_workspace();
+        add_memory(&ws, "hello", "world").unwrap();
+        add_memory(&ws, "hello", "again").unwrap();
+        let entries = list_memory(&ws).unwrap();
+        assert_eq!(entries, vec![("hello".to_string(), "again".to_string())]);
+        cleanup(&ws);
+    }
+
+    #[test]
+    fn list_memory_returns_empty_when_file_missing() {
+        let ws = temp_workspace();
+        let entries = list_memory(&ws).unwrap();
+        assert!(entries.is_empty());
+        cleanup(&ws);
+    }
+
+    #[test]
+    fn get_memory_returns_none_when_file_missing_or_key_missing() {
+        let ws = temp_workspace();
+        assert_eq!(get_memory(&ws, "missing").unwrap(), None);
+        add_memory(&ws, "present", "value").unwrap();
+        assert_eq!(get_memory(&ws, "present").unwrap(), Some("value".to_string()));
+        assert_eq!(get_memory(&ws, "missing").unwrap(), None);
+        cleanup(&ws);
+    }
+
+    #[test]
+    fn add_memory_rejects_empty_key_and_value() {
+        let ws = temp_workspace();
+        let err = add_memory(&ws, "   ", "value").unwrap_err();
+        assert!(matches!(err, MemoryError::Invalid(_)));
+
+        // Also test empty value via the store directly.
+        let store = MemoryStore::open(&ws).unwrap();
+        let err = store.add("key", "   ").unwrap_err();
+        assert!(matches!(err, MemoryError::Invalid(_)));
+        cleanup(&ws);
+    }
+
+    #[test]
+    fn add_memory_rejects_sensitive_information() {
+        let ws = temp_workspace();
+        let key_err = add_memory(&ws, "api_key", "value").unwrap_err();
+        assert!(matches!(key_err, MemoryError::Invalid(_)));
+
+        let store = MemoryStore::open(&ws).unwrap();
+        let value_err = store.add("ordinary_key", "password=hunter2").unwrap_err();
+        assert!(matches!(value_err, MemoryError::Invalid(_)));
+
+        // Ensure nothing was persisted.
+        let entries = list_memory(&ws).unwrap();
+        assert!(entries.is_empty());
+        cleanup(&ws);
+    }
+
+    #[test]
+    fn memory_store_persists_json_to_disk() {
+        let ws = temp_workspace();
+        add_memory(&ws, "banana", "yellow").unwrap();
+        add_memory(&ws, "apple", "red").unwrap();
+
+        // Reload from the same workspace to ensure persistence works.
+        let store = MemoryStore::open(&ws).unwrap();
+        let entries = store.list();
+        assert_eq!(entries, vec![
+            ("apple".to_string(), "red".to_string()),
+            ("banana".to_string(), "yellow".to_string()),
+        ]);
+
+        // The file should be valid JSON.
+        let path = memory_file_path(&ws);
+        let content = fs::read_to_string(&path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(parsed.is_object());
+        cleanup(&ws);
+    }
+
+    #[test]
+    fn corrupted_json_returns_parse_error_on_open() {
+        let ws = temp_workspace();
+        fs::create_dir_all(&ws).unwrap();
+        let path = memory_file_path(&ws);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "{not valid json").unwrap();
+
+        let err = MemoryStore::open(&ws).unwrap_err();
+        assert!(matches!(err, MemoryError::Parse(_)));
+        cleanup(&ws);
     }
 }

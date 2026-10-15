@@ -333,50 +333,8 @@ async fn main() -> Result<()> {
         }
         Cmd::Selfcheck => cmd_selfcheck(),
         Cmd::Memory { action } => {
-            let action = parse_memory_args(action)?;
-            let path = match std::env::var("WORKBUDDY_MEMORY_PATH") {
-                Ok(p) if !p.trim().is_empty() => std::path::PathBuf::from(p),
-                _ => {
-                    let home = std::env::var("HOME")
-                        .or_else(|_| std::env::var("USERPROFILE"))
-                        .map_err(|_| anyhow::anyhow!("无法确定 HOME 目录，请设置 WORKBUDDY_MEMORY_PATH 或 HOME"))?;
-                    std::path::PathBuf::from(home).join(".workbuddy").join("memory.db")
-                }
-            };
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| anyhow::anyhow!("创建记忆存储目录失败: {e}"))?;
-            }
-            let store = memory::MemoryStore::open(&path)
-                .map_err(|e| anyhow::anyhow!("打开记忆存储失败: {e}"))?;
-            match action {
-                MemoryAction::Add { key, value } => {
-                    store
-                        .add(&key, &value)
-                        .map_err(|e| anyhow::anyhow!("添加记忆失败: {e}"))?;
-                    println!("已保存记忆: {} = {}", key, value);
-                }
-                MemoryAction::List => {
-                    let entries = store.list();
-                    if entries.is_empty() {
-                        println!("(暂无记忆)");
-                    } else {
-                        for entry in entries {
-                            println!("{:?}", entry);
-                        }
-                    }
-                }
-                MemoryAction::Get { key } => {
-                    match store.get(&key) {
-                        Some(entry) => println!("{:?}", entry),
-                        None => {
-                            eprintln!("错误: 未找到记忆 key '{}'", key);
-                            std::process::exit(1);
-                        }
-                    }
-                }
-            }
-            Ok(())
+            let path = cfg.workspace_dir.join("memory.json");
+            run_memory_command_at(&path, action)
         }
         Cmd::Status => status::run(&cfg.workspace_dir)
             .map_err(|e| anyhow::anyhow!("查看 workspace 运行状态失败: {e:#}")),
@@ -429,6 +387,54 @@ fn parse_memory_args(action: MemoryAction) -> Result<MemoryAction> {
         MemoryAction::List => {}
     }
     Ok(action)
+}
+
+fn validate_memory_safety(key: &str, value: &str) -> Result<()> {
+    const SENSITIVE_WORDS: &[&str] = &[
+        "api_key", "apikey", "secret", "password", "passwd",
+        "token", "private_key", "access_key", "credential", "authorization",
+    ];
+    for word in SENSITIVE_WORDS {
+        if key.to_lowercase().contains(word) || value.to_lowercase().contains(word) {
+            anyhow::bail!("禁止存储敏感信息: key 或 value 中不能包含 '{}'", word);
+        }
+    }
+    Ok(())
+}
+
+fn run_memory_command_at(path: &std::path::Path, action: MemoryAction) -> Result<()> {
+    let action = parse_memory_args(action)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| anyhow::anyhow!("创建记忆存储目录失败: {e}"))?;
+    }
+    let store = memory::MemoryStore::open(path)
+        .map_err(|e| anyhow::anyhow!("打开记忆存储失败: {e}"))?;
+    match action {
+        MemoryAction::Add { key, value } => {
+            validate_memory_safety(&key, &value)?;
+            store.add(&key, &value)
+                .map_err(|e| anyhow::anyhow!("添加记忆失败: {e}"))?;
+            println!("已保存记忆: {} = {}", key, value);
+        }
+        MemoryAction::List => {
+            let entries = store.list();
+            if entries.is_empty() {
+                println!("(暂无记忆)");
+            } else {
+                for entry in entries {
+                    println!("{:?}", entry);
+                }
+            }
+        }
+        MemoryAction::Get { key } => {
+            match store.get(&key) {
+                Some(entry) => println!("{:?}", entry),
+                None => anyhow::bail!("未找到记忆 key '{}'", key),
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -532,6 +538,118 @@ mod memory_tests {
             Ok(_) => panic!("expected missing key error"),
             Err(e) => assert_eq!(e.kind(), ErrorKind::MissingRequiredArgument),
         }
+    }
+
+    fn temp_memory_path(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "workbuddy_memory_{}_{}_{}.json",
+            tag,
+            std::process::id(),
+            nanos
+        ))
+    }
+
+    #[test]
+    fn run_memory_command_add_list_get_and_override() {
+        let path = temp_memory_path("basic");
+        let _ = std::fs::remove_file(&path);
+
+        run_memory_command_at(
+            &path,
+            MemoryAction::Add {
+                key: "greeting".to_string(),
+                value: "hello".to_string(),
+            },
+        )
+        .expect("add greeting");
+
+        run_memory_command_at(
+            &path,
+            MemoryAction::Get {
+                key: "greeting".to_string(),
+            },
+        )
+        .expect("get greeting");
+
+        let store = memory::MemoryStore::open(&path).expect("open store after add");
+        assert_eq!(store.get("greeting"), Some("hello".to_string()));
+
+        run_memory_command_at(
+            &path,
+            MemoryAction::Add {
+                key: "greeting".to_string(),
+                value: "world".to_string(),
+            },
+        )
+        .expect("override greeting");
+
+        let store = memory::MemoryStore::open(&path).expect("open store after override");
+        assert_eq!(store.get("greeting"), Some("world".to_string()));
+
+        run_memory_command_at(&path, MemoryAction::List).expect("list memory");
+        let store = memory::MemoryStore::open(&path).expect("open store after list");
+        assert_eq!(store.list().len(), 1);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn run_memory_command_rejects_sensitive_info() {
+        let path = temp_memory_path("sensitive");
+        let _ = std::fs::remove_file(&path);
+
+        let res = run_memory_command_at(
+            &path,
+            MemoryAction::Add {
+                key: "api_key".to_string(),
+                value: "abc".to_string(),
+            },
+        );
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("禁止存储敏感信息"));
+
+        let res = run_memory_command_at(
+            &path,
+            MemoryAction::Add {
+                key: "user".to_string(),
+                value: "password123".to_string(),
+            },
+        );
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("禁止存储敏感信息"));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn run_memory_command_rejects_blank_and_missing_get() {
+        let path = temp_memory_path("blank");
+        let _ = std::fs::remove_file(&path);
+
+        let res = run_memory_command_at(
+            &path,
+            MemoryAction::Add {
+                key: "k".to_string(),
+                value: "  ".to_string(),
+            },
+        );
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("记忆 value 不能为空"));
+
+        let res = run_memory_command_at(
+            &path,
+            MemoryAction::Get {
+                key: "missing".to_string(),
+            },
+        );
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("未找到记忆 key"));
+
+        let _ = std::fs::remove_file(&path);
     }
 }
 
