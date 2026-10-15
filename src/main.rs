@@ -175,6 +175,9 @@ enum Cmd {
     Tui,
     /// 启动只读 HTTP 服务
     Serve {
+        /// 监听地址（默认 127.0.0.1）
+        #[arg(long, default_value = "127.0.0.1")]
+        addr: std::net::IpAddr,
         /// 监听端口（默认 8080）
         #[arg(short, long, default_value = "8080")]
         port: u16,
@@ -347,8 +350,8 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Serve { port } => {
-            let bind_addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        Cmd::Serve { addr, port } => {
+            let bind_addr = std::net::SocketAddr::new(addr, port);
             println!("只读 HTTP 服务已启动: http://{bind_addr}");
             serve::run(&cfg.workspace_dir, bind_addr)
                 .await
