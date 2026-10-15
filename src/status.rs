@@ -113,26 +113,43 @@ fn history_entries_from_run(
     record: &RunRecord,
     cost_per_1k_tokens: Option<f64>,
 ) -> Vec<HistoryEntry> {
-    record
-        .steps
-        .iter()
-        .map(|step| {
-            let content = step
-                .error
-                .clone()
-                .unwrap_or_else(|| step.output_preview.clone());
-            let content = truncate_chars(&content, 80);
-            let cost = record.token_usage.and_then(|tokens| {
-                cost_per_1k_tokens.map(|price| price * (tokens as f64 / 1000.0))
-            });
-            let usage = format_usage(record.token_usage, record.char_usage, cost);
-            let log = format!("[{}] {}: {} {}", record.id, step.name, content, usage);
-            HistoryEntry {
-                success: step.ok,
-                log,
-            }
-        })
-        .collect()
+    let success = record.steps.iter().all(|step| step.ok);
+    let cost = record.token_usage.and_then(|tokens| {
+        cost_per_1k_tokens.map(|price| price * (tokens as f64 / 1000.0))
+    });
+    let usage = format_usage(record.token_usage, record.char_usage, cost);
+
+    let content = if success {
+        record
+            .steps
+            .last()
+            .map(|step| step.output_preview.clone())
+            .unwrap_or_else(|| record.goal.clone())
+    } else {
+        record
+            .steps
+            .iter()
+            .rev()
+            .find(|step| !step.ok)
+            .map(|step| {
+                step.error
+                    .clone()
+                    .unwrap_or_else(|| step.output_preview.clone())
+            })
+            .unwrap_or_else(|| record.goal.clone())
+    };
+    let content = truncate_chars(&content, 80);
+    let state = if success { "completed" } else { "failed" };
+    let log = format!(
+        "[{}] {} ({} steps): {} {}",
+        record.id,
+        state,
+        record.steps.len(),
+        content,
+        usage
+    );
+
+    vec![HistoryEntry { success, log }]
 }
 
 fn read_supervisor_running(workspace_dir: &Path) -> anyhow::Result<bool> {
@@ -344,6 +361,42 @@ mod tests {
         assert!(rendered.contains("Supervisor: running"));
         assert!(rendered.contains("Last run: 2 completed, 1 failed"));
         assert!(rendered.contains("Recent logs:"));
+
+        fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn parse_status_counts_runs_not_steps() {
+        let workspace = test_workspace("counts-runs");
+        write_run_record(
+            &workspace.join("runs"),
+            "run-multi-ok.json",
+            &run_record(
+                "run-multi-ok",
+                vec![
+                    step(1, "plan", true, None, "planned"),
+                    step(2, "build", true, None, "built"),
+                ],
+            ),
+        );
+        write_run_record(
+            &workspace.join("runs"),
+            "run-multi-failed.json",
+            &run_record(
+                "run-multi-failed",
+                vec![
+                    step(1, "plan", true, None, "planned"),
+                    step(2, "build", false, Some("boom"), "build failed"),
+                ],
+            ),
+        );
+
+        let summary = parse_status(&workspace).unwrap();
+        assert_eq!(summary.completed_runs, 1);
+        assert_eq!(summary.failed_runs, 1);
+        assert_eq!(summary.recent_logs.len(), 2);
+        assert!(summary.recent_logs.iter().any(|log| log.contains("run-multi-ok")));
+        assert!(summary.recent_logs.iter().any(|log| log.contains("run-multi-failed")));
 
         fs::remove_dir_all(&workspace).unwrap();
     }
