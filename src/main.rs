@@ -515,8 +515,12 @@ fn cmd_list(cfg: Config, since: Option<&str>) -> Result<()> {
 
 fn cmd_show(cfg: Config, id: &str) -> Result<()> {
     let runs = Workspace::root(&cfg.workspace_dir);
-    let idx = workspace::resolve_task_id(id, &runs)
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let idx = match workspace::resolve_task_id(id, &runs) {
+        Ok(idx) => idx,
+        Err(e) => {
+            anyhow::bail!("{} 提示：若任务标题存在冲突，请使用任务索引（数字 id）引用任务。", e);
+        }
+    };
     let rec = runs.get(idx).ok_or_else(|| anyhow::anyhow!("任务 {} 不存在", id))?;
     let ws = Workspace::open(&cfg.workspace_dir, &rec.id)?;
     let rec = ws.load_record()?;

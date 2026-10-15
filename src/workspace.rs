@@ -253,7 +253,7 @@ pub fn resolve_task_id(input: &str, runs: &[RunRecord]) -> Result<usize, String>
         _ => {
             let titles: Vec<String> = exact_matches.iter().map(|(_, t)| t.clone()).collect();
             return Err(format!(
-                "任务标题 '{}' 匹配到多个任务: {}",
+                "任务标题 '{}' 匹配到多个任务: {}。请使用数字索引",
                 input,
                 titles.join(", ")
             ));
@@ -274,7 +274,7 @@ pub fn resolve_task_id(input: &str, runs: &[RunRecord]) -> Result<usize, String>
         _ => {
             let titles: Vec<String> = prefix_matches.iter().map(|(_, t)| t.clone()).collect();
             Err(format!(
-                "任务标题 '{}' 匹配到多个任务: {}",
+                "任务标题 '{}' 匹配到多个任务: {}。请使用数字索引",
                 input,
                 titles.join(", ")
             ))
@@ -620,6 +620,66 @@ mod tests {
     fn advance_roadmap_returns_none_without_changes() {
         let input = "# VISION\n\n- [ ] 任务 A\n- [ ] 任务 B\n";
         assert!(advance_roadmap_text(input, "2025-04-08").is_none());
+    }
+
+    #[test]
+    fn resolve_task_id_supports_numeric_unique_and_conflict() {
+        let runs = vec![
+            RunRecord {
+                token_usage: None,
+                char_usage: None,
+                id: "run-0".into(),
+                goal: "任务 A".into(),
+                created: "now".into(),
+                model: "mock".into(),
+                mock: true,
+                steps: vec![],
+            },
+            RunRecord {
+                token_usage: None,
+                char_usage: None,
+                id: "run-1".into(),
+                goal: "任务 B".into(),
+                created: "now".into(),
+                model: "mock".into(),
+                mock: true,
+                steps: vec![],
+            },
+        ];
+
+        assert_eq!(resolve_task_id("0", &runs).unwrap(), 0);
+        assert_eq!(resolve_task_id("1", &runs).unwrap(), 1);
+        assert!(resolve_task_id("2", &runs).is_err());
+
+        assert_eq!(resolve_task_id("任务 B", &runs).unwrap(), 1);
+        assert_eq!(resolve_task_id("任务 A", &runs).unwrap(), 0);
+
+        let conflict_runs = vec![
+            RunRecord {
+                token_usage: None,
+                char_usage: None,
+                id: "run-0".into(),
+                goal: "任务 A".into(),
+                created: "now".into(),
+                model: "mock".into(),
+                mock: true,
+                steps: vec![],
+            },
+            RunRecord {
+                token_usage: None,
+                char_usage: None,
+                id: "run-1".into(),
+                goal: "任务 A".into(),
+                created: "now".into(),
+                model: "mock".into(),
+                mock: true,
+                steps: vec![],
+            },
+        ];
+
+        let err = resolve_task_id("任务 A", &conflict_runs).unwrap_err();
+        assert!(err.contains("匹配到多个任务"));
+        assert!(err.contains("数字索引"));
     }
 
     fn create_task_dir(root: &Path, id: &str, goal: &str) {
