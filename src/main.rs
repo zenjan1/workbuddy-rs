@@ -527,6 +527,121 @@ mod memory_tests {
     }
 }
 
+#[cfg(test)]
+mod config_set_tests {
+    use super::*;
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_config_path(tag: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "workbuddy_config_{}_{}_{}.toml",
+            tag,
+            std::process::id(),
+            nanos
+        ))
+    }
+
+    fn write_config(path: &std::path::Path, contents: &str) {
+        let mut file = std::fs::File::create(path).unwrap();
+        file.write_all(contents.as_bytes()).unwrap();
+    }
+
+    fn read_config(path: &std::path::Path) -> String {
+        std::fs::read_to_string(path).unwrap()
+    }
+
+    #[test]
+    fn cli_parses_config_set() {
+        let cli = Cli::try_parse_from(["workbuddy", "config", "set", "timeout", "45"])
+            .expect("parse config set");
+        match cli.cmd {
+            Cmd::Config { action } => match action {
+                Some(ConfigAction::Set { key, value }) => {
+                    assert_eq!(key, "timeout");
+                    assert_eq!(value, "45");
+                }
+                _ => panic!("expected set action"),
+            },
+            _ => panic!("expected config command"),
+        }
+    }
+
+    #[test]
+    fn config_set_updates_timeout_and_preserves_others() {
+        let path = temp_config_path("update");
+        write_config(
+            &path,
+            r#"
+model = "old-model"
+timeout = 30
+
+[other]
+nested = "keep"
+"#,
+        );
+
+        crate::config::set_config_value_file(&path, "timeout", "45").unwrap();
+
+        let contents = read_config(&path);
+        assert!(contents.contains("timeout = 45"), "timeout should be updated: {contents}");
+        assert!(
+            contents.contains("model = \"old-model\""),
+            "model should be preserved: {contents}"
+        );
+        assert!(
+            contents.contains("nested = \"keep\""),
+            "nested section should be preserved: {contents}"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn config_set_invalid_type_errors_and_does_not_modify_file() {
+        let path = temp_config_path("invalid-type");
+        write_config(
+            &path,
+            r#"
+model = "old-model"
+timeout = 30
+"#,
+        );
+        let before = read_config(&path);
+
+        let result = crate::config::set_config_value_file(&path, "timeout", "not-a-number");
+
+        assert!(result.is_err(), "invalid timeout value should be rejected");
+        let after = read_config(&path);
+        assert_eq!(before, after, "config file must not change after error");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn config_set_invalid_key_errors_and_does_not_modify_file() {
+        let path = temp_config_path("invalid-key");
+        write_config(
+            &path,
+            r#"
+model = "old-model"
+timeout = 30
+"#,
+        );
+        let before = read_config(&path);
+
+        let result = crate::config::set_config_value_file(&path, "no_such_key", "x");
+
+        assert!(result.is_err(), "unknown config key should be rejected");
+        let after = read_config(&path);
+        assert_eq!(before, after, "config file must not change after error");
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
 fn find_config_path() -> Result<std::path::PathBuf> {
     if let Ok(path) = std::env::var("WORKBUDDY_CONFIG") {
         return Ok(std::path::PathBuf::from(path));

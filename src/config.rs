@@ -79,6 +79,7 @@ const CONFIG_KEYS: &[&str] = &[
     "workspace_dir",
     "repo_dir",
     "request_timeout_secs",
+    "timeout",
     "price",
     "max_budget",
     "cost_per_1k_tokens",
@@ -210,7 +211,7 @@ impl Config {
                     anyhow::bail!("{key} 必须是有限数字");
                 }
                 match key {
-                    "max_budget" if n <= 0.0 => anyhow::bail!("max_budget 必须为非负数"),
+                    "max_budget" if n < 0.0 => anyhow::bail!("max_budget 必须为非负数"),
                     "price" | "cost_per_1k_tokens" if n < 0.0 => {
                         anyhow::bail!("{key} 不能为负数")
                     }
@@ -223,13 +224,13 @@ impl Config {
                     _ => unreachable!(),
                 }
             }
-            "max_parallel" | "request_timeout_secs" | "webhook_retry" | "webhook_timeout_secs" => {
+            "max_parallel" | "timeout" | "request_timeout_secs" | "webhook_retry" | "webhook_timeout_secs" => {
                 let n: i64 = value
                     .parse()
                     .with_context(|| format!("{key} 需要是整数"))?;
                 if matches!(
                     key,
-                    "max_parallel" | "request_timeout_secs" | "webhook_timeout_secs"
+                    "max_parallel" | "timeout" | "request_timeout_secs" | "webhook_timeout_secs"
                 ) && n <= 0 {
                     anyhow::bail!("{key} 必须大于 0");
                 }
@@ -238,7 +239,7 @@ impl Config {
                 }
                 match key {
                     "max_parallel" => self.max_parallel = n as usize,
-                    "request_timeout_secs" => self.request_timeout_secs = n as u64,
+                    "timeout" | "request_timeout_secs" => self.request_timeout_secs = n as u64,
                     "webhook_retry" => self.webhook_retry = n as u32,
                     "webhook_timeout_secs" => self.webhook_timeout_secs = n as u64,
                     _ => unreachable!(),
@@ -390,7 +391,7 @@ fn parse_config_set_value(key: &str, raw: &str) -> Result<toml_edit::Item> {
                 anyhow::bail!("{key} 必须是有限数字");
             }
             match key {
-                "max_budget" if n <= 0.0 => anyhow::bail!("max_budget 必须为非负数"),
+                "max_budget" if n < 0.0 => anyhow::bail!("max_budget 必须为非负数"),
                 "price" | "cost_per_1k_tokens" if n < 0.0 => {
                     anyhow::bail!("{key} 不能为负数")
                 }
@@ -398,11 +399,11 @@ fn parse_config_set_value(key: &str, raw: &str) -> Result<toml_edit::Item> {
             }
             Ok(toml_edit::value(n))
         }
-        "max_parallel" | "request_timeout_secs" | "webhook_retry" | "webhook_timeout_secs" => {
+        "max_parallel" | "timeout" | "request_timeout_secs" | "webhook_retry" | "webhook_timeout_secs" => {
             let n: i64 = raw
                 .parse()
                 .with_context(|| format!("{key} 需要是整数"))?;
-            if matches!(key, "max_parallel" | "request_timeout_secs" | "webhook_timeout_secs") && n <= 0 {
+            if matches!(key, "max_parallel" | "timeout" | "request_timeout_secs" | "webhook_timeout_secs") && n <= 0 {
                 anyhow::bail!("{key} 必须大于 0");
             }
             if key == "webhook_retry" && n < 0 {
