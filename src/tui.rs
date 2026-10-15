@@ -45,6 +45,12 @@ pub fn map_backlog_to_rows(items: &[Task]) -> Vec<String> {
         .collect()
 }
 
+/// Pure function requested by the TUI skeleton step: formats backlog tasks
+/// as terminal rows without touching global state.
+pub fn render_backlog_tasks(tasks: &[Task]) -> Vec<String> {
+    map_backlog_to_rows(tasks)
+}
+
 /// Load backlog items from the workspace backlog file.
 ///
 /// Returns an empty list when the file does not exist.
@@ -90,7 +96,7 @@ pub fn render_backlog(tasks: &[Task]) -> String {
     let rows = if tasks.is_empty() {
         vec!["No backlog tasks".to_string()]
     } else {
-        map_backlog_to_rows(tasks)
+        render_backlog_tasks(tasks)
     };
 
     let list_items: Vec<ListItem> = rows.iter().map(|row| ListItem::new(row.clone())).collect();
@@ -183,7 +189,7 @@ fn draw_ui(frame: &mut Frame, items: &[BacklogItem], selected: usize) {
     let rows = if items.is_empty() {
         vec!["No backlog tasks".to_string()]
     } else {
-        map_backlog_to_rows(items)
+        render_backlog_tasks(items)
     };
 
     let list_items: Vec<ListItem> = rows
@@ -296,6 +302,16 @@ mod tests {
         assert!(output.contains("Backlog"), "output should contain title: {output}");
         assert!(output.contains("0"), "output should contain zero task count: {output}");
         assert!(output.contains("No backlog tasks"), "output should contain empty placeholder: {output}");
+    }
+
+    #[test]
+    fn render_backlog_tasks_formats_expected_rows() {
+        let rows = render_backlog_tasks(&sample_items());
+
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0], "  1. Design TUI module [pending]");
+        assert_eq!(rows[1], "  2. Render backlog list [pending]");
+        assert_eq!(rows[2], "  3. Handle q to quit [done]");
     }
 }
 
