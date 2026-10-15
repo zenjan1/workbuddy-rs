@@ -16,6 +16,12 @@ struct SupervisorStatus {
     last_log: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryEntry {
+    pub success: bool,
+    pub log: String,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct StatusSummary {
     pub supervisor_running: bool,
@@ -25,6 +31,27 @@ pub struct StatusSummary {
     pub recent_logs: Vec<String>,
 }
 
+impl StatusSummary {
+    pub fn from_history(history: &[HistoryEntry]) -> StatusSummary {
+        let completed_runs = history.iter().filter(|entry| entry.success).count();
+        let failed_runs = history.len() - completed_runs;
+        let recent_logs = history
+            .iter()
+            .rev()
+            .take(5)
+            .map(|entry| entry.log.clone())
+            .collect();
+
+        StatusSummary {
+            supervisor_running: false,
+            pid: None,
+            completed_runs,
+            failed_runs,
+            recent_logs,
+        }
+    }
+}
+
 pub fn run(workspace_dir: &Path) -> Result<(), Box<dyn Error>> {
     let summary = parse_status(workspace_dir)?;
     println!("{}", format_status(&summary));
@@ -32,20 +59,34 @@ pub fn run(workspace_dir: &Path) -> Result<(), Box<dyn Error>> {
 }
 
 pub fn parse_status(workspace_dir: &Path) -> anyhow::Result<StatusSummary> {
-    let status_path = workspace_dir.join("status.json");
-    let supervisor_running = read_supervisor_running(&status_path)?;
-    let pid = if status_path.exists() {
-        let data = fs::read_to_string(&status_path)
-            .with_context(|| format!("读取状态文件失败 {}", status_path.display()))?;
-        let status: SupervisorStatus = serde_json::from_str(&data)
-            .with_context(|| format!("解析状态文件失败 {}", status_path.display()))?;
-        status.pid
-    } else {
-        None
-    };
-
+    let supervisor_running = read_supervisor_running(workspace_dir)?;
+    let pid = read_supervisor_pid(workspace_dir)?;
     let cost_per_1k_tokens = read_cost_per_1k_tokens(workspace_dir);
 
+    let history = load_history(workspace_dir, cost_per_1k_tokens)?;
+    let mut summary = StatusSummary::from_history(&history);
+    summary.supervisor_running = supervisor_running;
+    summary.pid = pid;
+
+    Ok(summary)
+}
+
+fn read_supervisor_pid(workspace_dir: &Path) -> anyhow::Result<Option<u32>> {
+    let status_path = workspace_dir.join("status.json");
+    if !status_path.exists() {
+        return Ok(None);
+    }
+    let data = fs::read_to_string(&status_path)
+        .with_context(|| format!("读取状态文件失败 {}", status_path.display()))?;
+    let status: SupervisorStatus = serde_json::from_str(&data)
+        .with_context(|| format!("解析状态文件失败 {}", status_path.display()))?;
+    Ok(status.pid)
+}
+
+fn load_history(
+    workspace_dir: &Path,
+    cost_per_1k_tokens: Option<f64>,
+) -> anyhow::Result<Vec<HistoryEntry>> {
     let mut run_files = collect_run_files(workspace_dir)?;
     run_files.sort_by_key(|path| {
         fs::metadata(path)
@@ -55,65 +96,61 @@ pub fn parse_status(workspace_dir: &Path) -> anyhow::Result<StatusSummary> {
             .map(|duration| duration.as_millis())
     });
 
-    let (completed_runs, failed_runs) = if let Some(latest_path) = run_files.last() {
-        let data = fs::read_to_string(latest_path)
-            .with_context(|| format!("读取运行历史失败 {}", latest_path.display()))?;
-        let record: RunRecord = serde_json::from_str(&data)
-            .with_context(|| format!("解析运行历史失败 {}", latest_path.display()))?;
-        let completed = record.steps.iter().filter(|step| step.ok).count();
-        let failed = record.steps.iter().filter(|step| !step.ok).count();
-        (completed, failed)
-    } else {
-        (0, 0)
-    };
-
-    let mut recent_logs = Vec::new();
-    for path in run_files.iter().rev() {
-        if recent_logs.len() >= 5 {
-            break;
-        }
-
-        let data = fs::read_to_string(path)
+    let mut history = Vec::new();
+    for path in run_files {
+        let data = fs::read_to_string(&path)
             .with_context(|| format!("读取运行历史失败 {}", path.display()))?;
         let record: RunRecord = serde_json::from_str(&data)
             .with_context(|| format!("解析运行历史失败 {}", path.display()))?;
 
-        if record.steps.is_empty() {
-            continue;
-        }
+        history.extend(history_entries_from_run(&record, cost_per_1k_tokens));
+    }
 
-        if let Some(last_step) = record.steps.last() {
-            let content = last_step
+    Ok(history)
+}
+
+fn history_entries_from_run(
+    record: &RunRecord,
+    cost_per_1k_tokens: Option<f64>,
+) -> Vec<HistoryEntry> {
+    record
+        .steps
+        .iter()
+        .map(|step| {
+            let content = step
                 .error
                 .clone()
-                .unwrap_or_else(|| last_step.output_preview.clone());
+                .unwrap_or_else(|| step.output_preview.clone());
             let content = truncate_chars(&content, 80);
             let cost = record.token_usage.and_then(|tokens| {
                 cost_per_1k_tokens.map(|price| price * (tokens as f64 / 1000.0))
             });
             let usage = format_usage(record.token_usage, record.char_usage, cost);
-            recent_logs.push(format!("[{}] {}: {} {}", record.id, last_step.name, content, usage));
-        }
-    }
-
-    Ok(StatusSummary {
-        supervisor_running,
-        pid,
-        completed_runs,
-        failed_runs,
-        recent_logs,
-    })
+            let log = format!("[{}] {}: {} {}", record.id, step.name, content, usage);
+            HistoryEntry {
+                success: step.ok,
+                log,
+            }
+        })
+        .collect()
 }
 
-fn read_supervisor_running(status_path: &Path) -> anyhow::Result<bool> {
-    if !status_path.exists() {
-        return Ok(false);
-    }
-    let data = fs::read_to_string(status_path)
-        .with_context(|| format!("读取状态文件失败 {}", status_path.display()))?;
-    let status: SupervisorStatus = serde_json::from_str(&data)
-        .with_context(|| format!("解析状态文件失败 {}", status_path.display()))?;
-    Ok(status.supervisor_running)
+fn read_supervisor_running(workspace_dir: &Path) -> anyhow::Result<bool> {
+    let status_path = workspace_dir.join("status.json");
+    let status_running = if status_path.exists() {
+        let data = fs::read_to_string(&status_path)
+            .with_context(|| format!("读取状态文件失败 {}", status_path.display()))?;
+        let status: SupervisorStatus = serde_json::from_str(&data)
+            .with_context(|| format!("解析状态文件失败 {}", status_path.display()))?;
+        status.supervisor_running
+    } else {
+        false
+    };
+
+    let lock_path = workspace_dir.join("supervisor.lock");
+    let marker_path = workspace_dir.join("RUNNING");
+
+    Ok(status_running || lock_path.exists() || marker_path.exists())
 }
 
 fn collect_run_files(workspace_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
@@ -297,15 +334,15 @@ mod tests {
         let summary = parse_status(&workspace).unwrap();
 
         assert!(summary.supervisor_running);
-        assert_eq!(summary.completed_runs, 1);
-        assert_eq!(summary.failed_runs, 0);
+        assert_eq!(summary.completed_runs, 2);
+        assert_eq!(summary.failed_runs, 1);
         assert_eq!(summary.recent_logs.len(), 3);
         assert!(summary.recent_logs.iter().any(|log| log.contains("run-ok")));
         assert!(summary.recent_logs.iter().any(|log| log.contains("run-failed")));
 
         let rendered = format_status(&summary);
         assert!(rendered.contains("Supervisor: running"));
-        assert!(rendered.contains("Last run: 1 completed, 0 failed"));
+        assert!(rendered.contains("Last run: 2 completed, 1 failed"));
         assert!(rendered.contains("Recent logs:"));
 
         fs::remove_dir_all(&workspace).unwrap();
@@ -471,5 +508,67 @@ mod tests {
         assert!(rendered.contains("cost: $0.0200"));
 
         fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn from_history_empty_returns_zero_counts_and_no_logs() {
+        let history = vec![];
+        let summary = StatusSummary::from_history(&history);
+        assert_eq!(summary.completed_runs, 0);
+        assert_eq!(summary.failed_runs, 0);
+        assert!(summary.recent_logs.is_empty());
+        assert!(!summary.supervisor_running);
+        assert_eq!(summary.pid, None);
+    }
+
+    #[test]
+    fn from_history_mixed_success_and_failure_counts() {
+        let history = vec![
+            HistoryEntry {
+                success: true,
+                log: "ok 1".to_string(),
+            },
+            HistoryEntry {
+                success: false,
+                log: "fail 1".to_string(),
+            },
+            HistoryEntry {
+                success: true,
+                log: "ok 2".to_string(),
+            },
+        ];
+        let summary = StatusSummary::from_history(&history);
+        assert_eq!(summary.completed_runs, 2);
+        assert_eq!(summary.failed_runs, 1);
+        assert_eq!(
+            summary.recent_logs,
+            vec![
+                "ok 2".to_string(),
+                "fail 1".to_string(),
+                "ok 1".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn from_history_truncates_recent_logs_to_five_most_recent() {
+        let history: Vec<HistoryEntry> = (0..7)
+            .map(|i| HistoryEntry {
+                success: i % 2 == 0,
+                log: format!("log {}", i),
+            })
+            .collect();
+        let summary = StatusSummary::from_history(&history);
+        assert_eq!(summary.recent_logs.len(), 5);
+        assert_eq!(
+            summary.recent_logs,
+            vec![
+                "log 6".to_string(),
+                "log 5".to_string(),
+                "log 4".to_string(),
+                "log 3".to_string(),
+                "log 2".to_string()
+            ]
+        );
     }
 }
