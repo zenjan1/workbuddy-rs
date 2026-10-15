@@ -96,18 +96,19 @@ impl MemoryStore {
 
     /// Gets the value for `key`, if present.
     pub fn get(&self, key: &str) -> Result<Option<String>, MemoryError> {
+        validate_key(key)?;
         let _guard = self.acquire_lock()?;
         let entries = self.read_entries_locked()?;
         Ok(entries.get(key).cloned())
     }
 
-    /// Lists all key-value pairs sorted by key.
-    pub fn list(&self) -> Result<Vec<(String, String)>, MemoryError> {
+    /// Lists all keys sorted alphabetically.
+    pub fn list(&self) -> Result<Vec<String>, MemoryError> {
         let _guard = self.acquire_lock()?;
         let entries = self.read_entries_locked()?;
-        let mut pairs: Vec<_> = entries.into_iter().collect();
-        pairs.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(pairs)
+        let mut keys: Vec<String> = entries.into_keys().collect();
+        keys.sort();
+        Ok(keys)
     }
 
     fn acquire_lock(&self) -> Result<LockGuard, MemoryError> {
@@ -202,12 +203,10 @@ pub fn run_memory_command(
             Ok(format!("added {key}"))
         }
         MemoryCommand::List => {
-            let pairs = store.list()?;
+            let keys = store.list()?;
             let mut out = String::new();
-            for (key, value) in pairs {
+            for key in keys {
                 out.push_str(&key);
-                out.push('\t');
-                out.push_str(&value);
                 out.push('\n');
             }
             Ok(out)
@@ -376,7 +375,33 @@ mod tests {
     }
 
     #[test]
-    fn list_returns_sorted_pairs() {
+    fn add_rejects_empty_key() {
+        let path = temp_memory_path();
+        let store = MemoryStore::new(&path).unwrap();
+        let err = store.add("", "value").unwrap_err();
+        assert!(matches!(err, MemoryError::Invalid(_)));
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn get_rejects_empty_key() {
+        let path = temp_memory_path();
+        let store = MemoryStore::new(&path).unwrap();
+        let err = store.get("").unwrap_err();
+        assert!(matches!(err, MemoryError::Invalid(_)));
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn command_parse_add_missing_value_is_error() {
+        let args = vec!["add".to_string(), "key".to_string()];
+        assert!(MemoryCommand::parse(&args).is_err());
+    }
+
+    #[test]
+    fn list_returns_sorted_keys() {
         let path = temp_memory_path();
         let store = MemoryStore::new(&path).unwrap();
 
@@ -384,15 +409,8 @@ mod tests {
         store.add("a", "1").unwrap();
         store.add("c", "3").unwrap();
 
-        let pairs = store.list().unwrap();
-        assert_eq!(
-            pairs,
-            vec![
-                ("a".to_string(), "1".to_string()),
-                ("b".to_string(), "2".to_string()),
-                ("c".to_string(), "3".to_string()),
-            ]
-        );
+        let keys = store.list().unwrap();
+        assert_eq!(keys, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
 
         cleanup(&path);
     }
