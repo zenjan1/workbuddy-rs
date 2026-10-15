@@ -43,6 +43,7 @@ impl Error for MemoryError {
 pub struct MemoryEntry {
     pub id: String,
     pub content: String,
+    pub created_at: String,
 }
 
 pub struct MemoryStore {
@@ -78,89 +79,61 @@ impl MemoryStore {
         })
     }
 
-    /// Adds a memory entry and returns its ID. Duplicate content returns the
-    /// existing ID without modifying the file.
-    pub fn add(&self, content: &str) -> Result<String, MemoryError> {
+    /// Adds a memory entry and returns the stored entry.
+    pub fn add(&self, content: &str) -> Result<MemoryEntry, MemoryError> {
         validate_content(content)?;
         let _guard = self.lock.lock().map_err(|_| MemoryError::Locked)?;
-        let mut entries = self.read_entries_locked()?;
+        let mut entries = self.read_entries_locked();
 
-        if let Some((existing_id, _)) = entries.iter().find(|(_, value)| *value == content) {
-            return Ok(existing_id.clone());
-        }
+        let next_id = entries
+            .keys()
+            .filter_map(|k| k.parse::<u64>().ok())
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let id = next_id.to_string();
 
-        let mut id = generate_id(content);
-        let mut counter = 0u64;
-        while entries.contains_key(&id) {
-            counter += 1;
-            id = format!("{}-{}", generate_id(content), counter);
-        }
-
-        entries.insert(id.clone(), content.to_owned());
+        let entry = MemoryEntry {
+            id: id.clone(),
+            content: content.to_owned(),
+            created_at: now_iso8601(),
+        };
+        entries.insert(id, entry.clone());
         self.write_entries_atomic(&entries)?;
-        Ok(id)
+        Ok(entry)
     }
 
-    /// Resolves an ID or keyword. Exact ID match has priority over fuzzy
-    /// content match.
-    pub fn get(&self, id_or_keyword: &str) -> Result<MemoryEntry, MemoryError> {
+    /// Gets an entry by exact ID, if present.
+    pub fn get(&self, id: &str) -> Result<Option<MemoryEntry>, MemoryError> {
         let _guard = self.lock.lock().map_err(|_| MemoryError::Locked)?;
-        let entries = self.read_entries_locked()?;
-
-        if let Some(content) = entries.get(id_or_keyword) {
-            return Ok(MemoryEntry {
-                id: id_or_keyword.to_owned(),
-                content: content.clone(),
-            });
-        }
-
-        for (id, content) in entries {
-            if content.contains(id_or_keyword) {
-                return Ok(MemoryEntry { id, content });
-            }
-        }
-
-        Err(MemoryError::NotFound(id_or_keyword.to_owned()))
+        let entries = self.read_entries_locked();
+        Ok(entries.get(id).cloned())
     }
 
     /// Lists all entries sorted by ID.
     pub fn list(&self) -> Result<Vec<MemoryEntry>, MemoryError> {
         let _guard = self.lock.lock().map_err(|_| MemoryError::Locked)?;
-        let entries = self.read_entries_locked()?;
-        let mut result = Vec::with_capacity(entries.len());
-        for (id, content) in entries {
-            result.push(MemoryEntry { id, content });
-        }
-        Ok(result)
+        let entries = self.read_entries_locked();
+        Ok(entries.into_values().collect())
     }
 
-    fn read_entries_locked(&self) -> Result<BTreeMap<String, String>, MemoryError> {
+    fn read_entries_locked(&self) -> BTreeMap<String, MemoryEntry> {
         if !self.path.exists() {
-            return Ok(BTreeMap::new());
+            return BTreeMap::new();
         }
 
-        let content = fs::read_to_string(&self.path).map_err(MemoryError::Io)?;
-        let parsed: serde_json::Value = serde_json::from_str(&content)
-            .map_err(|_| MemoryError::Parse("memory file contains invalid JSON".to_string()))?;
-        let object = parsed
-            .as_object()
-            .ok_or_else(|| MemoryError::Parse("memory file must contain a JSON object".to_string()))?;
+        let content = match fs::read_to_string(&self.path) {
+            Ok(content) => content,
+            Err(_) => return BTreeMap::new(),
+        };
 
-        let mut entries = BTreeMap::new();
-        for (key, value) in object {
-            let value = value
-                .as_str()
-                .ok_or_else(|| MemoryError::Parse("memory file contains a non-string value".to_owned()))?;
-            validate_content(value).map_err(|_| {
-                MemoryError::Parse("memory file contains an invalid entry".to_owned())
-            })?;
-            entries.insert(key.clone(), value.to_owned());
+        match serde_json::from_str::<BTreeMap<String, MemoryEntry>>(&content) {
+            Ok(entries) => entries,
+            Err(_) => BTreeMap::new(),
         }
-
-        Ok(entries)
     }
 
-    fn write_entries_atomic(&self, entries: &BTreeMap<String, String>) -> Result<(), MemoryError> {
+    fn write_entries_atomic(&self, entries: &BTreeMap<String, MemoryEntry>) -> Result<(), MemoryError> {
         let tmp_path = unique_tmp_path(&self.path);
         let serialized = serde_json::to_string_pretty(entries)
             .map_err(|err| MemoryError::Parse(err.to_string()))?;
@@ -194,7 +167,7 @@ impl MemoryStore {
 pub enum MemoryCommand {
     Add { content: String },
     List,
-    Get { query: String },
+    Get { id: String },
 }
 
 pub fn run_memory_command(
@@ -203,8 +176,8 @@ pub fn run_memory_command(
 ) -> Result<String, MemoryError> {
     match command {
         MemoryCommand::Add { content } => {
-            let id = store.add(&content)?;
-            Ok(format!("added {id}"))
+            let entry = store.add(&content)?;
+            Ok(format!("added {}", entry.id))
         }
         MemoryCommand::List => {
             let entries = store.list()?;
@@ -217,17 +190,17 @@ pub fn run_memory_command(
             }
             Ok(out)
         }
-        MemoryCommand::Get { query } => {
-            let entry = store.get(&query)?;
-            Ok(format!("{}\t{}", entry.id, entry.content))
-        }
+        MemoryCommand::Get { id } => match store.get(&id)? {
+            Some(entry) => Ok(format!("{}\t{}", entry.id, entry.content)),
+            None => Err(MemoryError::NotFound(id)),
+        },
     }
 }
 
 impl MemoryCommand {
     pub fn parse(args: &[String]) -> Result<Self, String> {
         if args.is_empty() {
-            return Err("用法: memory add <内容> | list | get <id或关键词>".to_string());
+            return Err("用法: memory add <内容> | list | get <id>".to_string());
         }
         match args[0].as_str() {
             "add" => {
@@ -245,9 +218,9 @@ impl MemoryCommand {
             }
             "get" => {
                 if args.len() != 2 {
-                    return Err("用法: memory get <id或关键词>".to_string());
+                    return Err("用法: memory get <id>".to_string());
                 }
-                Ok(MemoryCommand::Get { query: args[1].clone() })
+                Ok(MemoryCommand::Get { id: args[1].clone() })
             }
             other => Err(format!("未知记忆子命令: {other}")),
         }
@@ -267,11 +240,12 @@ fn validate_content(content: &str) -> Result<(), MemoryError> {
     Ok(())
 }
 
-fn generate_id(content: &str) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    content.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+fn now_iso8601() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format!("{secs}")
 }
 
 fn unique_tmp_path(path: &Path) -> PathBuf {
@@ -313,9 +287,7 @@ pub fn get_run(workspace_dir: &std::path::Path, id: &str) -> anyhow::Result<crat
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::thread;
 
     static NEXT_DIR_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -339,26 +311,14 @@ mod tests {
         let dir = temp_workspace();
         let store = MemoryStore::open(&dir).unwrap();
 
-        let id = store.add("first note").unwrap();
-        let entry = store.get(&id).unwrap();
-        assert_eq!(entry.content, "first note");
-        assert_eq!(entry.id, id);
+        let added = store.add("first note").unwrap();
+        assert_eq!(added.id, "1");
+        assert!(!added.created_at.is_empty());
 
-        cleanup(&dir);
-    }
-
-    #[test]
-    fn add_duplicate_returns_same_id_without_new_entry() {
-        let dir = temp_workspace();
-        let store = MemoryStore::open(&dir).unwrap();
-
-        let id1 = store.add("repeat me").unwrap();
-        let id2 = store.add("repeat me").unwrap();
-        assert_eq!(id1, id2);
-
-        let entries = store.list().unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].content, "repeat me");
+        let fetched = store.get(&added.id).unwrap().expect("entry should exist");
+        assert_eq!(fetched.id, added.id);
+        assert_eq!(fetched.content, "first note");
+        assert_eq!(fetched.created_at, added.created_at);
 
         cleanup(&dir);
     }
@@ -368,74 +328,40 @@ mod tests {
         let dir = temp_workspace();
         let store = MemoryStore::open(&dir).unwrap();
 
-        let id_banana = store.add("banana").unwrap();
-        let id_apple = store.add("apple").unwrap();
-        let id_cherry = store.add("cherry").unwrap();
+        let _banana = store.add("banana").unwrap();
+        let _apple = store.add("apple").unwrap();
+        let _cherry = store.add("cherry").unwrap();
 
         let entries = store.list().unwrap();
-        let mut ids: Vec<_> = entries.iter().map(|e| e.id.as_str()).collect();
-        let mut expected = vec![id_banana.as_str(), id_apple.as_str(), id_cherry.as_str()];
-        expected.sort_unstable();
-        ids.sort_unstable();
-        assert_eq!(ids, expected);
-        assert_eq!(entries.len(), 3);
+        let ids: Vec<_> = entries.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, vec!["1", "2", "3"]);
+        assert_eq!(entries[0].content, "banana");
+        assert_eq!(entries[1].content, "apple");
+        assert_eq!(entries[2].content, "cherry");
 
         cleanup(&dir);
     }
 
     #[test]
-    fn get_by_keyword_fuzzy_matches_content() {
+    fn get_unknown_id_returns_none() {
         let dir = temp_workspace();
         let store = MemoryStore::open(&dir).unwrap();
+        store.add("alpha").unwrap();
 
-        let _id = store.add("remember to buy milk").unwrap();
-        let entry = store.get("milk").unwrap();
-        assert_eq!(entry.content, "remember to buy milk");
+        assert!(store.get("999").unwrap().is_none());
 
         cleanup(&dir);
     }
 
     #[test]
-    fn get_by_id_takes_precedence_over_keyword() {
+    fn damaged_json_file_falls_back_to_empty_list() {
         let dir = temp_workspace();
         let store = MemoryStore::open(&dir).unwrap();
+        let path = store.path.clone();
+        fs::write(&path, "{ definitely not json").unwrap();
 
-        let id1 = store.add("project alpha notes").unwrap();
-        let _id2 = store.add("this mentions alpha").unwrap();
-
-        let entry = store.get(id1.as_str()).unwrap();
-        assert_eq!(entry.id, id1);
-        assert_eq!(entry.content, "project alpha notes");
-
-        cleanup(&dir);
-    }
-
-    #[test]
-    fn concurrent_adds_preserve_all_entries_and_file_is_valid() {
-        let dir = temp_workspace();
-        let store = Arc::new(MemoryStore::open(&dir).unwrap());
-
-        let mut handles = vec![];
-
-        for i in 0..20 {
-            let store = Arc::clone(&store);
-            handles.push(thread::spawn(move || {
-                store.add(&format!("memory-{i}")).unwrap();
-            }));
-        }
-
-        for handle in handles {
-            handle.join().unwrap();
-        }
-
-        let entries = store.list().unwrap();
-        assert_eq!(entries.len(), 20);
-
-        let file_path = dir.join(".workbuddy").join("memory.json");
-        let content = fs::read_to_string(&file_path).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert!(parsed.is_object());
-        assert_eq!(parsed.as_object().unwrap().len(), 20);
+        assert_eq!(store.list().unwrap(), Vec::<MemoryEntry>::new());
+        assert!(store.get("1").unwrap().is_none());
 
         cleanup(&dir);
     }

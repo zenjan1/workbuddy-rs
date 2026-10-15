@@ -85,6 +85,22 @@ enum ConfigAction {
 }
 
 #[derive(Subcommand)]
+enum MemoryAction {
+    /// 添加一条记忆
+    Add {
+        /// 记忆内容
+        content: String,
+    },
+    /// 列出所有记忆
+    List,
+    /// 按 id 获取记忆
+    Get {
+        /// 记忆 id
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum Cmd {
     /// 规划并执行一个任务
     Run {
@@ -164,9 +180,8 @@ enum Cmd {
     },
     /// 持久记忆:add/list/get
     Memory {
-        /// 剩余参数:add <text> | list | get <id>
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
+        #[command(subcommand)]
+        action: MemoryAction,
     },
     /// 推进路线图:扫描 VISION.md 已完成条目,更新未完成项并追加日志
     RoadmapAdvance,
@@ -281,9 +296,14 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Selfcheck => cmd_selfcheck(),
-        Cmd::Memory { args } => {
+        Cmd::Memory { action } => {
             let store = memory::MemoryStore::open(&cfg.workspace_dir)
                 .map_err(|e| anyhow::anyhow!("打开记忆存储失败: {e}"))?;
+            let args = match action {
+                MemoryAction::Add { content } => vec!["add".to_string(), content],
+                MemoryAction::List => vec!["list".to_string()],
+                MemoryAction::Get { id } => vec!["get".to_string(), id],
+            };
             let command = memory::MemoryCommand::parse(&args)
                 .map_err(|e| anyhow::anyhow!("解析记忆命令失败: {e}"))?;
             let output = memory::run_memory_command(&store, command)
