@@ -514,10 +514,11 @@ pub async fn run_dev_loop(
                     break;
                 }
                 Err(e) => {
-                    // 自补给失败多为瞬时(限流/抖动):等 5 分钟重试,连续失败约 1 小时才停,
+                    // 自补给失败多为瞬时(限流/抖动/校园网坏段):等 5 分钟重试,
+                    // 连续失败约 24 小时(288×5min)才停,熬得住长坏网段;
                     // 避免一次瞬时错误就终止整个 30 天无人值守。
                     extend_fail_streak += 1;
-                    if extend_fail_streak >= 12 {
+                    if extend_fail_streak >= 288 {
                         eprintln!(
                             "[dev] 任务生成连续失败 {} 次,停止: {}",
                             extend_fail_streak,
@@ -526,7 +527,7 @@ pub async fn run_dev_loop(
                         break;
                     }
                     eprintln!(
-                        "[dev] 任务生成失败,5 分钟后重试(第 {}/12 次): {}",
+                        "[dev] 任务生成失败,5 分钟后重试(第 {}/288 次): {}",
                         extend_fail_streak,
                         clip(&e.to_string(), 120)
                     );
