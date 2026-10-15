@@ -7,67 +7,7 @@ mod llm;
 mod memory;
 mod plan;
 mod planner;
-mod serve {
-    use axum::{
-        extract::{Path, State},
-        http::StatusCode,
-        routing::get,
-        Json, Router,
-    };
-    use std::net::SocketAddr;
-
-    #[derive(Clone)]
-    struct ServeState {
-        workspace_dir: std::path::PathBuf,
-    }
-
-    async fn health() -> &'static str {
-        "ok"
-    }
-
-    async fn list_runs(
-        State(state): State<ServeState>,
-    ) -> Result<Json<Vec<crate::workspace::RunRecord>>, (StatusCode, String)> {
-        crate::memory::list_runs(&state.workspace_dir)
-            .map(Json)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
-    }
-
-    async fn get_run(
-        State(state): State<ServeState>,
-        Path(id): Path<String>,
-    ) -> Result<Json<crate::workspace::RunRecord>, (StatusCode, String)> {
-        match crate::memory::get_run(&state.workspace_dir, &id) {
-            Ok(run) => Ok(Json(run)),
-            Err(_) => Err((StatusCode::NOT_FOUND, format!("run {id} 不存在"))),
-        }
-    }
-
-    pub fn router(workspace_dir: &std::path::Path) -> Router {
-        let state = ServeState {
-            workspace_dir: workspace_dir.to_path_buf(),
-        };
-        Router::new()
-            .route("/health", get(health))
-            .route("/runs", get(list_runs))
-            .route("/runs/{id}", get(get_run))
-            .with_state(state)
-    }
-
-    pub async fn run(
-        workspace_dir: &std::path::Path,
-        bind_addr: SocketAddr,
-    ) -> anyhow::Result<()> {
-        let app = router(workspace_dir);
-        let listener = tokio::net::TcpListener::bind(bind_addr).await?;
-        eprintln!(
-            "[workbuddy] HTTP 服务监听: http://{}",
-            listener.local_addr()?
-        );
-        axum::serve(listener, app).await?;
-        Ok(())
-    }
-}
+mod serve;
 mod status;
 mod tui;
 mod review {
@@ -218,9 +158,9 @@ enum Cmd {
     Tui,
     /// 启动只读 HTTP 服务
     Serve {
-        /// 监听地址,如 127.0.0.1:8080(默认 127.0.0.1:0 自动分配端口)
-        #[arg(long, default_value = "127.0.0.1:0")]
-        listen: String,
+        /// 监听端口（默认 8080）
+        #[arg(short, long, default_value = "8080")]
+        port: u16,
     },
     /// 持久记忆:add/list/get
     Memory {
@@ -360,10 +300,8 @@ async fn main() -> Result<()> {
             tui::run_tui(tasks)
                 .map_err(|e| anyhow::anyhow!("启动 TUI 失败: {e:#}"))
         }
-        Cmd::Serve { listen } => {
-            let addr: std::net::SocketAddr = listen
-                .parse()
-                .map_err(|e| anyhow::anyhow!("无效监听地址 {listen}: {e}"))?;
+        Cmd::Serve { port } => {
+            let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
             serve::run(&cfg.workspace_dir, addr)
                 .await
                 .map_err(|e| anyhow::anyhow!("启动只读 HTTP 服务失败: {e:#}"))
@@ -798,45 +736,3 @@ mod tests {
     }
 }
 
-#[derive(Clone)]
-struct WorkbuddyServeState {
-    workspace_dir: std::path::PathBuf,
-}
-
-async fn serve_http(cfg: Config, listen: &str) -> Result<()> {
-    async fn health() -> &'static str {
-        "ok"
-    }
-
-    async fn list_runs(
-        axum::extract::State(state): axum::extract::State<WorkbuddyServeState>,
-    ) -> Result<axum::Json<Vec<crate::workspace::RunRecord>>, (axum::http::StatusCode, String)> {
-        crate::memory::list_runs(&state.workspace_dir)
-            .map(axum::Json)
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
-    }
-
-    async fn get_run(
-        axum::extract::State(state): axum::extract::State<WorkbuddyServeState>,
-        axum::extract::Path(id): axum::extract::Path<String>,
-    ) -> Result<axum::Json<crate::workspace::RunRecord>, (axum::http::StatusCode, String)> {
-        match crate::memory::get_run(&state.workspace_dir, &id) {
-            Ok(run) => Ok(axum::Json(run)),
-            Err(_) => Err((axum::http::StatusCode::NOT_FOUND, format!("run {id} 不存在"))),
-        }
-    }
-
-    let state = WorkbuddyServeState {
-        workspace_dir: cfg.workspace_dir.clone(),
-    };
-    let app = axum::Router::new()
-        .route("/health", axum::routing::get(health))
-        .route("/runs", axum::routing::get(list_runs))
-        .route("/runs/{id}", axum::routing::get(get_run))
-        .with_state(state);
-
-    let listener = tokio::net::TcpListener::bind(listen).await?;
-    eprintln!("[workbuddy] HTTP 服务监听: http://{}", listener.local_addr()?);
-    axum::serve(listener, app).await?;
-    Ok(())
-}
