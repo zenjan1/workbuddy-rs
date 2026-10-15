@@ -417,3 +417,76 @@ mod tests {
         cleanup(&path);
     }
 }
+
+/// 累计可选 token/字符用量。多次调用结果传入各自 Option<u64>，缺失视为 None。
+/// 如果两个值都缺失，返回 None；否则返回 Some(总和)。
+pub fn accumulate_optional(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x + y),
+        (Some(x), None) => Some(x),
+        (None, Some(y)) => Some(y),
+        (None, None) => None,
+    }
+}
+
+/// 统计字符串中的字符数（按 Rust char 计数，不是字节数）。
+pub fn char_usage(content: &str) -> Option<u64> {
+    if content.is_empty() {
+        None
+    } else {
+        Some(content.chars().count() as u64)
+    }
+}
+
+/// 将可选用量渲染为展示字符串。缺失时显示占位符 "-"。
+pub fn display_usage(token_usage: Option<u64>, char_usage: Option<u64>) -> String {
+    let token = token_usage.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string());
+    let chars = char_usage.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string());
+    format!("tokens: {token}\nchars: {chars}")
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+
+    #[test]
+    fn accumulate_optional_adds_two_present_values() {
+        assert_eq!(accumulate_optional(Some(10), Some(5)), Some(15));
+    }
+
+    #[test]
+    fn accumulate_optional_treats_missing_as_zero_but_still_some() {
+        assert_eq!(accumulate_optional(Some(10), None), Some(10));
+        assert_eq!(accumulate_optional(None, Some(7)), Some(7));
+    }
+
+    #[test]
+    fn accumulate_optional_returns_none_when_both_missing() {
+        assert_eq!(accumulate_optional(None, None), None);
+    }
+
+    #[test]
+    fn char_usage_counts_chars_not_bytes() {
+        assert_eq!(char_usage("hello"), Some(5));
+        assert_eq!(char_usage("你好"), Some(2));
+    }
+
+    #[test]
+    fn char_usage_returns_none_for_empty_text() {
+        assert_eq!(char_usage(""), None);
+    }
+
+    #[test]
+    fn display_usage_shows_placeholders_when_missing() {
+        let out = display_usage(None, None);
+        assert!(out.contains("tokens: -"));
+        assert!(out.contains("chars: -"));
+    }
+
+    #[test]
+    fn display_usage_shows_values_when_available() {
+        let out = display_usage(Some(42), Some(7));
+        assert!(out.contains("tokens: 42"));
+        assert!(out.contains("chars: 7"));
+    }
+}

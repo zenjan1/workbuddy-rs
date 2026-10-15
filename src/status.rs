@@ -232,7 +232,11 @@ pub fn format_status(summary: &StatusSummary) -> String {
     } else {
         output.push_str("\nRecent logs:");
         for log in &summary.recent_logs {
-            output.push_str(&format!("\n  - {log}"));
+            let (log_line, usage_line) = split_usage(log);
+            output.push_str(&format!("\n  - {log_line}"));
+            if let Some(usage) = usage_line {
+                output.push_str(&format!("\n    {usage}"));
+            }
         }
     }
     output
@@ -268,6 +272,18 @@ fn format_usage(token_usage: Option<u64>, char_usage: Option<u64>, cost: Option<
     }
     result.push(')');
     result
+}
+
+fn split_usage(log: &str) -> (String, Option<String>) {
+    if let Some(pos) = log.rfind(" (tokens: ") {
+        let usage_start = pos + 1;
+        if log[usage_start..].ends_with(')') {
+            let usage = log[usage_start..].to_string();
+            let log_line = log[..pos].to_string();
+            return (log_line, Some(usage));
+        }
+    }
+    (log.to_string(), None)
 }
 
 #[cfg(test)]
