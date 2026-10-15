@@ -7,13 +7,18 @@ use serde::Deserialize;
 
 use crate::workspace::RunRecord;
 
+const STATUS_FILE_NAME: &str = "status.json";
+
 #[derive(Debug, Deserialize, Default)]
 #[serde(default)]
+#[allow(dead_code)]
 struct SupervisorStatus {
     #[serde(alias = "running")]
     supervisor_running: bool,
     pid: Option<u32>,
     last_log: Option<String>,
+    completed: usize,
+    failed: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,7 +77,7 @@ pub fn parse_status(workspace_dir: &Path) -> anyhow::Result<StatusSummary> {
 }
 
 fn read_supervisor_pid(workspace_dir: &Path) -> anyhow::Result<Option<u32>> {
-    let status_path = workspace_dir.join("status.json");
+    let status_path = workspace_dir.join(STATUS_FILE_NAME);
     if !status_path.exists() {
         return Ok(None);
     }
@@ -153,7 +158,7 @@ fn history_entries_from_run(
 }
 
 fn read_supervisor_running(workspace_dir: &Path) -> anyhow::Result<bool> {
-    let status_path = workspace_dir.join("status.json");
+    let status_path = workspace_dir.join(STATUS_FILE_NAME);
     let status_running = if status_path.exists() {
         let data = fs::read_to_string(&status_path)
             .with_context(|| format!("读取状态文件失败 {}", status_path.display()))?;
@@ -192,10 +197,13 @@ fn collect_run_files(workspace_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
     {
         let entry = entry.with_context(|| format!("读取工作区条目失败 {}", workspace_dir.display()))?;
         let path = entry.path();
-        let is_status = path.file_name().and_then(|name| name.to_str()) == Some("status.json");
+        let file_name = path.file_name().and_then(|name| name.to_str());
+        let is_status = file_name == Some(STATUS_FILE_NAME);
+        let is_config = file_name == Some("config.json");
         if path.is_file()
             && path.extension().and_then(|ext| ext.to_str()) == Some("json")
             && !is_status
+            && !is_config
         {
             files.push(path);
         }
@@ -216,7 +224,9 @@ pub fn format_status(summary: &StatusSummary) -> String {
         "Supervisor: {state}\nLast run: {} completed, {} failed",
         summary.completed_runs, summary.failed_runs
     );
-    if !summary.recent_logs.is_empty() {
+    if summary.recent_logs.is_empty() {
+        output.push_str("\nRecent logs: (none)");
+    } else {
         output.push_str("\nRecent logs:");
         for log in &summary.recent_logs {
             output.push_str(&format!("\n  - {log}"));
