@@ -86,17 +86,19 @@ enum ConfigAction {
 
 #[derive(Subcommand)]
 enum MemoryAction {
-    /// 添加一条记忆
+    /// 添加一条记忆（键值对）
     Add {
-        /// 记忆内容
-        content: String,
+        /// 记忆键
+        key: String,
+        /// 记忆值
+        value: String,
     },
     /// 列出所有记忆
     List,
-    /// 按 id 获取记忆
+    /// 按键获取记忆
     Get {
-        /// 记忆 id
-        id: String,
+        /// 记忆键
+        key: String,
     },
 }
 
@@ -297,12 +299,13 @@ async fn main() -> Result<()> {
         }
         Cmd::Selfcheck => cmd_selfcheck(),
         Cmd::Memory { action } => {
-            let store = memory::MemoryStore::open(&cfg.workspace_dir)
+            let memory_dir = cfg.repo_dir.join(".workbuddy");
+            let store = memory::MemoryStore::open(&memory_dir)
                 .map_err(|e| anyhow::anyhow!("打开记忆存储失败: {e}"))?;
             let args = match action {
-                MemoryAction::Add { content } => vec!["add".to_string(), content],
+                MemoryAction::Add { key, value } => vec!["add".to_string(), key, value],
                 MemoryAction::List => vec!["list".to_string()],
-                MemoryAction::Get { id } => vec!["get".to_string(), id],
+                MemoryAction::Get { key } => vec!["get".to_string(), key],
             };
             let command = memory::MemoryCommand::parse(&args)
                 .map_err(|e| anyhow::anyhow!("解析记忆命令失败: {e}"))?;
