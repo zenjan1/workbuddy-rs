@@ -275,7 +275,7 @@ impl Config {
 
     fn update_config_file(path: &Path, key: &str, value: &str) -> Result<()> {
         Self::validate_config_key(key)?;
-        set_config_value(path, key, value)
+        set_config_value_file(path, key, value)
     }
 
     fn config_file_path() -> PathBuf {
@@ -291,7 +291,12 @@ impl Config {
     }
 
     fn config_candidates() -> Vec<PathBuf> {
-        let mut v = vec![PathBuf::from("workbuddy.toml")];
+        let mut v = Vec::new();
+        if let Ok(explicit) = env::var("WORKBUDDY_CONFIG") {
+            v.push(PathBuf::from(explicit));
+        }
+        v.push(PathBuf::from("config.toml"));
+        v.push(PathBuf::from("workbuddy.toml"));
         if let Ok(xdg) = env::var("XDG_CONFIG_HOME") {
             v.push(PathBuf::from(xdg).join("workbuddy/config.toml"));
         }
@@ -303,7 +308,7 @@ impl Config {
 }
 
 /// 使用 toml_edit 更新配置文件，保留注释和未知键。
-pub fn set_config_value(path: &Path, key: &str, value: &str) -> Result<()> {
+pub fn set_config_value_file(path: &Path, key: &str, value: &str) -> Result<()> {
     validate_key_syntax(key)?;
     let normalized_key = normalize_config_key(key)?;
 
@@ -317,7 +322,19 @@ pub fn set_config_value(path: &Path, key: &str, value: &str) -> Result<()> {
     };
 
     let parsed = parse_config_set_value(normalized_key, value)?;
-    doc.as_table_mut().insert(normalized_key, parsed);
+    let mut table = doc.as_table_mut();
+    if let Some(existing) = table.get_mut(normalized_key) {
+        let decor = existing.as_value_mut().map(|v| v.decor().clone());
+        *existing = parsed;
+        if let Some(decor) = decor {
+            if let Some(v) = existing.as_value_mut() {
+                *v.decor_mut() = decor;
+            }
+        }
+    } else {
+        table.insert(normalized_key, parsed);
+    }
+    drop(table);
 
     let contents = doc.to_string();
     atomic_write(path, &contents)
@@ -390,7 +407,7 @@ fn validate_url_value(key: &str, raw: &str) -> Result<()> {
 
 /// 公开的配置更新入口，支持点号路径别名。
 pub fn update_config_value(path: &Path, key: &str, value: &str) -> Result<()> {
-    set_config_value(path, key, value)
+    set_config_value_file(path, key, value)
 }
 
 /// 校验配置键的基本语法：非空且仅包含字母、数字、下划线、连字符、点号。
@@ -516,6 +533,205 @@ pub fn validate_config(config: &Config) -> Vec<String> {
     }
 
     errors
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigFormat {
+    Toml,
+    Json,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConfigSetError {
+    UnknownKey(String),
+    InvalidValue { key: String, message: String },
+    Parse(String),
+    Serialize(String),
+}
+
+impl std::fmt::Display for ConfigSetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownKey(key) => write!(f, "未知配置键: {key}"),
+            Self::InvalidValue { key, message } => write!(f, "{key} 的值无效: {message}"),
+            Self::Parse(message) => write!(f, "解析配置失败: {message}"),
+            Self::Serialize(message) => write!(f, "序列化配置失败: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for ConfigSetError {}
+
+
+
+/// 纯函数版本的 config set：编辑字符串内容并返回新内容，不执行文件 IO。
+///
+/// 仅允许修改白名单中的标量字段：
+/// - `llm.model`（字符串）
+/// - `budget.max_budget`（数字）
+/// - `cost.input_per_1k`（数字）
+pub fn set_config_value_str(
+    input: &str,
+    format: ConfigFormat,
+    key: &str,
+    value: &str,
+) -> std::result::Result<String, ConfigSetError> {
+    let normalized_key = normalize_whitelist_key(key)?;
+    match format {
+        ConfigFormat::Toml => {
+            let mut doc = input
+                .parse::<toml_edit::DocumentMut>()
+                .map_err(|e| ConfigSetError::Parse(format!("TOML: {e}")))?;
+            let item = parse_whitelist_toml(normalized_key, value)?;
+            let mut table = doc.as_table_mut();
+            if let Some(existing) = table.get_mut(normalized_key) {
+                let decor = existing.as_value_mut().map(|v| v.decor().clone());
+                *existing = item;
+                if let Some(decor) = decor {
+                    if let Some(v) = existing.as_value_mut() {
+                        *v.decor_mut() = decor;
+                    }
+                }
+            } else {
+                table.insert(normalized_key, item);
+            }
+            drop(table);
+            Ok(doc.to_string())
+        }
+        ConfigFormat::Json => {
+            let mut root: serde_json::Value = serde_json::from_str(input)
+                .map_err(|e| ConfigSetError::Parse(format!("JSON: {e}")))?;
+            let obj = root
+                .as_object_mut()
+                .ok_or_else(|| ConfigSetError::Parse("JSON 配置根节点必须是对象".to_string()))?;
+            let json_value = parse_whitelist_json(normalized_key, value)?;
+            obj.insert(normalized_key.to_string(), json_value);
+            serde_json::to_string_pretty(&root)
+                .map_err(|e| ConfigSetError::Serialize(format!("{e}")))
+        }
+    }
+}
+
+fn normalize_whitelist_key(key: &str) -> std::result::Result<&str, ConfigSetError> {
+    match key {
+        "llm.model" => Ok("model"),
+        "budget.max_budget" => Ok("max_budget"),
+        "cost.input_per_1k" => Ok("cost_per_1k_tokens"),
+        _ => Err(ConfigSetError::UnknownKey(key.to_string())),
+    }
+}
+
+fn parse_whitelist_toml(key: &str, value: &str) -> std::result::Result<toml_edit::Item, ConfigSetError> {
+    parse_config_set_value(key, value).map_err(|e| ConfigSetError::InvalidValue {
+        key: key.to_string(),
+        message: e.to_string(),
+    })
+}
+
+fn parse_whitelist_json(key: &str, value: &str) -> std::result::Result<serde_json::Value, ConfigSetError> {
+    parse_config_set_value(key, value).map_err(|e| ConfigSetError::InvalidValue {
+        key: key.to_string(),
+        message: e.to_string(),
+    })?;
+
+    match key {
+        "model" => Ok(serde_json::Value::String(value.to_string())),
+        "max_budget" | "cost_per_1k_tokens" => {
+            let n: f64 = value
+                .parse()
+                .map_err(|e: std::num::ParseFloatError| ConfigSetError::InvalidValue {
+                    key: key.to_string(),
+                    message: e.to_string(),
+                })?;
+            serde_json::Number::from_f64(n)
+                .map(serde_json::Value::Number)
+                .ok_or_else(|| ConfigSetError::InvalidValue {
+                    key: key.to_string(),
+                    message: "数值无法序列化为 JSON number".to_string(),
+                })
+        }
+        _ => unreachable!("白名单 key 已预先校验"),
+    }
+}
+
+#[cfg(test)]
+mod set_config_pure_tests {
+    use super::*;
+    use super::set_config_value_str as set_config_value;
+
+    #[test]
+    fn set_config_value_toml_updates_llm_model() {
+        let input = r#"
+# 注释
+model = "qwen-plus"
+unknown = "keep"
+"#;
+        let out = set_config_value(input, ConfigFormat::Toml, "llm.model", "qwen-max").unwrap();
+        assert!(out.contains("qwen-max"));
+        assert!(!out.contains("qwen-plus"));
+        assert!(out.contains("# 注释"));
+        assert!(out.contains("unknown"));
+    }
+
+    #[test]
+    fn set_config_value_json_updates_llm_model_and_keeps_unknown() {
+        let input = r#"{"model":"qwen-plus","keep":true}"#;
+        let out = set_config_value(input, ConfigFormat::Json, "llm.model", "qwen-max").unwrap();
+        let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(value["model"].as_str(), Some("qwen-max"));
+        assert_eq!(value["keep"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn set_config_value_rejects_unknown_key() {
+        let err = set_config_value("", ConfigFormat::Toml, "llm.api_key", "abc").unwrap_err();
+        assert!(matches!(err, ConfigSetError::UnknownKey(_)));
+    }
+
+    #[test]
+    fn set_config_value_rejects_invalid_numeric_value_toml() {
+        let err = set_config_value(
+            "max_budget = 10.0",
+            ConfigFormat::Toml,
+            "budget.max_budget",
+            "abc",
+        )
+        .unwrap_err();
+        assert!(matches!(err, ConfigSetError::InvalidValue { .. }));
+    }
+
+    #[test]
+    fn set_config_value_rejects_invalid_numeric_value_json() {
+        let err = set_config_value("{}", ConfigFormat::Json, "cost.input_per_1k", "abc").unwrap_err();
+        assert!(matches!(err, ConfigSetError::InvalidValue { .. }));
+    }
+
+    #[test]
+    fn set_config_value_toml_preserves_comments_and_unknown_fields() {
+        let input = r#"
+# top comment
+model = "old"
+unknown = "keep"
+"#;
+        let out = set_config_value(input, ConfigFormat::Toml, "budget.max_budget", "42.5").unwrap();
+        assert!(out.contains("max_budget = 42.5"));
+        assert!(out.contains("# top comment"));
+        assert!(out.contains("keep"));
+    }
+
+    #[test]
+    fn set_config_value_json_preserves_unknown_fields() {
+        let input = r#"{
+  "model": "old",
+  "unknown": {"nested": [1, 2]},
+  "max_budget": 10.0
+}"#;
+        let out = set_config_value(input, ConfigFormat::Json, "cost.input_per_1k", "0.42").unwrap();
+        let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(value["cost_per_1k_tokens"].as_f64(), Some(0.42));
+        assert_eq!(value["unknown"]["nested"][1].as_i64(), Some(2));
+        assert_eq!(value["max_budget"].as_f64(), Some(10.0));
+    }
 }
 
 #[cfg(test)]
@@ -996,4 +1212,16 @@ impl Default for CmdShow {
             json: false,
         }
     }
+}
+
+/// `config set` 文件更新入口：写入配置并返回新内容。
+pub fn set_config_value(
+    path: &Path,
+    key: &str,
+    value: &str,
+) -> std::result::Result<String, ConfigSetError> {
+    set_config_value_file(path, key, value)
+        .map_err(|e| ConfigSetError::Parse(e.to_string()))?;
+    std::fs::read_to_string(path)
+        .map_err(|e| ConfigSetError::Parse(format!("读取配置文件失败: {}", e)))
 }

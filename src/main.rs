@@ -232,11 +232,15 @@ async fn main() -> Result<()> {
                 if value.trim().is_empty() {
                     return Err(anyhow::anyhow!("配置值不能为空"));
                 }
-                Config::set_config_value(&key, &value)
+
+                let config_path = find_config_path()?;
+                config::set_config_value_file(&config_path, &key, &value)
                     .map_err(|e| anyhow::anyhow!("设置配置 {} 失败: {}", key, e))?;
+
                 let cfg = Config::load()?;
                 println!("已更新配置：{} = {}", key, value);
                 println!("{}", cfg.summary());
+
                 // 提示哪些配置需要重启生效
                 let needs_restart = matches!(
                     key.as_str(),
@@ -345,6 +349,14 @@ async fn main() -> Result<()> {
             Ok(())
         },
     }
+}
+
+fn find_config_path() -> Result<std::path::PathBuf> {
+    if let Ok(path) = std::env::var("WORKBUDDY_CONFIG") {
+        return Ok(std::path::PathBuf::from(path));
+    }
+    let cwd = std::env::current_dir()?;
+    Ok(cwd.join("config.toml"))
 }
 
 fn cmd_validate() -> Result<()> {
