@@ -1,108 +1,148 @@
-use std::net::SocketAddr;
+use std::io::{BufRead, Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-
-use axum::{
-    extract::{Path as AxumPath, State},
-    http::StatusCode,
-    response::{IntoResponse, Response},
-    routing::get,
-    Json, Router,
-};
-use serde_json::json;
 
 use crate::workspace::{RunRecord, Workspace};
 
-struct ApiError {
-    status: StatusCode,
-    message: String,
+#[derive(Debug, PartialEq)]
+pub enum RequestPath {
+    Runs,
+    Run(String),
 }
 
-impl ApiError {
-    fn internal(err: impl std::fmt::Display) -> Self {
-        ApiError {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: err.to_string(),
+pub fn parse_request_path(path: &str) -> Option<RequestPath> {
+    let path = path.split('?').next().unwrap_or(path);
+    let path = path.trim_start_matches('/');
+    if path == "runs" {
+        return Some(RequestPath::Runs);
+    }
+    if let Some(rest) = path.strip_prefix("runs/") {
+        if !rest.is_empty() && !rest.contains('/') {
+            return Some(RequestPath::Run(rest.to_string()));
         }
     }
+    None
+}
 
-    fn not_found(msg: impl Into<String>) -> Self {
-        ApiError {
-            status: StatusCode::NOT_FOUND,
-            message: msg.into(),
+pub fn runs_to_json(runs: &[RunRecord]) -> Result<String, serde_json::Error> {
+    serde_json::to_string(runs)
+}
+
+pub fn run_to_json(run: &RunRecord) -> Result<String, serde_json::Error> {
+    serde_json::to_string(run)
+}
+
+fn json_error_body(message: &str) -> String {
+    serde_json::json!({ "error": message }).to_string()
+}
+
+fn read_request_line(stream: &mut TcpStream) -> std::io::Result<(String, String)> {
+    let mut reader = std::io::BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    let mut parts = line.split_whitespace();
+    let method = parts.next().unwrap_or("").to_string();
+    let path = parts.next().unwrap_or("").to_string();
+    Ok((method, path))
+}
+
+fn write_response(
+    stream: &mut TcpStream,
+    status: u16,
+    status_text: &str,
+    body: &str,
+) -> std::io::Result<()> {
+    let response = format!(
+        "HTTP/1.1 {status} {status_text}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    stream.write_all(response.as_bytes())?;
+    stream.flush()
+}
+
+fn handle_connection(mut stream: TcpStream, workspace_dir: &Path) -> anyhow::Result<()> {
+    let (method, path) = read_request_line(&mut stream)?;
+    let route = parse_request_path(&path);
+
+    let (status, status_text, body) = match (method.as_str(), route) {
+        ("GET", Some(RequestPath::Runs)) => {
+            let runs = Workspace::root(workspace_dir);
+            match runs_to_json(&runs) {
+                Ok(body) => (200, "OK", body),
+                Err(e) => {
+                    let msg = format!("failed to serialize runs: {e}");
+                    (500, "Internal Server Error", json_error_body(&msg))
+                }
+            }
+        }
+        ("GET", Some(RequestPath::Run(id))) => {
+            match Workspace::open(workspace_dir, &id) {
+                Ok(ws) => match ws.load_record() {
+                    Ok(run) => match run_to_json(&run) {
+                        Ok(body) => (200, "OK", body),
+                        Err(e) => {
+                            let msg = format!("failed to serialize run: {e}");
+                            (500, "Internal Server Error", json_error_body(&msg))
+                        }
+                    },
+                    Err(e) => {
+                        let msg = format!("failed to load run {id}: {e}");
+                        (500, "Internal Server Error", json_error_body(&msg))
+                    }
+                },
+                Err(_) => {
+                    let msg = format!("run {id} not found");
+                    (404, "Not Found", json_error_body(&msg))
+                }
+            }
+        }
+        ("GET", None) => (404, "Not Found", json_error_body("not found")),
+        (_, None) => (404, "Not Found", json_error_body("not found")),
+        (_, Some(_)) => (405, "Method Not Allowed", json_error_body("method not allowed")),
+    };
+
+    write_response(&mut stream, status, status_text, &body)?;
+    Ok(())
+}
+
+fn serve_blocking(listener: TcpListener, workspace_dir: &Path) -> anyhow::Result<()> {
+    for stream in listener.incoming() {
+        match stream {
+            Ok(stream) => {
+                let ws_dir = workspace_dir.to_path_buf();
+                std::thread::spawn(move || {
+                    if let Err(e) = handle_connection(stream, &ws_dir) {
+                        eprintln!("connection error: {e}");
+                    }
+                });
+            }
+            Err(e) => eprintln!("accept error: {e}"),
         }
     }
-}
-
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        (self.status, Json(json!({ "error": self.message }))).into_response()
-    }
-}
-
-async fn health() -> Json<serde_json::Value> {
-    Json(json!({ "status": "ok" }))
-}
-
-async fn list_runs(
-    State(workspace_dir): State<Arc<PathBuf>>,
-) -> Result<Json<Vec<RunRecord>>, ApiError> {
-    let runs = Workspace::root(&workspace_dir);
-    Ok(Json(runs))
-}
-
-async fn get_run(
-    State(workspace_dir): State<Arc<PathBuf>>,
-    AxumPath(id): AxumPath<String>,
-) -> Result<Json<RunRecord>, ApiError> {
-    let ws = Workspace::open(&workspace_dir, &id)
-        .map_err(|_| ApiError::not_found(format!("run {id} not found")))?;
-    let run = ws.load_record().map_err(ApiError::internal)?;
-    Ok(Json(run))
-}
-
-async fn not_found() -> impl IntoResponse {
-    (StatusCode::NOT_FOUND, Json(json!({ "error": "not found" })))
-}
-
-pub fn router(workspace_dir: &Path) -> Router {
-    Router::new()
-        .route("/health", get(health))
-        .route("/runs", get(list_runs))
-        .route("/runs/:id", get(get_run))
-        .fallback(not_found)
-        .with_state(Arc::new(workspace_dir.to_path_buf()))
+    Ok(())
 }
 
 pub async fn run(workspace_dir: &Path, bind_addr: SocketAddr) -> anyhow::Result<()> {
-    let app = router(workspace_dir);
-    let listener = tokio::net::TcpListener::bind(bind_addr).await?;
-    axum::serve(listener, app).await?;
+    let listener = TcpListener::bind(bind_addr)?;
+    let local_addr = listener.local_addr()?;
+    println!("Serving on http://{local_addr}");
+    let workspace_dir = workspace_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || serve_blocking(listener, &workspace_dir)).await??;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::StatusCode;
-    use crate::workspace::Workspace;
+    use crate::workspace::{RunRecord, Workspace};
     use serde_json::Value;
+    use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    #[tokio::test]
-    async fn test_serve_routes() {
-        let workspace_dir = std::env::temp_dir().join(format!(
-            "workbuddy-serve-test-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&workspace_dir).unwrap();
-
-        let ws = Workspace::create_new(&workspace_dir, "echo test").unwrap();
-        let mut run = crate::workspace::RunRecord {
-            id: ws.dir.file_name().unwrap().to_string_lossy().to_string(),
+    fn sample_run() -> RunRecord {
+        RunRecord {
+            id: "test-run".to_string(),
             goal: "echo test".to_string(),
             created: "2025-01-01T00:00:00Z".to_string(),
             model: "test-model".to_string(),
@@ -110,77 +150,90 @@ mod tests {
             steps: Vec::new(),
             token_usage: None,
             char_usage: None,
-        };
+        }
+    }
+
+    fn create_test_workspace() -> (PathBuf, String) {
+        let workspace_dir = std::env::temp_dir().join(format!(
+            "workbuddy-serve-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&workspace_dir).unwrap();
+
+        let ws = Workspace::create_new(&workspace_dir, "echo test").unwrap();
+        let mut run = sample_run();
+        run.id = ws.dir.file_name().unwrap().to_string_lossy().to_string();
         let run_id = run.id.clone();
         ws.finish_run(&mut run, "# report").unwrap();
+        (workspace_dir, run_id)
+    }
 
-        let app = router(&workspace_dir);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    #[test]
+    fn test_parse_request_path() {
+        assert_eq!(parse_request_path("/runs"), Some(RequestPath::Runs));
+        assert_eq!(
+            parse_request_path("/runs/abc123"),
+            Some(RequestPath::Run("abc123".to_string()))
+        );
+        assert_eq!(
+            parse_request_path("/runs/abc?foo=bar"),
+            Some(RequestPath::Run("abc".to_string()))
+        );
+        assert_eq!(parse_request_path("/runs/"), None);
+        assert_eq!(parse_request_path("/health"), None);
+        assert_eq!(parse_request_path("/"), None);
+    }
+
+    #[test]
+    fn test_runs_to_json_and_run_to_json() {
+        let runs = vec![sample_run()];
+        let json_str = runs_to_json(&runs).unwrap();
+        let value: Value = serde_json::from_str(&json_str).unwrap();
+        assert!(value.is_array());
+
+        let run = sample_run();
+        let json_str = run_to_json(&run).unwrap();
+        let value: Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(value.get("id").and_then(Value::as_str), Some(run.id.as_str()));
+    }
+
+    #[test]
+    fn test_serve_http_routes() {
+        let (workspace_dir, run_id) = create_test_workspace();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        let client = reqwest::Client::new();
-        let health_url = format!("http://{addr}/health");
-        // 等待服务真正开始接受连接，避免建立连接时尚未就绪。
-        let mut ready = false;
-        for _ in 0..100 {
-            match client.get(&health_url).send().await {
-                Ok(resp) if resp.status() == StatusCode::OK => {
-                    ready = true;
-                    break;
-                }
-                Ok(_) => {}
-                Err(_) => {}
+        let ws_clone = workspace_dir.clone();
+        let server_thread = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().unwrap();
+                let ws_dir = ws_clone.clone();
+                handle_connection(stream, &ws_dir).unwrap();
             }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-        assert!(ready, "HTTP 服务未能在超时内就绪");
+        });
 
-        let resp = client
-            .get(format!("http://{addr}/health"))
-            .send()
-            .await
+        let mut stream = std::net::TcpStream::connect(addr).unwrap();
+        stream
+            .write_all(b"GET /runs HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body: Value = resp.json().await.unwrap();
-        assert_eq!(body.get("status").and_then(Value::as_str), Some("ok"));
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response.contains("Content-Type: application/json"));
+        assert!(response.contains('['));
 
-        let resp = client
-            .get(format!("http://{addr}/runs"))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body: Value = resp.json().await.unwrap();
-        assert!(body.is_array());
+        let mut stream = std::net::TcpStream::connect(addr).unwrap();
+        let request = format!(
+            "GET /runs/{run_id} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        );
+        stream.write_all(request.as_bytes()).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response.contains(&run_id));
 
-        // The run fixture above is served by GET /runs/{id}.
-        let resp = client
-            .get(format!("http://{addr}/runs/{run_id}"))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body: Value = resp.json().await.unwrap();
-        assert_eq!(body.get("id").and_then(Value::as_str), Some(run_id.as_str()));
-
-        let resp = client
-            .get(format!("http://{addr}/runs/does-not-exist"))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-        let body: Value = resp.json().await.unwrap();
-        assert!(body.get("error").is_some());
-
-        let resp = client
-            .get(format!("http://{addr}/missing"))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-        let body: Value = resp.json().await.unwrap();
-        assert!(body.get("error").is_some());
+        server_thread.join().unwrap();
     }
 }

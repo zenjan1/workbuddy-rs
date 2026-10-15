@@ -176,8 +176,8 @@ enum Cmd {
     Tui,
     /// 启动只读 HTTP 服务
     Serve {
-        /// 监听端口（默认 8080）
-        #[arg(short, long, default_value = "8080")]
+        /// 监听端口（0 表示随机端口）
+        #[arg(short, long, default_value = "0")]
         port: u16,
     },
     /// 持久记忆:add/list/get
