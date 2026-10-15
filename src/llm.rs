@@ -15,12 +15,35 @@ pub fn estimate_cost(tokens: u64, cost_per_1k_tokens: f64) -> f64 {
 }
 
 /// LLM 每次调用的 token 与字符用量。
+///
+/// 新字段(input_tokens/output_tokens/input_chars/output_chars)为权威统计口径；
+/// 旧的 prompt_tokens/completion_tokens/character_count 保留用于向后兼容，并与新字段同步。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LlmUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub input_chars: usize,
+    pub output_chars: usize,
+    // 向后兼容旧字段（由 extract_usage_with_input 和 merge 同步维护）
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
-    pub total_tokens: u64,
     pub character_count: usize,
+}
+
+impl LlmUsage {
+    /// 累加另一个 usage 的全部字段，供 executor 汇总多次 LLM 调用。
+    pub fn merge(&mut self, other: &LlmUsage) {
+        self.input_tokens += other.input_tokens;
+        self.output_tokens += other.output_tokens;
+        self.total_tokens += other.total_tokens;
+        self.input_chars += other.input_chars;
+        self.output_chars += other.output_chars;
+        // 同步旧字段，保证向后兼容的读取结果与权威字段一致。
+        self.prompt_tokens = self.input_tokens;
+        self.completion_tokens = self.output_tokens;
+        self.character_count = self.output_chars;
+    }
 }
 
 /// 兼容别名，便于外部使用 `Usage`。
@@ -33,16 +56,39 @@ pub struct LlmResponse {
 }
 
 /// 从 OpenAI 兼容响应的 JSON 中提取 token 用量与字符数。
-/// 若响应没有 `usage` 字段，则四个值均记 0。
+/// 兼容旧调用：输入字符数记 0。
 pub fn extract_usage(v: &serde_json::Value, text: &str) -> LlmUsage {
+    extract_usage_with_input(v, text, 0)
+}
+
+/// 从 OpenAI 兼容响应的 JSON 中提取 token 用量与字符数。
+/// `input_chars` 为本次请求的输入字符数（system + user 的字符数之和）。
+/// 若响应没有 `usage` 字段，则 token 记 0，但字符数仍会统计。
+pub fn extract_usage_with_input(v: &serde_json::Value, text: &str, input_chars: usize) -> LlmUsage {
+    let output_chars = text.chars().count();
     match v.get("usage") {
-        Some(usage) => LlmUsage {
-            prompt_tokens: usage.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-            completion_tokens: usage.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-            total_tokens: usage.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-            character_count: text.chars().count(),
+        Some(usage) => {
+            let input_tokens = usage.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            let output_tokens = usage.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            let total_tokens = usage.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            LlmUsage {
+                input_tokens,
+                output_tokens,
+                total_tokens,
+                input_chars,
+                output_chars,
+                // 同步旧字段，保持向后兼容
+                prompt_tokens: input_tokens,
+                completion_tokens: output_tokens,
+                character_count: output_chars,
+            }
+        }
+        None => LlmUsage {
+            input_chars,
+            output_chars,
+            character_count: output_chars,
+            ..Default::default()
         },
-        None => LlmUsage::default(),
     }
 }
 
@@ -102,6 +148,7 @@ impl Llm for OpenAiCompat {
                     {"role": "user", "content": user}
                 ]
             });
+            let input_chars = system.chars().count() + user.chars().count();
 
             // 校园网到 DeepSeek 不稳定:读响应体失败/超时/连接重置时有发生。
             // 旧逻辑只对 429/5xx 状态码重试一次,传输错误直接返回 → 网络一抖整轮 LLM 调用全废。
@@ -177,7 +224,7 @@ impl Llm for OpenAiCompat {
                     .unwrap_or("")
                     .to_string();
                 if !content.trim().is_empty() {
-                    let usage = extract_usage(&v, &content);
+                    let usage = extract_usage_with_input(&v, &content, input_chars);
                     return Ok(LlmResponse {
                         text: content,
                         usage: Some(usage),
@@ -189,7 +236,7 @@ impl Llm for OpenAiCompat {
                     .unwrap_or("")
                     .to_string();
                 if !reasoning.trim().is_empty() {
-                    let usage = extract_usage(&v, &reasoning);
+                    let usage = extract_usage_with_input(&v, &reasoning, input_chars);
                     eprintln!(
                         "[llm] content 为空,回退使用 reasoning_content({} 字符)",
                         reasoning.len()
@@ -240,21 +287,29 @@ impl Llm for MockLlm {
         _user: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<LlmResponse>> + Send + 'a>> {
         Box::pin(async move {
-            if system.contains("输出协议") {
-                Ok(LlmResponse { text: MOCK_EDITS.to_string(), usage: None })
+            let input_chars = system.chars().count() + _user.chars().count();
+            let output = if system.contains("输出协议") {
+                MOCK_EDITS.to_string()
             } else if system.contains("任务生成器") {
-                Ok(LlmResponse { text: MOCK_GEN_TASKS.to_string(), usage: None })
+                MOCK_GEN_TASKS.to_string()
             } else if system.contains("开发任务") {
-                Ok(LlmResponse { text: MOCK_DEV_PLAN.to_string(), usage: None })
+                MOCK_DEV_PLAN.to_string()
             } else if system.contains("规划师") || system.contains("Planner") {
-                Ok(LlmResponse { text: MOCK_PLAN.to_string(), usage: None })
+                MOCK_PLAN.to_string()
             } else {
                 let head = _user
                     .lines()
                     .find(|l| !l.trim().is_empty())
                     .unwrap_or("done");
-                Ok(LlmResponse { text: format!("[mock] {}", clip(head, 60)), usage: None })
-            }
+                format!("[mock] {}", clip(head, 60))
+            };
+            let usage = LlmUsage {
+                input_chars,
+                output_chars: output.chars().count(),
+                character_count: output.chars().count(),
+                ..Default::default()
+            };
+            Ok(LlmResponse { text: output, usage: Some(usage) })
         })
     }
 }
@@ -306,5 +361,84 @@ mod tests {
     fn estimate_cost_with_high_price() {
         let cost = estimate_cost(100, 1000.0);
         assert!((cost - 100.0).abs() < 1e-12, "cost={cost}");
+    }
+
+    #[test]
+    fn extract_usage_extracts_tokens_and_chars() {
+        let v = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 120,
+                "completion_tokens": 30,
+                "total_tokens": 150
+            }
+        });
+        let text = "你好，世界";
+        let usage = extract_usage_with_input(&v, text, 8);
+        assert_eq!(usage.input_tokens, 120);
+        assert_eq!(usage.output_tokens, 30);
+        assert_eq!(usage.total_tokens, 150);
+        assert_eq!(usage.input_chars, 8);
+        assert_eq!(usage.output_chars, text.chars().count());
+        assert_eq!(usage.prompt_tokens, 120);
+        assert_eq!(usage.completion_tokens, 30);
+        assert_eq!(usage.character_count, text.chars().count());
+    }
+
+    #[test]
+    fn extract_usage_without_usage_counts_chars_only() {
+        let v = serde_json::json!({});
+        let text = "abc";
+        let usage = extract_usage_with_input(&v, text, 10);
+        assert_eq!(usage.input_chars, 10);
+        assert_eq!(usage.output_chars, 3);
+        assert_eq!(usage.input_tokens, 0);
+        assert_eq!(usage.output_tokens, 0);
+        assert_eq!(usage.total_tokens, 0);
+        assert_eq!(usage.character_count, 3);
+    }
+
+    #[test]
+    fn usage_merge_accumulates_all_fields() {
+        let mut a = LlmUsage {
+            input_tokens: 10,
+            output_tokens: 20,
+            total_tokens: 30,
+            input_chars: 100,
+            output_chars: 200,
+            prompt_tokens: 10,
+            completion_tokens: 20,
+            character_count: 200,
+        };
+        let b = LlmUsage {
+            input_tokens: 5,
+            output_tokens: 7,
+            total_tokens: 12,
+            input_chars: 40,
+            output_chars: 60,
+            prompt_tokens: 5,
+            completion_tokens: 7,
+            character_count: 60,
+        };
+        a.merge(&b);
+        assert_eq!(a.input_tokens, 15);
+        assert_eq!(a.output_tokens, 27);
+        assert_eq!(a.total_tokens, 42);
+        assert_eq!(a.input_chars, 140);
+        assert_eq!(a.output_chars, 260);
+        assert_eq!(a.prompt_tokens, 15);
+        assert_eq!(a.completion_tokens, 27);
+        assert_eq!(a.character_count, 260);
+    }
+
+    #[tokio::test]
+    async fn mock_llm_returns_usage_with_character_counts() {
+        let llm = MockLlm;
+        let system = "测试系统提示";
+        let user = "测试用户输入";
+        let out = llm.chat(system, user).await.unwrap();
+        let usage = out.usage.expect("mock usage 应该存在");
+        assert_eq!(usage.input_chars, system.chars().count() + user.chars().count());
+        assert_eq!(usage.output_chars, out.text.chars().count());
+        assert_eq!(usage.input_tokens, 0);
     }
 }
