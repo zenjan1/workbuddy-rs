@@ -227,8 +227,8 @@ impl Workspace {
 }
 
 /// 纯函数:根据标识符与任务列表解析任务索引。
-/// 数字输入保持原有数字索引语义(0-based);其他输入先归一化为标题 slug,
-/// 再对任务标题做同样归一化后进行唯一匹配。
+/// 数字输入保持原有数字索引语义(0-based);其他输入按任务标题进行
+/// 不区分大小写的子串匹配,唯一匹配时返回索引,多个匹配时返回错误。
 pub fn resolve_task_id(input: &str, runs: &[RunRecord]) -> Result<usize, String> {
     if let Ok(idx) = input.parse::<usize>() {
         if idx >= runs.len() {
@@ -241,40 +241,22 @@ pub fn resolve_task_id(input: &str, runs: &[RunRecord]) -> Result<usize, String>
         return Ok(idx);
     }
 
-    let normalized_input = slugify(input);
-    let exact_matches: Vec<(usize, String)> = runs
-        .iter()
-        .enumerate()
-        .filter(|(_, r)| slugify(&r.goal) == normalized_input)
-        .map(|(i, r)| (i, r.goal.clone()))
-        .collect();
-
-    match exact_matches.len() {
-        1 => return Ok(exact_matches[0].0),
-        0 => {}
-        _ => {
-            let titles: Vec<String> = exact_matches.iter().map(|(_, t)| t.clone()).collect();
-            return Err(format!(
-                "任务标题 '{}' 匹配到多个任务: {}。请使用数字索引",
-                input,
-                titles.join(", ")
-            ));
-        }
+    let needle = normalize_title(input);
+    if needle.is_empty() {
+        return Err(format!("未找到任务: {}", input));
     }
-
-    // 精确匹配无结果时,允许用标题 slug 前缀唯一匹配任务。
-    let prefix_matches: Vec<(usize, String)> = runs
+    let matches: Vec<(usize, String)> = runs
         .iter()
         .enumerate()
-        .filter(|(_, r)| slugify(&r.goal).starts_with(&normalized_input))
+        .filter(|(_, r)| normalize_title(&r.goal).contains(&needle))
         .map(|(i, r)| (i, r.goal.clone()))
         .collect();
 
-    match prefix_matches.len() {
-        1 => Ok(prefix_matches[0].0),
+    match matches.len() {
+        1 => Ok(matches[0].0),
         0 => Err(format!("未找到任务: {}", input)),
         _ => {
-            let titles: Vec<String> = prefix_matches.iter().map(|(_, t)| t.clone()).collect();
+            let titles: Vec<String> = matches.iter().map(|(_, t)| t.clone()).collect();
             Err(format!(
                 "任务标题 '{}' 匹配到多个任务: {}。请使用数字索引",
                 input,
@@ -282,6 +264,13 @@ pub fn resolve_task_id(input: &str, runs: &[RunRecord]) -> Result<usize, String>
             ))
         }
     }
+}
+
+fn normalize_title(s: &str) -> String {
+    s.to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect()
 }
 
 /// 纯函数:根据已完成条目推进路线图。返回更新后的文本;无任何改动时返回 None。
@@ -991,5 +980,63 @@ mod resolve_task_id_pure_tests {
         let runs = vec![rec("a", "Alpha")];
         let err = super::resolve_task_id("no-such-task", &runs).unwrap_err();
         assert!(err.contains("未找到任务"));
+    }
+}
+
+#[cfg(test)]
+mod task_id_title_tests {
+    use super::*;
+
+    fn run_record(goal: &str) -> RunRecord {
+        RunRecord {
+            token_usage: None,
+            char_usage: None,
+            id: format!("run-{}", goal),
+            goal: goal.to_string(),
+            created: "now".into(),
+            model: "mock".into(),
+            mock: true,
+            steps: vec![],
+        }
+    }
+
+    #[test]
+    fn numeric_index_still_works() {
+        let runs = vec![run_record("任务 A"), run_record("任务 B")];
+        assert_eq!(resolve_task_id("0", &runs), Ok(0));
+        assert_eq!(resolve_task_id("1", &runs), Ok(1));
+    }
+
+    #[test]
+    fn unique_title_match_returns_index() {
+        let runs = vec![run_record("部署 API"), run_record("写文档")];
+        assert_eq!(resolve_task_id("部署", &runs), Ok(0));
+        assert_eq!(resolve_task_id("文档", &runs), Ok(1));
+    }
+
+    #[test]
+    fn title_match_is_case_insensitive() {
+        let runs = vec![run_record("Deploy API"), run_record("Write Docs")];
+        assert_eq!(resolve_task_id("deploy api", &runs), Ok(0));
+        assert_eq!(resolve_task_id("WRITE docs", &runs), Ok(1));
+    }
+
+    #[test]
+    fn multiple_title_matches_return_error_and_candidates() {
+        let runs = vec![
+            run_record("部署 API"),
+            run_record("部署 API 服务"),
+            run_record("其他任务"),
+        ];
+        let err = resolve_task_id("部署 api", &runs).unwrap_err();
+        assert!(err.contains("匹配到多个任务"), "{}", err);
+        assert!(err.contains("部署 API") && err.contains("部署 API 服务"), "{}", err);
+    }
+
+    #[test]
+    fn no_title_match_returns_error() {
+        let runs = vec![run_record("任务 A"), run_record("任务 B")];
+        let err = resolve_task_id("不存在", &runs).unwrap_err();
+        assert!(err.contains("未找到任务"), "{}", err);
     }
 }
