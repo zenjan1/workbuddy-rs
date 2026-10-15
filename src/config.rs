@@ -54,10 +54,10 @@ const CONFIG_KEYS: &[&str] = &[
     "request_timeout_secs",
     "price",
     "max_budget",
+    "cost_per_1k_tokens",
     "webhook_url",
     "webhook_retry",
     "webhook_timeout_secs",
-    "temperature",
 ];
 
 /// 修改后需要重启进程才会生效的配置键。
@@ -71,7 +71,7 @@ const RESTART_REQUIRED_KEYS: &[&str] = &[
     "webhook_url",
     "webhook_retry",
     "webhook_timeout_secs",
-    "temperature",
+    "cost_per_1k_tokens",
 ];
 
 impl Config {
@@ -210,7 +210,7 @@ impl Config {
 
     fn parse_value_for_key(key: &str, raw: &str) -> Result<toml::Value> {
         let value = match key {
-            "max_budget" | "price" | "temperature" => {
+            "max_budget" | "price" | "cost_per_1k_tokens" => {
                 let n: f64 = raw.parse().with_context(|| format!("{key} 需要是数字"))?;
                 toml::Value::Float(n)
             }
@@ -564,7 +564,7 @@ mod tests {
     #[test]
     fn legal_config_keys_contains_expected_keys() {
         assert!(Config::is_known_config_key("model"));
-        assert!(Config::is_known_config_key("temperature"));
+        assert!(Config::is_known_config_key("cost_per_1k_tokens"));
         assert!(Config::is_known_config_key("request_timeout_secs"));
         assert!(!Config::is_known_config_key("unknown_key"));
     }
@@ -576,14 +576,28 @@ mod tests {
         std::fs::write(&path, initial).unwrap();
 
         Config::update_config_file(&path, "model", "qwen-plus").unwrap();
-        Config::update_config_file(&path, "temperature", "0.7").unwrap();
+        Config::update_config_file(&path, "cost_per_1k_tokens", "0.7").unwrap();
         Config::update_config_file(&path, "request_timeout_secs", "45").unwrap();
 
         let text = std::fs::read_to_string(&path).unwrap();
         let doc: toml::Value = toml::from_str(&text).unwrap();
         assert_eq!(doc["model"].as_str(), Some("qwen-plus"));
-        assert_eq!(doc["temperature"].as_float(), Some(0.7));
+        assert_eq!(doc["cost_per_1k_tokens"].as_float(), Some(0.7));
         assert_eq!(doc["request_timeout_secs"].as_integer(), Some(45));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn update_config_file_rejects_invalid_type_and_preserves_file() {
+        let path = temp_config_path("invalid_type");
+        let initial = "model = \"qwen-plus\"\n";
+        std::fs::write(&path, initial).unwrap();
+
+        let err = Config::update_config_file(&path, "request_timeout_secs", "not-a-number").unwrap_err();
+        assert!(err.to_string().contains("需要是整数"), "错误信息应提示类型错误: {err}");
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text, initial, "类型错误不应修改配置文件");
         std::fs::remove_file(&path).ok();
     }
 
