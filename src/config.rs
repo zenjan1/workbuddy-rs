@@ -1,4 +1,5 @@
 use std::env;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -170,16 +171,13 @@ impl Config {
 
     /// 判断配置键是否允许通过 `config set` 写入。
     pub fn is_known_config_key(key: &str) -> bool {
-        CONFIG_KEYS.contains(&key)
+        validate_key_syntax(key).is_ok() && normalize_config_key(key).is_ok()
     }
 
     /// 校验配置键是否允许通过 `config set` 写入。
     pub fn validate_config_key(key: &str) -> Result<()> {
-        if Self::is_known_config_key(key) {
-            Ok(())
-        } else {
-            anyhow::bail!("未知配置键: {key}; 可用键: {}", CONFIG_KEYS.join(", "))
-        }
+        validate_key_syntax(key)?;
+        normalize_config_key(key).map(|_| ())
     }
 
     /// 返回需要重启生效的全部配置键。
@@ -218,6 +216,9 @@ impl Config {
 
 /// 使用 toml_edit 更新配置文件，保留注释和未知键。
 pub fn set_config_value(path: &Path, key: &str, value: &str) -> Result<()> {
+    validate_key_syntax(key)?;
+    let normalized_key = normalize_config_key(key)?;
+
     let mut doc = if path.exists() {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("读取配置文件失败: {}", path.display()))?;
@@ -227,10 +228,11 @@ pub fn set_config_value(path: &Path, key: &str, value: &str) -> Result<()> {
         toml_edit::DocumentMut::new()
     };
 
-    let parsed = parse_config_set_value(key, value)?;
-    doc.as_table_mut().insert(key, parsed);
+    let parsed = parse_config_set_value(normalized_key, value)?;
+    doc.as_table_mut().insert(normalized_key, parsed);
 
-    std::fs::write(path, doc.to_string())
+    let contents = doc.to_string();
+    atomic_write(path, &contents)
         .with_context(|| format!("写入配置文件失败: {}", path.display()))?;
     Ok(())
 }
@@ -265,8 +267,12 @@ fn parse_config_set_value(key: &str, raw: &str) -> Result<toml_edit::Item> {
             }
             Ok(toml_edit::value(n))
         }
-        "api_key" | "base_url" | "model" | "workspace_dir" | "repo_dir" | "webhook_url" => {
-            if (key == "model" || key == "base_url") && raw.trim().is_empty() {
+        "base_url" | "webhook_url" => {
+            validate_url_value(key, raw)?;
+            Ok(toml_edit::value(raw.to_string()))
+        }
+        "api_key" | "model" | "workspace_dir" | "repo_dir" => {
+            if (key == "model" || key == "workspace_dir" || key == "repo_dir") && raw.trim().is_empty() {
                 anyhow::bail!("{key} 不能为空");
             }
             Ok(toml_edit::value(raw.to_string()))
@@ -276,6 +282,101 @@ fn parse_config_set_value(key: &str, raw: &str) -> Result<toml_edit::Item> {
             CONFIG_KEYS.join(", ")
         ),
     }
+}
+
+fn validate_url_value(key: &str, raw: &str) -> Result<()> {
+    let s = raw.trim();
+    if s.is_empty() {
+        anyhow::bail!("{key} 不能为空");
+    }
+    let url = reqwest::Url::parse(s)
+        .with_context(|| format!("{key} 不是有效 URL: {raw}"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        anyhow::bail!("{key} 必须使用 http 或 https 协议");
+    }
+    if url.host_str().is_none() {
+        anyhow::bail!("{key} 缺少主机名");
+    }
+    Ok(())
+}
+
+/// 公开的配置更新入口，支持点号路径别名。
+pub fn update_config_value(path: &Path, key: &str, value: &str) -> Result<()> {
+    set_config_value(path, key, value)
+}
+
+/// 校验配置键的基本语法：非空且仅包含字母、数字、下划线、连字符、点号。
+fn validate_key_syntax(key: &str) -> Result<()> {
+    if key.trim().is_empty() {
+        anyhow::bail!("配置键不能为空");
+    }
+    if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.') {
+        anyhow::bail!("配置键包含非法字符: {key}");
+    }
+    Ok(())
+}
+
+/// 将点号路径别名映射到实际的平面配置键。
+fn normalize_config_key(key: &str) -> Result<&str> {
+    match key {
+        "llm.api_base" => Ok("base_url"),
+        "llm.base_url" => Ok("base_url"),
+        "llm.model" => Ok("model"),
+        "llm.timeout" => Ok("request_timeout_secs"),
+        "llm.api_key" => Ok("api_key"),
+        "llm.max_parallel" => Ok("max_parallel"),
+        "webhook.url" => Ok("webhook_url"),
+        "webhook.retry" => Ok("webhook_retry"),
+        "webhook.timeout_secs" => Ok("webhook_timeout_secs"),
+        _ if CONFIG_KEYS.contains(&key) => Ok(key),
+        _ => anyhow::bail!(
+            "未知配置键: {key}; 可用键: {} 或别名: llm.api_base, llm.model, llm.timeout",
+            CONFIG_KEYS.join(", ")
+        ),
+    }
+}
+
+/// 原子写入：写入同目录临时文件后 rename 替换，失败时清理临时文件。
+fn atomic_write(path: &Path, contents: &str) -> Result<()> {
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("创建配置目录失败: {}", dir.display()))?;
+
+    let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let tmp_path = dir.join(format!(
+        ".{}.{}.{}.tmp",
+        file_name,
+        std::process::id(),
+        unique
+    ));
+
+    let write_result = (|| -> Result<()> {
+        let mut tmp = std::fs::File::create(&tmp_path)
+            .with_context(|| format!("创建临时文件失败: {}", tmp_path.display()))?;
+        tmp.write_all(contents.as_bytes())
+            .with_context(|| format!("写入临时文件失败: {}", tmp_path.display()))?;
+        tmp.sync_all()
+            .with_context(|| format!("同步临时文件失败: {}", tmp_path.display()))?;
+        Ok(())
+    })();
+
+    if let Err(e) = write_result {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e);
+    }
+
+    std::fs::rename(&tmp_path, path).with_context(|| {
+        let _ = std::fs::remove_file(&tmp_path);
+        format!("替换配置文件失败: {}", path.display())
+    })?;
+    Ok(())
 }
 
 pub fn validate_config(config: &Config) -> Vec<String> {
