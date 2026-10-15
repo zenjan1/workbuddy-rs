@@ -176,8 +176,8 @@ enum Cmd {
     Tui,
     /// 启动只读 HTTP 服务
     Serve {
-        /// 监听端口（0 表示随机端口）
-        #[arg(short, long, default_value = "0")]
+        /// 监听端口（默认 8080）
+        #[arg(short, long, default_value = "8080")]
         port: u16,
     },
     /// 持久记忆:add/list/get
@@ -328,8 +328,8 @@ async fn main() -> Result<()> {
                 .map_err(|e| anyhow::anyhow!("启动 TUI 失败: {e:#}"))
         }
         Cmd::Serve { port } => {
-            let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-            serve::run(&cfg.workspace_dir, addr)
+            let bind_addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+            serve::run(&cfg.workspace_dir, bind_addr)
                 .await
                 .map_err(|e| anyhow::anyhow!("启动只读 HTTP 服务失败: {e:#}"))
         }

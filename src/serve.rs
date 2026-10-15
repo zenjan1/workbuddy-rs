@@ -1,6 +1,8 @@
-use std::io::{BufRead, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+
+use anyhow::Result;
+use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 use crate::workspace::{RunRecord, Workspace};
 
@@ -36,99 +38,110 @@ fn json_error_body(message: &str) -> String {
     serde_json::json!({ "error": message }).to_string()
 }
 
-fn read_request_line(stream: &mut TcpStream) -> std::io::Result<(String, String)> {
-    let mut reader = std::io::BufReader::new(stream);
-    let mut line = String::new();
-    reader.read_line(&mut line)?;
-    let mut parts = line.split_whitespace();
-    let method = parts.next().unwrap_or("").to_string();
-    let path = parts.next().unwrap_or("").to_string();
-    Ok((method, path))
+fn json_response(status: u16, body: String) -> Response<std::io::Cursor<Vec<u8>>> {
+    let status_code = StatusCode(status);
+    let content_type = Header::from_bytes(b"Content-Type", b"application/json").unwrap();
+    let connection_close = Header::from_bytes(b"Connection", b"close").unwrap();
+    Response::from_string(body)
+        .with_status_code(status_code)
+        .with_header(content_type)
+        .with_header(connection_close)
 }
 
-fn write_response(
-    stream: &mut TcpStream,
-    status: u16,
-    status_text: &str,
-    body: &str,
-) -> std::io::Result<()> {
-    let response = format!(
-        "HTTP/1.1 {status} {status_text}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        body.len(),
-        body
-    );
-    stream.write_all(response.as_bytes())?;
-    stream.flush()
+fn respond_json(request: Request, status: u16, body: String) -> Result<()> {
+    let response = json_response(status, body);
+    request.respond(response)?;
+    Ok(())
 }
 
-fn handle_connection(mut stream: TcpStream, workspace_dir: &Path) -> anyhow::Result<()> {
-    let (method, path) = read_request_line(&mut stream)?;
-    let route = parse_request_path(&path);
+fn respond_error(request: Request, status: u16, message: &str) -> Result<()> {
+    respond_json(request, status, json_error_body(message))
+}
 
-    let (status, status_text, body) = match (method.as_str(), route) {
-        ("GET", Some(RequestPath::Runs)) => {
-            let runs = Workspace::root(workspace_dir);
+fn parse_limit(query: &str) -> Option<usize> {
+    query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        if key == "limit" {
+            value.parse::<usize>().ok()
+        } else {
+            None
+        }
+    })
+}
+
+fn handle_request(request: Request, workspace_dir: &Path) -> Result<()> {
+    let method = request.method();
+    let url = request.url().to_string();
+    let path = url.split('?').next().unwrap_or(&url).trim_start_matches('/');
+
+    if method != &Method::Get {
+        return respond_error(request, 405, "method not allowed");
+    }
+
+    if path == "health" {
+        let body = serde_json::json!({
+            "status": "ok",
+            "version": env!("CARGO_PKG_VERSION")
+        })
+        .to_string();
+        return respond_json(request, 200, body);
+    }
+
+    match parse_request_path(&url) {
+        Some(RequestPath::Runs) => {
+            let query = url.split('?').nth(1).unwrap_or("");
+            let limit = parse_limit(query);
+            let mut runs = Workspace::root(workspace_dir);
+            if let Some(limit) = limit {
+                runs.truncate(limit);
+            }
             match runs_to_json(&runs) {
-                Ok(body) => (200, "OK", body),
+                Ok(body) => respond_json(request, 200, body),
                 Err(e) => {
                     let msg = format!("failed to serialize runs: {e}");
-                    (500, "Internal Server Error", json_error_body(&msg))
+                    respond_error(request, 500, &msg)
                 }
             }
         }
-        ("GET", Some(RequestPath::Run(id))) => {
-            match Workspace::open(workspace_dir, &id) {
-                Ok(ws) => match ws.load_record() {
-                    Ok(run) => match run_to_json(&run) {
-                        Ok(body) => (200, "OK", body),
-                        Err(e) => {
-                            let msg = format!("failed to serialize run: {e}");
-                            (500, "Internal Server Error", json_error_body(&msg))
-                        }
-                    },
+        Some(RequestPath::Run(id)) => match Workspace::open(workspace_dir, &id) {
+            Ok(ws) => match ws.load_record() {
+                Ok(run) => match run_to_json(&run) {
+                    Ok(body) => respond_json(request, 200, body),
                     Err(e) => {
-                        let msg = format!("failed to load run {id}: {e}");
-                        (500, "Internal Server Error", json_error_body(&msg))
+                        let msg = format!("failed to serialize run: {e}");
+                        respond_error(request, 500, &msg)
                     }
                 },
-                Err(_) => {
-                    let msg = format!("run {id} not found");
-                    (404, "Not Found", json_error_body(&msg))
+                Err(e) => {
+                    let msg = format!("failed to load run {id}: {e}");
+                    respond_error(request, 500, &msg)
                 }
+            },
+            Err(_) => {
+                let msg = format!("run {id} not found");
+                respond_error(request, 404, &msg)
             }
-        }
-        ("GET", None) => (404, "Not Found", json_error_body("not found")),
-        (_, None) => (404, "Not Found", json_error_body("not found")),
-        (_, Some(_)) => (405, "Method Not Allowed", json_error_body("method not allowed")),
-    };
-
-    write_response(&mut stream, status, status_text, &body)?;
-    Ok(())
-}
-
-fn serve_blocking(listener: TcpListener, workspace_dir: &Path) -> anyhow::Result<()> {
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                let ws_dir = workspace_dir.to_path_buf();
-                std::thread::spawn(move || {
-                    if let Err(e) = handle_connection(stream, &ws_dir) {
-                        eprintln!("connection error: {e}");
-                    }
-                });
-            }
-            Err(e) => eprintln!("accept error: {e}"),
-        }
+        },
+        None => respond_error(request, 404, "not found"),
     }
-    Ok(())
 }
 
 pub async fn run(workspace_dir: &Path, bind_addr: SocketAddr) -> anyhow::Result<()> {
-    let listener = TcpListener::bind(bind_addr)?;
-    let local_addr = listener.local_addr()?;
+    let server = Server::http(bind_addr)
+        .map_err(|e| anyhow::anyhow!("failed to bind {bind_addr}: {e}"))?;
+    let local_addr = server.server_addr();
     println!("Serving on http://{local_addr}");
     let workspace_dir = workspace_dir.to_path_buf();
-    tokio::task::spawn_blocking(move || serve_blocking(listener, &workspace_dir)).await??;
+    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        for request in server.incoming_requests() {
+            let ws_dir = workspace_dir.clone();
+            if let Err(e) = handle_request(request, &ws_dir) {
+                eprintln!("request handling error: {e}");
+            }
+        }
+        Ok(())
+    })
+    .await??;
     Ok(())
 }
 
@@ -138,6 +151,7 @@ mod tests {
     use crate::workspace::{RunRecord, Workspace};
     use serde_json::Value;
     use std::fs;
+    use std::io::{Read, Write};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn sample_run() -> RunRecord {
@@ -201,19 +215,39 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_limit() {
+        assert_eq!(parse_limit("limit=5"), Some(5));
+        assert_eq!(parse_limit("foo=bar&limit=10"), Some(10));
+        assert_eq!(parse_limit("limit=0"), Some(0));
+        assert_eq!(parse_limit(""), None);
+        assert_eq!(parse_limit("foo=bar"), None);
+    }
+
+    #[test]
     fn test_serve_http_routes() {
         let (workspace_dir, run_id) = create_test_workspace();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_ip().expect("expected ip");
         let ws_clone = workspace_dir.clone();
         let server_thread = std::thread::spawn(move || {
-            for _ in 0..2 {
-                let (stream, _) = listener.accept().unwrap();
-                let ws_dir = ws_clone.clone();
-                handle_connection(stream, &ws_dir).unwrap();
+            for _ in 0..3 {
+                let request = server.recv().unwrap();
+                handle_request(request, &ws_clone).unwrap();
             }
         });
 
+        // GET /health
+        let mut stream = std::net::TcpStream::connect(addr).unwrap();
+        stream
+            .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response.contains("\"status\":\"ok\""));
+        assert!(response.contains(env!("CARGO_PKG_VERSION")));
+
+        // GET /runs
         let mut stream = std::net::TcpStream::connect(addr).unwrap();
         stream
             .write_all(b"GET /runs HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
@@ -224,6 +258,7 @@ mod tests {
         assert!(response.contains("Content-Type: application/json"));
         assert!(response.contains('['));
 
+        // GET /runs/{id}
         let mut stream = std::net::TcpStream::connect(addr).unwrap();
         let request = format!(
             "GET /runs/{run_id} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
