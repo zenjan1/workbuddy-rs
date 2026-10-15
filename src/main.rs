@@ -57,6 +57,8 @@ enum Cmd {
     Agents,
     /// 打印当前生效配置(隐藏 key)
     Config,
+    /// 校验配置(读取 config.toml 或默认配置)
+    Validate,
     /// 探测 LLM 端点健康状态
     Health,
     /// 自主开发循环:从 backlog 取任务 → 规划 → 改码 → 验证 → 提交
@@ -92,6 +94,9 @@ enum Cmd {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Cmd::Validate = &cli.cmd {
+        return cmd_validate();
+    }
     let mut cfg = Config::load()?;
     match cli.cmd {
         Cmd::Run {
@@ -120,6 +125,7 @@ async fn main() -> Result<()> {
             println!("{}", cfg.summary());
             Ok(())
         }
+        Cmd::Validate => unreachable!("Validate 已在 main 入口处理"),
         Cmd::Health => cmd_health(cfg).await,
         Cmd::Dev {
             backlog,
@@ -180,6 +186,24 @@ async fn main() -> Result<()> {
             }
         },
     }
+}
+
+fn cmd_validate() -> Result<()> {
+    let cfg = match Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("配置文件读取失败：{e:#}");
+            std::process::exit(2);
+        }
+    };
+    if let Err(errors) = cfg.validate() {
+        for error in &errors {
+            eprintln!("{error}");
+        }
+        std::process::exit(1);
+    }
+    println!("配置校验通过");
+    Ok(())
 }
 
 async fn run_task(cfg: Config, goal: &str) -> Result<()> {

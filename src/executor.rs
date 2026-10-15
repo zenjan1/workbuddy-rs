@@ -473,6 +473,8 @@ mod tests {
 
     fn mock_cfg() -> Config {
         Config {
+            price: 0.0,
+            max_budget: 0.0,
             api_key: None,
             base_url: "http://mock".into(),
             model: "mock".into(),

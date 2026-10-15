@@ -173,6 +173,8 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("wb-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let cfg = Config {
+            price: 0.0,
+            max_budget: 0.0,
             api_key: None,
             base_url: "x".into(),
             model: "x".into(),
