@@ -600,7 +600,7 @@ pub async fn run_dev_loop(
         ws.finish_run(&mut run, &summary)?;
 
         // 验证 + 自修复
-        let mut (verify_ok, verify_out) = run_verify(&cfg.repo_dir, &verify_cmd)?;
+        let (mut verify_ok, mut verify_out) = run_verify(&cfg.repo_dir, &verify_cmd)?;
         let mut repair_count = 0;
         while !verify_ok && repair_count < MAX_REPAIRS {
             repair_count += 1;
@@ -821,7 +821,7 @@ mod tests {
 
     // 捕获提示的 mock LLM:记录收到的 user 提示,并返回一个合法(追加)edit
     struct CapturingLlm {
-        users: std::sync::Mutex<Vec<String>>,
+        users: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     }
     impl crate::llm::Llm for CapturingLlm {
         fn chat<'a>(
@@ -879,16 +879,17 @@ mod tests {
             priority: 1,
             skip: false,
         };
-        let llm: std::sync::Arc<dyn crate::llm::Llm> =
-            std::sync::Arc::new(CapturingLlm {
-                users: std::sync::Mutex::new(Vec::new()),
-            });
+        let users: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let llm: std::sync::Arc<dyn crate::llm::Llm> = std::sync::Arc::new(CapturingLlm {
+            users: std::sync::Arc::clone(&users),
+        });
         let _ = repair(&llm, &cfg, &task, "cargo test", "编译错误: borrow of moved value")
             .await
             .unwrap();
-        let users = llm.users.lock().unwrap();
-        assert!(!users.is_empty(), "repair 应调用 LLM");
-        let prompt = &users[0];
+        let captured = users.lock().unwrap();
+        assert!(!captured.is_empty(), "repair 应调用 LLM");
+        let prompt = &captured[0];
         assert!(
             prompt.contains("fn main()"),
             "repair 提示应包含改动文件当前内容"
