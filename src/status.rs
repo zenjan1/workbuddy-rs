@@ -63,11 +63,24 @@ pub fn parse_status(workspace_dir: &Path) -> anyhow::Result<StatusSummary> {
             .map(|duration| duration.as_millis())
     });
 
-    let mut completed_runs = 0;
-    let mut failed_runs = 0;
-    let mut recent_logs = Vec::new();
+    let (completed_runs, failed_runs) = if let Some(latest_path) = run_files.last() {
+        let data = fs::read_to_string(latest_path)
+            .with_context(|| format!("读取运行历史失败 {}", latest_path.display()))?;
+        let record: RunRecord = serde_json::from_str(&data)
+            .with_context(|| format!("解析运行历史失败 {}", latest_path.display()))?;
+        let completed = record.steps.iter().filter(|step| step.ok).count();
+        let failed = record.steps.iter().filter(|step| !step.ok).count();
+        (completed, failed)
+    } else {
+        (0, 0)
+    };
 
+    let mut recent_logs = Vec::new();
     for path in run_files.iter().rev() {
+        if recent_logs.len() >= 5 {
+            break;
+        }
+
         let data = fs::read_to_string(path)
             .with_context(|| format!("读取运行历史失败 {}", path.display()))?;
         let record: RunRecord = serde_json::from_str(&data)
@@ -77,28 +90,17 @@ pub fn parse_status(workspace_dir: &Path) -> anyhow::Result<StatusSummary> {
             continue;
         }
 
-        let all_ok = record.steps.iter().all(|step| step.ok);
-        let any_failed = record.steps.iter().any(|step| !step.ok);
-
-        if all_ok {
-            completed_runs += 1;
-        } else if any_failed {
-            failed_runs += 1;
-        }
-
-        if recent_logs.len() < 3 {
-            if let Some(last_step) = record.steps.last() {
-                let content = last_step
-                    .error
-                    .clone()
-                    .unwrap_or_else(|| last_step.output_preview.clone());
-                let content = truncate_chars(&content, 80);
-                let cost = record.token_usage.and_then(|tokens| {
-                    cost_per_1k_tokens.map(|price| price * (tokens as f64 / 1000.0))
-                });
-                let usage = format_usage(record.token_usage, record.char_usage, cost);
-                recent_logs.push(format!("[{}] {}: {} {}", record.id, last_step.name, content, usage));
-            }
+        if let Some(last_step) = record.steps.last() {
+            let content = last_step
+                .error
+                .clone()
+                .unwrap_or_else(|| last_step.output_preview.clone());
+            let content = truncate_chars(&content, 80);
+            let cost = record.token_usage.and_then(|tokens| {
+                cost_per_1k_tokens.map(|price| price * (tokens as f64 / 1000.0))
+            });
+            let usage = format_usage(record.token_usage, record.char_usage, cost);
+            recent_logs.push(format!("[{}] {}: {} {}", record.id, last_step.name, content, usage));
         }
     }
 
@@ -165,7 +167,7 @@ pub fn format_status(summary: &StatusSummary) -> String {
         "stopped".to_string()
     };
     let mut output = format!(
-        "Supervisor: {state}\nCompleted runs: {}\nFailed runs: {}",
+        "Supervisor: {state}\nLast run: {} completed, {} failed",
         summary.completed_runs, summary.failed_runs
     );
     if !summary.recent_logs.is_empty() {
@@ -303,16 +305,15 @@ mod tests {
         let summary = parse_status(&workspace).unwrap();
 
         assert!(summary.supervisor_running);
-        assert_eq!(summary.completed_runs, 2);
-        assert_eq!(summary.failed_runs, 1);
+        assert_eq!(summary.completed_runs, 1);
+        assert_eq!(summary.failed_runs, 0);
         assert_eq!(summary.recent_logs.len(), 3);
         assert!(summary.recent_logs.iter().any(|log| log.contains("run-ok")));
         assert!(summary.recent_logs.iter().any(|log| log.contains("run-failed")));
 
         let rendered = format_status(&summary);
         assert!(rendered.contains("Supervisor: running"));
-        assert!(rendered.contains("Completed runs: 2"));
-        assert!(rendered.contains("Failed runs: 1"));
+        assert!(rendered.contains("Last run: 1 completed, 0 failed"));
         assert!(rendered.contains("Recent logs:"));
 
         fs::remove_dir_all(&workspace).unwrap();

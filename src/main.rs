@@ -346,8 +346,9 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Status => {
+            // 注册 status 子命令
             status::run(&cfg.workspace_dir)
-                .map_err(|e| anyhow::anyhow!("查看 workspace 运行状态失败: {e}"))?;
+                .map_err(|e| anyhow::anyhow!("查看 workspace 运行状态失败: {e:#}"))?;
             Ok(())
         }
         Cmd::Serve { listen } => {
