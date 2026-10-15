@@ -114,6 +114,12 @@ impl Workspace {
         self.dir.join("meta.json")
     }
 
+    /// 返回 memory 存储文件路径，位于 workspace 根目录下。
+    /// 该路径供 util 存储层使用，不会创建目录。
+    pub fn memory_file_path(root: &Path) -> PathBuf {
+        root.join("memory.json")
+    }
+
     /// 规划阶段:落盘 goal 与 plan。
     pub fn save_plan(&self, run: &RunRecord, plan: &Plan) -> Result<()> {
         std::fs::write(

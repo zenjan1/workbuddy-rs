@@ -1,3 +1,11 @@
+use std::fs;
+use std::io::ErrorKind;
+use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+
 /// 按字符数安全截断字符串(保证返回合法 &str,不切断多字节字符)。
 pub fn clip(s: &str, max_chars: usize) -> &str {
     s.char_indices()
@@ -25,6 +33,71 @@ pub fn json_string(s: &str) -> String {
     }
     out.push('"');
     out
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryEntry {
+    pub id: u64,
+    pub content: String,
+    pub created_at: u64,
+}
+
+fn memory_now_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn load_memories(path: &Path) -> Result<Vec<MemoryEntry>> {
+    match fs::read_to_string(path) {
+        Ok(s) if s.trim().is_empty() => Ok(Vec::new()),
+        Ok(s) => serde_json::from_str(&s).context("解析 memory.json 失败"),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(e).context("读取 memory.json 失败"),
+    }
+}
+
+fn save_memories(path: &Path, memories: &[MemoryEntry]) -> Result<()> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(dir)
+        .with_context(|| format!("创建目录 {} 失败", dir.display()))?;
+    let json = serde_json::to_string_pretty(memories)
+        .context("序列化记忆失败")?;
+    fs::write(path, json)
+        .with_context(|| format!("写入 {} 失败", path.display()))?;
+    Ok(())
+}
+
+pub fn add_memory(path: &Path, content: &str) -> Result<MemoryEntry> {
+    let mut memories = load_memories(path)?;
+    let id = memories.iter().map(|m| m.id).max().unwrap_or(0) + 1;
+    let entry = MemoryEntry {
+        id,
+        content: content.to_string(),
+        created_at: memory_now_timestamp(),
+    };
+    memories.push(entry.clone());
+    save_memories(path, &memories)?;
+    Ok(entry)
+}
+
+pub fn list_memories(path: &Path) -> Result<Vec<MemoryEntry>> {
+    let mut memories = load_memories(path)?;
+    memories.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then_with(|| b.id.cmp(&a.id))
+    });
+    Ok(memories)
+}
+
+pub fn get_memory(path: &Path, id: u64) -> Result<MemoryEntry> {
+    let memories = load_memories(path)?;
+    memories
+        .into_iter()
+        .find(|m| m.id == id)
+        .with_context(|| format!("未找到 id 为 {} 的记忆", id))
 }
 
 #[cfg(test)]
@@ -66,5 +139,80 @@ mod tests {
         assert_eq!(clip("abc🚀xyz", 3), "abc");
         // 纯英文字符串超过max
         assert_eq!(clip("abcdef", 3), "abc");
+    }
+
+    fn write_test_memories(path: &std::path::Path, memories: &[MemoryEntry]) {
+        let json = serde_json::to_string_pretty(memories).unwrap();
+        std::fs::write(path, json).unwrap();
+    }
+
+    #[test]
+    fn memory_add_assigns_incrementing_id_and_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.json");
+
+        let first = add_memory(&path, "第一条记忆").unwrap();
+        assert_eq!(first.id, 1);
+        assert!(!first.content.is_empty());
+
+        let second = add_memory(&path, "第二条记忆").unwrap();
+        assert_eq!(second.id, 2);
+
+        let loaded = super::load_memories(&path).unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].id, 1);
+        assert_eq!(loaded[1].id, 2);
+    }
+
+    #[test]
+    fn memory_list_sorts_by_created_at_descending() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.json");
+        let memories = vec![
+            MemoryEntry { id: 1, content: "old".into(), created_at: 10 },
+            MemoryEntry { id: 2, content: "new".into(), created_at: 30 },
+            MemoryEntry { id: 3, content: "mid".into(), created_at: 20 },
+        ];
+        write_test_memories(&path, &memories);
+
+        let listed = list_memories(&path).unwrap();
+        let ids: Vec<u64> = listed.iter().map(|m| m.id).collect();
+        assert_eq!(ids, vec![2, 3, 1]);
+    }
+
+    #[test]
+    fn memory_get_returns_matching_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.json");
+        let entry = add_memory(&path, "需要查找的记忆").unwrap();
+
+        let fetched = get_memory(&path, entry.id).unwrap();
+        assert_eq!(fetched, entry);
+    }
+
+    #[test]
+    fn memory_get_missing_id_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.json");
+        add_memory(&path, "已存在的记忆").unwrap();
+
+        assert!(get_memory(&path, 999).is_err());
+    }
+
+    #[test]
+    fn memory_list_missing_file_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("does-not-exist.json");
+
+        assert!(list_memories(&path).unwrap().is_empty());
+    }
+
+    #[test]
+    fn memory_corrupt_json_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.json");
+        std::fs::write(&path, "not valid json").unwrap();
+
+        assert!(list_memories(&path).is_err());
     }
 }

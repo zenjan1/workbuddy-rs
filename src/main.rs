@@ -86,19 +86,17 @@ enum ConfigAction {
 
 #[derive(Subcommand)]
 enum MemoryAction {
-    /// 添加一条记忆（键值对）
+    /// 添加一条记忆（文本）
     Add {
-        /// 记忆键
-        key: String,
-        /// 记忆值
-        value: String,
+        /// 记忆文本
+        text: String,
     },
-    /// 列出所有记忆
+    /// 列出所有记忆摘要（按时间倒序）
     List,
-    /// 按键获取记忆
+    /// 按 id 获取完整记忆
     Get {
-        /// 记忆键
-        key: String,
+        /// 记忆 id
+        id: u64,
     },
 }
 
@@ -303,19 +301,34 @@ async fn main() -> Result<()> {
         }
         Cmd::Selfcheck => cmd_selfcheck(),
         Cmd::Memory { action } => {
-            let memory_dir = cfg.repo_dir.join(".workbuddy");
-            let store = memory::MemoryStore::open(&memory_dir)
-                .map_err(|e| anyhow::anyhow!("打开记忆存储失败: {e}"))?;
-            let args = match action {
-                MemoryAction::Add { key, value } => vec!["add".to_string(), key, value],
-                MemoryAction::List => vec!["list".to_string()],
-                MemoryAction::Get { key } => vec!["get".to_string(), key],
-            };
-            let command = memory::MemoryCommand::parse(&args)
-                .map_err(|e| anyhow::anyhow!("解析记忆命令失败: {e}"))?;
-            let output = memory::run_memory_command(&store, command)
-                .map_err(|e| anyhow::anyhow!("记忆命令执行失败: {e}"))?;
-            println!("{output}");
+            let memory_path = cfg.workspace_dir.join("memory.json");
+            if let Some(parent) = memory_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| anyhow::anyhow!("创建记忆存储目录失败: {e}"))?;
+            }
+            match action {
+                MemoryAction::Add { text } => {
+                    let id = util::add_memory(&memory_path, &text)
+                        .map_err(|e| anyhow::anyhow!("添加记忆失败: {e}"))?;
+                    println!("已添加记忆，id: {}", id.id);
+                }
+                MemoryAction::List => {
+                    let output = util::list_memories(&memory_path)
+                        .map_err(|e| anyhow::anyhow!("列出记忆失败: {e}"))?;
+                    if output.is_empty() {
+                        println!("(暂无记忆)");
+                    } else {
+                        for m in &output {
+                            println!("id: {} | 内容: {} | 创建时间: {}", m.id, m.content, m.created_at);
+                        }
+                    }
+                }
+                MemoryAction::Get { id } => {
+                    let output = util::get_memory(&memory_path, id)
+                        .map_err(|e| anyhow::anyhow!("获取记忆失败: {e}"))?;
+                    println!("id: {}\n内容: {}\n创建时间: {}", output.id, output.content, output.created_at);
+                }
+            }
             Ok(())
         }
         Cmd::Status => status::run(&cfg.workspace_dir)
