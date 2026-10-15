@@ -7,6 +7,45 @@ mod llm;
 mod memory;
 mod plan;
 mod planner;
+mod review {
+    use super::*;
+    use anyhow::anyhow;
+    use std::process::Command;
+
+    pub async fn review(cfg: Config) -> Result<()> {
+        let output = Command::new("git")
+            .args(["diff", "--cached"])
+            .output()
+            .map_err(|e| anyhow!("git diff --cached 失败: {e}"))?;
+        let cached_diff = String::from_utf8_lossy(&output.stdout).to_string();
+        let diff = if cached_diff.trim().is_empty() {
+            let output = Command::new("git")
+                .args(["diff"])
+                .output()
+                .map_err(|e| anyhow!("git diff 失败: {e}"))?;
+            String::from_utf8_lossy(&output.stdout).to_string()
+        } else {
+            cached_diff
+        };
+        if diff.trim().is_empty() {
+            println!("没有需要评审的 diff");
+            return Ok(());
+        }
+
+        let llm: Arc<dyn Llm> = if cfg.mock {
+            Arc::new(MockLlm)
+        } else {
+            Arc::new(OpenAiCompat::new(&cfg)?)
+        };
+        let system = "你是一位资深代码评审专家(reviewer)。";
+        let prompt = format!(
+            "请对以下 git diff 进行提交前的自评审,指出潜在问题:\n\n{diff}"
+        );
+        let output = llm.chat(system, &prompt).await?;
+        println!("{output}");
+        Ok(())
+    }
+}
 mod util;
 mod workspace;
 
@@ -56,6 +95,8 @@ enum Cmd {
     Show { id: String },
     /// 列出内置专家与 skills
     Agents,
+    /// 提交前自评审(只读)
+    Review,
     /// 打印当前生效配置(隐藏 key)
     Config,
     /// 校验配置(读取 config.toml 或默认配置)
@@ -128,6 +169,7 @@ async fn main() -> Result<()> {
         Cmd::List { since } => cmd_list(cfg, since.as_deref()),
         Cmd::Show { id } => cmd_show(cfg, &id),
         Cmd::Agents => cmd_agents(),
+        Cmd::Review => review::review(cfg).await,
         Cmd::Config => {
             println!("{}", cfg.summary());
             Ok(())
