@@ -809,4 +809,3 @@ mod tests {
         assert_eq!(mock_health_ok(), "ok");
     }
 }
-

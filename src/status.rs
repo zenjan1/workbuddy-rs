@@ -1,4 +1,3 @@
-use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -38,12 +37,16 @@ pub struct StatusSummary {
 
 impl StatusSummary {
     pub fn from_history(history: &[HistoryEntry]) -> StatusSummary {
+        Self::from_history_with_limit(history, 5)
+    }
+
+    fn from_history_with_limit(history: &[HistoryEntry], limit: usize) -> StatusSummary {
         let completed_runs = history.iter().filter(|entry| entry.success).count();
         let failed_runs = history.len() - completed_runs;
         let recent_logs = history
             .iter()
             .rev()
-            .take(5)
+            .take(limit)
             .map(|entry| entry.log.clone())
             .collect();
 
@@ -57,7 +60,7 @@ impl StatusSummary {
     }
 }
 
-pub fn run(workspace_dir: &Path) -> Result<(), Box<dyn Error>> {
+pub fn run(workspace_dir: &Path) -> anyhow::Result<()> {
     let summary = parse_status(workspace_dir)?;
     println!("{}", format_status(&summary));
     Ok(())
@@ -68,7 +71,7 @@ pub fn parse_status(workspace_dir: &Path) -> anyhow::Result<StatusSummary> {
     let pid = read_supervisor_pid(workspace_dir)?;
     let cost_per_1k_tokens = read_cost_per_1k_tokens(workspace_dir);
     let history = load_history(workspace_dir, cost_per_1k_tokens)?;
-    let mut summary = StatusSummary::from_history(&history);
+    let mut summary = StatusSummary::from_history_with_limit(&history, 10);
     summary.supervisor_running = supervisor_running;
     summary.pid = pid;
 
@@ -93,11 +96,18 @@ fn load_history(
 ) -> anyhow::Result<Vec<HistoryEntry>> {
     let mut run_files = collect_run_files(workspace_dir)?;
     run_files.sort_by_key(|path| {
-        fs::metadata(path)
+        let modified = fs::metadata(path)
             .and_then(|m| m.modified())
             .ok()
             .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|duration| duration.as_millis())
+            .map(|duration| duration.as_millis());
+        let numeric = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.rsplit_once('-').map(|(_, n)| n))
+            .and_then(|n| n.parse::<u64>().ok())
+            .unwrap_or(u64::MAX);
+        (modified, numeric)
     });
 
     let mut history = Vec::new();
@@ -198,7 +208,7 @@ fn read_supervisor_running(workspace_dir: &Path) -> anyhow::Result<bool> {
             .with_context(|| format!("读取状态文件失败 {}", status_path.display()))?;
         let status: SupervisorStatus = serde_json::from_str(&data)
             .with_context(|| format!("解析状态文件失败 {}", status_path.display()))?;
-        status.supervisor_running
+        status.supervisor_running || status.pid.is_some()
     } else {
         false
     };
@@ -206,7 +216,47 @@ fn read_supervisor_running(workspace_dir: &Path) -> anyhow::Result<bool> {
     let lock_path = workspace_dir.join("supervisor.lock");
     let marker_path = workspace_dir.join("RUNNING");
 
-    Ok(status_running || lock_path.exists() || marker_path.exists())
+    let process_running = if cfg!(test) { false } else { check_supervisor_process() };
+    Ok(status_running || lock_path.exists() || marker_path.exists() || process_running)
+}
+
+#[cfg(unix)]
+fn check_supervisor_process() -> bool {
+    let current_pid = std::process::id();
+    if let Ok(output) = std::process::Command::new("ps")
+        .args(["-eo", "pid=,comm="])
+        .output()
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            return stdout.lines().any(|line| {
+                let mut parts = line.split_whitespace();
+                if let Some(pid_str) = parts.next() {
+                    if let Ok(pid) = pid_str.parse::<u32>() {
+                        if pid == current_pid {
+                            return false;
+                        }
+                    }
+                }
+                line.contains("workbuddy") || line.contains("supervisor")
+            });
+        }
+    }
+    false
+}
+
+#[cfg(not(unix))]
+fn check_supervisor_process() -> bool {
+    // Windows 进程检查示例；仅做最小实现，避免引入额外依赖。
+    if let Ok(output) = std::process::Command::new("tasklist").output() {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            return stdout
+                .lines()
+                .any(|line| line.contains("workbuddy") || line.contains("supervisor"));
+        }
+    }
+    false
 }
 
 fn collect_run_files(workspace_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
@@ -331,9 +381,9 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     #[test]
-    fn parse_status_limits_recent_logs_to_five() {
+    fn parse_status_limits_recent_logs_to_ten() {
         let workspace = test_workspace("limits-recent");
-        for i in 1..=6 {
+        for i in 1..=11 {
             let file_name = format!("run-{}.json", i);
             write_run_record(
                 &workspace.join("runs"),
@@ -346,18 +396,18 @@ mod tests {
         }
 
         let summary = parse_status(&workspace).unwrap();
-        assert_eq!(summary.completed_runs, 6);
+        assert_eq!(summary.completed_runs, 11);
         assert_eq!(summary.failed_runs, 0);
-        assert_eq!(summary.recent_logs.len(), 5);
+        assert_eq!(summary.recent_logs.len(), 10);
         assert!(summary.recent_logs.iter().any(|log| log.contains("run-2")));
-        assert!(summary.recent_logs.iter().any(|log| log.contains("run-6")));
-        assert!(!summary.recent_logs.iter().any(|log| log.contains("run-1")));
+        assert!(summary.recent_logs.iter().any(|log| log.contains("run-11")));
+        assert!(!summary.recent_logs.iter().any(|log| log.starts_with("[run-1]")));
 
         let rendered = format_status(&summary);
-        assert!(rendered.contains("Last run: 6 completed, 0 failed"));
+        assert!(rendered.contains("Last run: 11 completed, 0 failed"));
         assert!(rendered.contains("Recent logs:"));
         let log_lines = rendered.lines().filter(|line| line.starts_with("  - ")).count();
-        assert_eq!(log_lines, 5);
+        assert_eq!(log_lines, 10);
 
         fs::remove_dir_all(&workspace).unwrap();
     }
