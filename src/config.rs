@@ -333,6 +333,16 @@ impl Config {
         }
         v
     }
+
+    /// Create an updated in-memory config by validating and applying a single field update.
+    /// This does not mutate or persist the current config. The key is validated against the
+    /// allowed whitelist and its value is type-checked before any change is applied.
+    pub fn updated(&self, key: &str, value: &str) -> Result<Config> {
+        let canonical_key = normalize_config_key(key)?;
+        let mut updated = self.clone();
+        updated.apply_value(canonical_key, value)?;
+        Ok(updated)
+    }
 }
 
 /// 使用 toml_edit 更新配置文件，保留注释和未知键。
@@ -1437,4 +1447,63 @@ pub fn set_config_value(
         .map_err(|e| ConfigSetError::Parse(e.to_string()))?;
     std::fs::read_to_string(path)
         .map_err(|e| ConfigSetError::Parse(format!("读取配置文件失败: {}", e)))
+}
+
+
+#[cfg(test)]
+mod config_update_tests {
+    use super::*;
+
+    fn test_config() -> Config {
+        Config {
+            api_key: None,
+            base_url: "https://example.com".into(),
+            model: "qwen-plus".into(),
+            max_parallel: 4,
+            workspace_dir: PathBuf::from("/tmp/workbuddy"),
+            repo_dir: PathBuf::from("."),
+            request_timeout_secs: 300,
+            price: 0.0,
+            max_budget: 10.0,
+            cost_per_1k_tokens: 0.02,
+            mock: false,
+            webhook_enabled: false,
+            webhook_url: None,
+            webhook_retry: 3,
+            webhook_timeout_secs: 5,
+        }
+    }
+
+    #[test]
+    fn valid_update_succeeds() {
+        let original = test_config();
+        let updated = original.updated("model", "gpt-4").unwrap();
+        assert_eq!(original.model, "qwen-plus");
+        assert_eq!(updated.model, "gpt-4");
+        assert_eq!(updated.max_budget, 10.0);
+    }
+
+    #[test]
+    fn invalid_key_errors() {
+        let original = test_config();
+        let err = original.updated("unknown_key", "value").unwrap_err();
+        assert!(err.to_string().contains("未知配置键"));
+    }
+
+    #[test]
+    fn wrong_type_errors() {
+        let original = test_config();
+        let err = original.updated("max_budget", "not-a-number").unwrap_err();
+        assert!(err.to_string().contains("需要是数字"));
+        assert_eq!(original.max_budget, 10.0);
+    }
+
+    #[test]
+    fn invalid_input_does_not_mutate_original() {
+        let original = test_config();
+        let snapshot = original.clone();
+        let _ = original.updated("max_parallel", "zero");
+        assert_eq!(original.max_parallel, snapshot.max_parallel);
+        assert_eq!(original.model, snapshot.model);
+    }
 }
