@@ -187,6 +187,7 @@ fn collect_run_files(workspace_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
                 files.push(path);
             }
         }
+        files.sort();
         return Ok(files);
     }
 
@@ -207,6 +208,7 @@ fn collect_run_files(workspace_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
             files.push(path);
         }
     }
+    files.sort();
     Ok(files)
 }
 
@@ -291,6 +293,38 @@ mod tests {
     use crate::workspace::{RunRecord, StepRecord};
     use std::fs;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn parse_status_limits_recent_logs_to_five() {
+        let workspace = test_workspace("limits-recent");
+        for i in 1..=6 {
+            let file_name = format!("run-{}.json", i);
+            write_run_record(
+                &workspace.join("runs"),
+                &file_name,
+                &run_record(
+                    &format!("run-{}", i),
+                    vec![step(1, "plan", true, None, &format!("preview {}", i))],
+                ),
+            );
+        }
+
+        let summary = parse_status(&workspace).unwrap();
+        assert_eq!(summary.completed_runs, 6);
+        assert_eq!(summary.failed_runs, 0);
+        assert_eq!(summary.recent_logs.len(), 5);
+        assert!(summary.recent_logs.iter().any(|log| log.contains("run-2")));
+        assert!(summary.recent_logs.iter().any(|log| log.contains("run-6")));
+        assert!(!summary.recent_logs.iter().any(|log| log.contains("run-1")));
+
+        let rendered = format_status(&summary);
+        assert!(rendered.contains("Last run: 6 completed, 0 failed"));
+        assert!(rendered.contains("Recent logs:"));
+        let log_lines = rendered.lines().filter(|line| line.starts_with("  - ")).count();
+        assert_eq!(log_lines, 5);
+
+        fs::remove_dir_all(&workspace).unwrap();
+    }
 
     fn test_workspace(name: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
