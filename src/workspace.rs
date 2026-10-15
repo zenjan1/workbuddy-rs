@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::plan::Plan;
+use crate::utils::{parse_task_id, slugify, unique_slug};
 
 /// 任务工作区:每次 run 在 workspace_dir 下生成独立目录,
 /// 持久化计划、各步骤产出与执行结果,供 list/show 查询。
@@ -40,8 +41,18 @@ pub struct RunRecord {
 
 impl Workspace {
     /// 创建新的任务工作区目录(含 outputs 子目录)。
-    pub fn create_new(root: &Path) -> Result<Self> {
-        let id = new_run_id();
+    /// 任务 id 基于标题 slug 生成,并通过 unique_slug 保证同根目录下唯一。
+    pub fn create_new(root: &Path, title: &str) -> Result<Self> {
+        let base = slugify(title);
+        let existing: Vec<String> = std::fs::read_dir(root)
+            .map(|entries| {
+                entries
+                    .filter_map(|e| e.ok())
+                    .filter_map(|e| e.file_name().into_string().ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let id = unique_slug(&base, &existing);
         let dir = root.join(&id);
         std::fs::create_dir_all(dir.join("outputs"))
             .with_context(|| format!("创建工作区失败: {}", dir.display()))?;
@@ -49,8 +60,10 @@ impl Workspace {
     }
 
     /// 打开已存在的任务工作区。
+    /// 支持 slug 与旧数字 id:通过 utils::parse_task_id 解析实际目录名。
     pub fn open(root: &Path, id: &str) -> Result<Self> {
-        let dir = root.join(id);
+        let actual_id = parse_task_id(id);
+        let dir = root.join(actual_id);
         if !dir.is_dir() {
             anyhow::bail!("找不到任务 {}: {}", id, dir.display());
         }
@@ -374,11 +387,12 @@ mod tests {
             webhook_retry: 0,
             webhook_timeout_secs: 1,
         };
-        let ws = Workspace::create_new(&cfg.workspace_dir).unwrap();
+        let ws = Workspace::create_new(&cfg.workspace_dir, "测试 任务").unwrap();
+        let task_id = ws.dir.file_name().unwrap().to_string_lossy().to_string();
         let mut run = RunRecord {
             token_usage: None,
             char_usage: None,
-            id: ws.dir.file_name().unwrap().to_string_lossy().to_string(),
+            id: task_id,
             goal: "测试".into(),
             created: "now".into(),
             model: "mock".into(),

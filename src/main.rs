@@ -114,6 +114,7 @@ mod review {
     }
 }
 mod util;
+mod utils;
 mod workspace;
 
 use std::sync::Arc;
@@ -169,8 +170,11 @@ enum Cmd {
         #[arg(long)]
         since: Option<String>,
     },
-    /// 查看某次任务的计划与报告
-    Show { id: String },
+    /// 查看某次任务的计划与报告(slug 或数字 id)
+    Show {
+        /// 任务 slug 或数字 id
+        id: String,
+    },
     /// 列出内置专家与 skills
     Agents,
     /// 提交前自评审(只读)
@@ -423,7 +427,7 @@ async fn run_task(cfg: Config, goal: &str) -> Result<()> {
     println!("\n[计划] 目标: {}\n{}", plan.goal, plan.summary());
 
     // 工作区
-    let ws = Workspace::create_new(&cfg.workspace_dir)?;
+    let ws = Workspace::create_new(&cfg.workspace_dir, goal)?;
     let mut run = RunRecord {
         token_usage: None,
         char_usage: None,
@@ -525,7 +529,8 @@ fn cmd_list(cfg: Config, since: Option<&str>) -> Result<()> {
 }
 
 fn cmd_show(cfg: Config, id: &str) -> Result<()> {
-    let ws = Workspace::open(&cfg.workspace_dir, id)?;
+    let resolved_id = utils::parse_task_id(id);
+    let ws = Workspace::open(&cfg.workspace_dir, &resolved_id)?;
     let rec = ws.load_record()?;
     println!("# 任务 {}\n\n目标: {}\n模型: {}\n时间: {}\n\n## 步骤\n", rec.id, rec.goal, rec.model, rec.created);
     for s in &rec.steps {

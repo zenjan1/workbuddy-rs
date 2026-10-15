@@ -568,7 +568,7 @@ pub async fn run_dev_loop(
         };
 
         // 执行
-        let ws = crate::workspace::Workspace::create_new(&cfg.workspace_dir)?;
+        let ws = crate::workspace::Workspace::create_new(&cfg.workspace_dir, &task.title)?;
         let ws = Arc::new(ws);
         let mut run = crate::workspace::RunRecord {
             token_usage: None,
