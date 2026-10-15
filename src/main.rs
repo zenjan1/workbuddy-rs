@@ -7,6 +7,7 @@ mod llm;
 mod memory;
 mod plan;
 mod planner;
+mod status;
 mod review {
     use super::*;
     use anyhow::anyhow;
@@ -266,7 +267,8 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Status => {
-            println!("{}", Workspace::status_summary(&cfg.workspace_dir));
+            status::run(&cfg.workspace_dir)
+                .map_err(|e| anyhow::anyhow!("查看 workspace 运行状态失败: {e}"))?;
             Ok(())
         }
         Cmd::Undo => match run_undo(None) {
