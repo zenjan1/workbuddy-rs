@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
-use std::io::{ErrorKind, Write};
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -19,7 +19,7 @@ impl fmt::Display for MemoryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             MemoryError::Io(err) => write!(f, "memory io error: {err}"),
-            MemoryError::NotFound(key) => write!(f, "memory key not found: {key}"),
+            MemoryError::NotFound(key) => write!(f, "memory key not found: {}", redact_if_sensitive(key)),
             MemoryError::Locked => write!(f, "memory is locked by another writer"),
             MemoryError::Invalid(msg) => write!(f, "invalid memory entry: {msg}"),
             MemoryError::Parse(msg) => write!(f, "failed to parse memory file: {msg}"),
@@ -92,7 +92,7 @@ impl MemoryStore {
 
         let content = fs::read_to_string(&self.path).map_err(MemoryError::Io)?;
         let parsed: serde_json::Value =
-            serde_json::from_str(&content).map_err(|err| MemoryError::Parse(err.to_string()))?;
+            serde_json::from_str(&content).map_err(|_| MemoryError::Parse("memory file contains invalid JSON".to_string()))?;
         let object = parsed
             .as_object()
             .ok_or_else(|| MemoryError::Parse("memory file must contain a JSON object".to_string()))?;
@@ -101,9 +101,9 @@ impl MemoryStore {
         for (key, value) in object {
             let value = value
                 .as_str()
-                .ok_or_else(|| MemoryError::Parse(format!("value for key '{key}' is not a string")))?;
+                .ok_or_else(|| MemoryError::Parse("memory file contains a non-string value".to_owned()))?;
             validate_key_value(key, value).map_err(|_| {
-                MemoryError::Parse(format!("key '{key}' or its value failed validation"))
+                MemoryError::Parse("memory file contains an invalid entry".to_owned())
             })?;
             entries.insert(key.clone(), value.to_owned());
         }
@@ -183,6 +183,36 @@ fn newline() -> char {
     char::from_u32(NEWLINE_BYTE as u32).unwrap()
 }
 
+const SENSITIVE_WORDS: &[&str] = &[
+    "password",
+    "token",
+    "secret",
+    "api_key",
+    "credential",
+    "private_key",
+    "passwd",
+    "apikey",
+    "auth_token",
+    "access_key",
+];
+
+fn is_sensitive(value: &str) -> bool {
+    let lower = value.to_lowercase();
+    SENSITIVE_WORDS.iter().any(|&word| lower.contains(word))
+}
+
+fn redact_if_sensitive(value: &str) -> String {
+    if is_sensitive(value) {
+        "[redacted]".to_owned()
+    } else {
+        value.to_owned()
+    }
+}
+
+pub fn memory_file_path(workspace_dir: &Path) -> PathBuf {
+    workspace_dir.join("memory.json")
+}
+
 fn validate_key_value(key: &str, value: &str) -> Result<(), MemoryError> {
     if key.is_empty() || value.is_empty() {
         return Err(MemoryError::Invalid(
@@ -193,6 +223,12 @@ fn validate_key_value(key: &str, value: &str) -> Result<(), MemoryError> {
     if contains_tab_or_newline(key) || contains_tab_or_newline(value) {
         return Err(MemoryError::Invalid(
             "key and value must not contain newline or tab".to_owned(),
+        ));
+    }
+
+    if is_sensitive(key) || is_sensitive(value) {
+        return Err(MemoryError::Invalid(
+            "refusing to store sensitive information".to_owned(),
         ));
     }
 
@@ -369,6 +405,52 @@ mod tests {
         let obj = parsed.as_object().unwrap();
         assert_eq!(obj.len(), 11);
         assert!(obj.contains_key("shared"));
+
+        cleanup(&file);
+    }
+
+    #[test]
+    fn missing_file_list_is_empty() {
+        let file = temp_file();
+        let store = MemoryStore::new(&file);
+
+        assert_eq!(store.list().unwrap(), Vec::<(String, String)>::new());
+
+        cleanup(&file);
+    }
+
+    #[test]
+    fn rejects_sensitive_keys_and_values() {
+        let file = temp_file();
+        let store = MemoryStore::new(&file);
+
+        for key in ["password", "api_key", "private_key"] {
+            let err = store.add(key, "value").unwrap_err();
+            assert!(matches!(err, MemoryError::Invalid(_)));
+        }
+
+        for value in ["secret", "token", "credential"] {
+            let err = store.add("safe_key", value).unwrap_err();
+            assert!(matches!(err, MemoryError::Invalid(_)));
+        }
+
+        let err = store.add("normal_key", "my password").unwrap_err();
+        let msg = err.to_string();
+        assert!(!msg.to_lowercase().contains("password"));
+        assert!(store.list().unwrap().is_empty());
+
+        cleanup(&file);
+    }
+
+    #[test]
+    fn corrupted_json_returns_parse_error() {
+        let file = temp_file();
+        let store = MemoryStore::new(&file);
+
+        fs::write(&file, "{ not json").unwrap();
+        let result = store.list();
+
+        assert!(matches!(result, Err(MemoryError::Parse(_))));
 
         cleanup(&file);
     }
