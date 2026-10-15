@@ -221,6 +221,8 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// 推进路线图:扫描 VISION.md 已完成条目,更新未完成项并追加日志
+    RoadmapAdvance,
 }
 
 #[tokio::main]
@@ -365,6 +367,11 @@ async fn main() -> Result<()> {
                 eprintln!("拒绝撤销：{reason}");
                 Ok(())
             }
+        },
+        Cmd::RoadmapAdvance => {
+            workspace::advance_roadmap(&cfg.repo_dir)
+                .map_err(|e| anyhow::anyhow!("推进路线图失败: {e:#}"))?;
+            Ok(())
         },
     }
 }

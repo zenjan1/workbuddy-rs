@@ -186,6 +186,138 @@ impl Workspace {
     }
 }
 
+/// 纯函数:根据已完成条目推进路线图。返回更新后的文本;无任何改动时返回 None。
+fn advance_roadmap_text(input: &str, today: &str) -> Option<String> {
+    #[derive(Debug, Clone)]
+    struct Item {
+        raw: String,
+        key: String,
+    }
+
+    fn normalize(s: &str) -> String {
+        s.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    fn parse_item(line: &str, checked: bool) -> Option<Item> {
+        let prefix = if checked { "- [x]" } else { "- [ ]" };
+        let trimmed = line.trim_start();
+        let rest = trimmed.strip_prefix(prefix)?;
+        if !rest.is_empty() && !rest.starts_with(' ') && !rest.starts_with('\t') {
+            return None;
+        }
+        let raw = rest.trim().to_string();
+        if raw.is_empty() {
+            return None;
+        }
+        Some(Item {
+            key: normalize(&raw),
+            raw,
+        })
+    }
+
+    fn log_exists(text: &str, today: &str, item: &str) -> bool {
+        let needle = format!("完成:{}", item);
+        text.lines().any(|line| {
+            let line = line.trim();
+            line.starts_with(today) && line.contains(&needle)
+        })
+    }
+
+    let mut completed: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for line in input.split('\n') {
+        if let Some(item) = parse_item(line, true) {
+            completed.insert(item.key, item.raw);
+        }
+    }
+    if completed.is_empty() {
+        return None;
+    }
+
+    let mut updated_any = false;
+    let mut logs_to_append: Vec<String> = Vec::new();
+    let mut output_lines: Vec<String> = Vec::new();
+
+    for line in input.split('\n') {
+        let mut new_line = line.to_string();
+        if let Some(item) = parse_item(line, false) {
+            if let Some(matched_raw) = completed.get(&item.key) {
+                new_line = line.replacen("[ ]", "[x]", 1);
+                updated_any = true;
+                if !log_exists(input, today, matched_raw) {
+                    let log_line = format!("{} 完成:{}", today, matched_raw);
+                    if !logs_to_append.contains(&log_line) {
+                        logs_to_append.push(log_line);
+                    }
+                }
+            }
+        }
+        output_lines.push(new_line);
+    }
+
+    if !updated_any {
+        return None;
+    }
+
+    let ends_with_newline = input.ends_with('\n');
+    let mut output = output_lines.join("\n");
+    if ends_with_newline {
+        output.push('\n');
+    }
+
+    for log_line in logs_to_append {
+        if !output.is_empty() && !output.ends_with('\n') {
+            output.push('\n');
+        }
+        output.push_str(&log_line);
+        output.push('\n');
+    }
+
+    Some(output)
+}
+
+/// 读取 VISION.md,推进路线图。返回是否修改了文件。
+pub fn advance_roadmap(path: &Path) -> Result<bool> {
+    let original = std::fs::read_to_string(path)
+        .with_context(|| format!("读取 VISION.md 失败: {}", path.display()))?;
+    let today = today_string();
+    let Some(updated) = advance_roadmap_text(&original, &today) else {
+        return Ok(false);
+    };
+    if updated != original {
+        std::fs::write(path, &updated)
+            .with_context(|| format!("写入 VISION.md 失败: {}", path.display()))?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+/// 当前日期字符串。标准库无本地时区,这里使用 UTC 日期;
+/// 如需严格本地日期,可替换为 chrono::Local::now().format("%Y-%m-%d")。
+fn today_string() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let days = secs / 86_400;
+    let (y, m, d) = civil_from_days(days as i64);
+    format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
+/// 将 UNIX 天数转换为公历日期(Howard Hinnant 的 civil_from_days 算法)。
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m as u32, d as u32)
+}
+
 static RUN_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// 生成 run id:unix 秒十六进制-进程内序号哈希(同秒内保证不重复)。
@@ -328,5 +460,68 @@ mod tests {
         assert!(out.contains("failed: 0"));
         assert!(out.contains("initializing"));
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn advance_roadmap_updates_matching_item_and_appends_log() {
+        let input = "\
+# VISION
+
+## 路线图
+- [x] 完成任务 A
+- [ ] 完成任务 A
+- [ ] 其他任务
+
+【日志】
+2025-01-01 完成:旧任务
+";
+        let updated = advance_roadmap_text(input, "2025-04-08").unwrap();
+        assert!(updated.contains("- [x] 完成任务 A"));
+        assert!(updated.contains("- [ ] 其他任务"));
+        assert!(updated.contains("2025-04-08 完成:完成任务 A"));
+        assert!(updated.contains("2025-01-01 完成:旧任务"));
+        assert_eq!(updated.matches("- [x] 完成任务 A").count(), 2);
+        assert_eq!(updated.matches("- [ ] 完成任务 A").count(), 0);
+    }
+
+    #[test]
+    fn advance_roadmap_skips_duplicate_log_line() {
+        let input = "\
+- [x] 完成任务 A
+- [ ] 完成任务 A
+
+【日志】
+2025-04-08 完成:完成任务 A
+";
+        let updated = advance_roadmap_text(input, "2025-04-08").unwrap();
+        assert!(updated.contains("- [x] 完成任务 A"));
+        assert_eq!(updated.matches("2025-04-08 完成:完成任务 A").count(), 1);
+    }
+
+    #[test]
+    fn advance_roadmap_preserves_unmatched_content() {
+        let input = "\
+# 标题
+
+一些介绍文字。
+- [x] 完成任务 A
+- [ ] 完成任务 A
+- [ ] 未匹配文本
+
+【日志】
+2025-01-01 完成:历史
+";
+        let updated = advance_roadmap_text(input, "2025-04-08").unwrap();
+        assert!(updated.contains("# 标题"));
+        assert!(updated.contains("一些介绍文字。"));
+        assert!(updated.contains("- [ ] 未匹配文本"));
+        assert!(updated.contains("2025-01-01 完成:历史"));
+        assert!(!updated.contains("完成:未匹配文本"));
+    }
+
+    #[test]
+    fn advance_roadmap_returns_none_without_changes() {
+        let input = "# VISION\n\n- [ ] 任务 A\n- [ ] 任务 B\n";
+        assert!(advance_roadmap_text(input, "2025-04-08").is_none());
     }
 }
