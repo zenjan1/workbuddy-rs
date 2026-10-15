@@ -796,6 +796,9 @@ mod tests {
             repo_dir: dir.clone(),
             request_timeout_secs: 5,
             mock: true,
+            webhook_url: None,
+            webhook_retry: 0,
+            webhook_timeout_secs: 1,
         };
         let llm: std::sync::Arc<dyn Llm> = std::sync::Arc::new(crate::llm::MockLlm);
         let report = run_dev_loop(
@@ -876,6 +879,9 @@ mod tests {
             repo_dir: dir.clone(),
             request_timeout_secs: 5,
             mock: true,
+            webhook_url: None,
+            webhook_retry: 0,
+            webhook_timeout_secs: 1,
         };
         let task = DevTask {
             title: "test task".into(),

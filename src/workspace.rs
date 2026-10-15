@@ -233,6 +233,9 @@ mod tests {
             repo_dir: tmp.clone(),
             request_timeout_secs: 1,
             mock: true,
+            webhook_url: None,
+            webhook_retry: 0,
+            webhook_timeout_secs: 1,
         };
         let ws = Workspace::create_new(&cfg.workspace_dir).unwrap();
         let mut run = RunRecord {

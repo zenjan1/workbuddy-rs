@@ -53,6 +53,30 @@ impl Executor {
         self
     }
 
+    fn notify_webhook_result(&self, plan: &Plan, result: &Result<(Vec<StepResult>, String)>) {
+        if self.cfg.webhook_url.is_none() {
+            return;
+        }
+        let (event, summary) = match result {
+            Ok((results, summary)) => {
+                if results.iter().any(|r| !r.ok) {
+                    ("failed", summary.clone())
+                } else {
+                    ("completed", summary.clone())
+                }
+            }
+            Err(e) => ("failed", format!("执行失败: {:#}", e)),
+        };
+        let cfg = self.cfg.clone();
+        let goal = plan.goal.clone();
+        let webhook_url = self.cfg.webhook_url.clone().unwrap();
+        std::thread::spawn(move || {
+            if let Err(err) = send_webhook(&cfg, &webhook_url, event, &goal, &summary) {
+                eprintln!("[执行] webhook 通知失败: {}", err);
+            }
+        });
+    }
+
     fn save_output(&self, id: usize, text: &str) {
         if let Some(ws) = &self.ws {
             if let Err(e) = ws.save_step_output(id, text) {
@@ -64,6 +88,12 @@ impl Executor {
     /// 拓扑并行执行计划:无依赖的步骤并发(受 max_parallel 限制),
     /// 失败时其全部下游标记为 skipped。返回 (按 id 排序的结果, 执行摘要)。
     pub async fn execute(&self, plan: &Plan) -> Result<(Vec<StepResult>, String)> {
+        let result = self.execute_inner(plan).await;
+        self.notify_webhook_result(plan, &result);
+        result
+    }
+
+    async fn execute_inner(&self, plan: &Plan) -> Result<(Vec<StepResult>, String)> {
         plan.topo_order()?;
         let mut pending: Vec<&Step> = plan.steps.iter().collect();
         let mut outputs: HashMap<usize, String> = HashMap::new();
@@ -241,6 +271,118 @@ impl Executor {
             },
         }
     }
+}
+
+fn parse_http_url(url: &str) -> Result<(String, u16, String), String> {
+    let rest = url
+        .strip_prefix("http://")
+        .ok_or("webhook_url 仅支持 http://")?;
+    let (authority, path) = match rest.find('/') {
+        Some(idx) => (&rest[..idx], &rest[idx..]),
+        None => (rest, "/"),
+    };
+    let (host, port) = match authority.rfind(':') {
+        Some(idx) => {
+            let host = &authority[..idx];
+            let port = authority[idx + 1..]
+                .parse::<u16>()
+                .map_err(|_| "webhook_url 端口无效")?;
+            (host.to_string(), port)
+        }
+        None => (authority.to_string(), 80),
+    };
+    Ok((host, port, path.to_string()))
+}
+
+fn send_webhook_once(
+    cfg: &Config,
+    url: &str,
+    event: &str,
+    goal: &str,
+    summary: &str,
+) -> Result<(), String> {
+    let (host, port, path) = parse_http_url(url)?;
+    let timeout = Duration::from_secs(cfg.webhook_timeout_secs.max(1));
+    let addrs = std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), port))
+        .map_err(|e| format!("webhook DNS 解析失败: {e}"))?
+        .collect::<Vec<_>>();
+    let first = addrs.first().ok_or("webhook 地址解析为空")?;
+    let mut stream = std::net::TcpStream::connect_timeout(first, timeout)
+        .map_err(|e| format!("webhook 连接失败: {e}"))?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(|e| format!("webhook 设置读超时失败: {e}"))?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(|e| format!("webhook 设置写超时失败: {e}"))?;
+
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let payload = serde_json::json!({
+        "event": event,
+        "task": goal,
+        "summary": summary,
+        "timestamp": timestamp,
+    });
+    let body = serde_json::to_vec(&payload)
+        .map_err(|e| format!("webhook JSON 序列化失败: {e}"))?;
+    let path = if path.is_empty() { "/" } else { &path };
+    let req = format!(
+        "POST {} HTTP/1.1\r\nHost: {}:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        path, host, port, body.len()
+    );
+    std::io::Write::write_all(&mut stream, req.as_bytes())
+        .map_err(|e| format!("webhook 写请求失败: {e}"))?;
+    std::io::Write::write_all(&mut stream, &body)
+        .map_err(|e| format!("webhook 写 body 失败: {e}"))?;
+    stream
+        .shutdown(std::net::Shutdown::Write)
+        .map_err(|e| format!("webhook 关闭写端失败: {e}"))?;
+    let mut resp = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = std::io::Read::read(&mut stream, &mut buf)
+            .map_err(|e| format!("webhook 读响应失败: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        resp.extend_from_slice(&buf[..n]);
+        if resp.windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
+    }
+    let head = String::from_utf8_lossy(&resp).to_string();
+    let status = head.lines().next().unwrap_or("").to_string();
+    if status.contains(" 200") || status.contains(" 201") || status.contains(" 204") {
+        Ok(())
+    } else {
+        Err(format!("webhook 返回非成功状态: {}", status))
+    }
+}
+
+fn send_webhook(
+    cfg: &Config,
+    url: &str,
+    event: &str,
+    goal: &str,
+    summary: &str,
+) -> Result<(), String> {
+    let mut last_err = "webhook 未发送".to_string();
+    for attempt in 0..=cfg.webhook_retry {
+        match send_webhook_once(cfg, url, event, goal, summary) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last_err = e;
+                if attempt < cfg.webhook_retry {
+                    let backoff_ms = 100u64.saturating_mul(attempt as u64 + 1);
+                    std::thread::sleep(Duration::from_millis(backoff_ms));
+                }
+            }
+        }
+    }
+    Err(last_err)
 }
 
 async fn run_llm_step(
@@ -482,6 +624,9 @@ mod tests {
             workspace_dir: Path::new("/tmp").to_path_buf(),
             repo_dir: Path::new("/tmp").to_path_buf(),
             request_timeout_secs: 5,
+            webhook_url: None,
+            webhook_timeout_secs: 1,
+            webhook_retry: 0,
             mock: true,
         }
     }
@@ -509,5 +654,111 @@ mod tests {
         let (results, summary) = exec.execute(&plan).await.unwrap();
         assert!(results[0].ok);
         assert!(summary.contains("完成 1/1"));
+    }
+
+    #[test]
+    fn webhook_success_posts_json() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let received_clone = std::sync::Arc::clone(&received);
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut stream, &mut buf).unwrap();
+            received_clone.lock().unwrap().push(String::from_utf8_lossy(&buf).to_string());
+            std::io::Write::write_all(
+                &mut stream,
+                b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        });
+
+        let mut cfg = mock_cfg();
+        cfg.webhook_url = Some(format!("http://{}/hook", addr));
+        cfg.webhook_retry = 0;
+        let url = cfg.webhook_url.clone().unwrap();
+        send_webhook(&cfg, &url, "completed", "goal-1", "summary-1").unwrap();
+
+        handle.join().unwrap();
+        let reqs = received.lock().unwrap();
+        assert_eq!(reqs.len(), 1);
+        assert!(reqs[0].starts_with("POST /hook HTTP/1.1\r\n"));
+        assert!(reqs[0].contains("Content-Type: application/json\r\n"));
+        let body = reqs[0].split("\r\n\r\n").nth(1).unwrap();
+        let json: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(json["event"], "completed");
+        assert_eq!(json["task"], "goal-1");
+        assert_eq!(json["summary"], "summary-1");
+        assert!(json["timestamp"].is_u64());
+    }
+
+    #[test]
+    fn webhook_retries_on_500_then_succeeds() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let received_clone = std::sync::Arc::clone(&received);
+        let handle = std::thread::spawn(move || {
+            for i in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = Vec::new();
+                std::io::Read::read_to_end(&mut stream, &mut buf).unwrap();
+                received_clone.lock().unwrap().push(String::from_utf8_lossy(&buf).to_string());
+                if i == 0 {
+                    std::io::Write::write_all(
+                        &mut stream,
+                        b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .unwrap();
+                } else {
+                    std::io::Write::write_all(
+                        &mut stream,
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .unwrap();
+                }
+            }
+        });
+
+        let mut cfg = mock_cfg();
+        cfg.webhook_url = Some(format!("http://{}/hook", addr));
+        cfg.webhook_retry = 1;
+        cfg.webhook_timeout_secs = 2;
+        let url = cfg.webhook_url.clone().unwrap();
+        send_webhook(&cfg, &url, "failed", "goal-2", "summary-2").unwrap();
+
+        handle.join().unwrap();
+        let reqs = received.lock().unwrap();
+        assert_eq!(reqs.len(), 2);
+        for req in reqs.iter() {
+            assert!(req.starts_with("POST /hook HTTP/1.1\r\n"));
+        }
+    }
+
+    #[test]
+    fn webhook_timeout_gives_up() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            let _ = std::io::Write::write_all(
+                &mut stream,
+                b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+        });
+
+        let mut cfg = mock_cfg();
+        cfg.webhook_url = Some(format!("http://{}/slow", addr));
+        cfg.webhook_timeout_secs = 1;
+        cfg.webhook_retry = 0;
+        let url = cfg.webhook_url.clone().unwrap();
+        let err = send_webhook(&cfg, &url, "completed", "goal-3", "summary-3").unwrap_err();
+
+        assert!(err.contains("失败") || err.contains("超时"), "unexpected err: {err}");
+        handle.join().unwrap();
     }
 }

@@ -19,6 +19,9 @@ pub struct Config {
     pub price: f64,
     pub max_budget: f64,
     pub mock: bool,
+    pub webhook_url: Option<String>,
+    pub webhook_retry: u32,
+    pub webhook_timeout_secs: u64,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -33,6 +36,9 @@ struct FileConfig {
     request_timeout_secs: Option<u64>,
     price: Option<f64>,
     max_budget: Option<f64>,
+    webhook_url: Option<String>,
+    webhook_retry: Option<u32>,
+    webhook_timeout_secs: Option<u64>,
 }
 
 impl Config {
@@ -76,6 +82,9 @@ impl Config {
             price: file.price.unwrap_or(0.0),
             max_budget: file.max_budget.unwrap_or(0.0),
             mock: false,
+            webhook_url: file.webhook_url.filter(|u| !u.trim().is_empty()),
+            webhook_retry: file.webhook_retry.unwrap_or(3),
+            webhook_timeout_secs: file.webhook_timeout_secs.unwrap_or(5),
         })
     }
 
@@ -212,6 +221,9 @@ mod tests {
             price: 0.0,
             max_budget: 100.0,
             mock: false,
+            webhook_url: None,
+            webhook_retry: 3,
+            webhook_timeout_secs: 5,
         }
     }
 
