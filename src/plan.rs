@@ -392,3 +392,87 @@ fn reject_tool_step_missing_required_field() {
     let missing_read_path = r#"{ "goal": "x", "steps": [{"id":1,"name":"a","agent":"coder","skill":"code-writing","prompt":"p","kind":"read","needs":[]}]}"#;
     assert!(Plan::from_llm("x", missing_read_path).is_err());
 }
+
+
+/// 将标题转换为 slug：小写、空格/标点等非字母数字字符转为连字符，
+/// 并压缩连续连字符。
+fn slugify_title(input: &str) -> String {
+    let mut out = String::new();
+    let mut pending_dash = false;
+
+    for ch in input.chars() {
+        if ch.is_alphanumeric() {
+            if pending_dash && !out.is_empty() {
+                out.push('-');
+            }
+            out.extend(ch.to_lowercase());
+            pending_dash = false;
+        } else {
+            pending_dash = true;
+        }
+    }
+
+    out
+}
+
+/// 将用户输入解析为任务索引。
+/// - 若输入为十进制整数，将其作为索引（保持向后兼容），越界时报错。
+/// - 否则按标题 slug 进行匹配，返回匹配任务的下标。
+pub fn resolve_task_id<I, S>(input: &str, task_titles: I) -> anyhow::Result<usize>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let titles: Vec<String> = task_titles
+        .into_iter()
+        .map(|t| slugify_title(t.as_ref()))
+        .collect();
+
+    if let Ok(index) = input.parse::<usize>() {
+        if index < titles.len() {
+            return Ok(index);
+        }
+        anyhow::bail!(
+            "task index {index} out of range; only {} task(s) available",
+            titles.len()
+        );
+    }
+
+    let needle = slugify_title(input);
+    if needle.is_empty() {
+        anyhow::bail!("task selector must be a numeric index or a non-empty title slug");
+    }
+
+    titles
+        .iter()
+        .position(|t| *t == needle)
+        .ok_or_else(|| anyhow::anyhow!("no task found with title slug '{needle}'"))
+}
+
+#[cfg(test)]
+mod task_id_resolve_tests {
+    use super::*;
+
+    #[test]
+    fn resolves_numeric_index() {
+        let titles = ["Add Login", "Setup DB"];
+        assert_eq!(resolve_task_id("0", titles.iter().copied()).unwrap(), 0);
+        assert_eq!(resolve_task_id("1", titles.iter().copied()).unwrap(), 1);
+    }
+
+    #[test]
+    fn resolves_title_slug() {
+        let titles = ["Add Login", "Setup DB"];
+        assert_eq!(resolve_task_id("add-login", titles.iter().copied()).unwrap(), 0);
+        assert_eq!(resolve_task_id("setup-db", titles.iter().copied()).unwrap(), 1);
+        assert_eq!(resolve_task_id("Setup DB", titles.iter().copied()).unwrap(), 1);
+    }
+
+    #[test]
+    fn rejects_out_of_range_and_unknown_slug() {
+        let titles = ["Add Login"];
+        assert!(resolve_task_id("2", titles.iter().copied()).is_err());
+        assert!(resolve_task_id("missing", titles.iter().copied()).is_err());
+        assert!(resolve_task_id("", titles.iter().copied()).is_err());
+    }
+}
