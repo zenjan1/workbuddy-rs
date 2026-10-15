@@ -41,6 +41,37 @@ struct FileConfig {
     webhook_timeout_secs: Option<u64>,
 }
 
+/// 可通过 `config set` 修改的配置键。键名与 FileConfig/Config 字段保持一致。
+const CONFIG_KEYS: &[&str] = &[
+    "api_key",
+    "base_url",
+    "model",
+    "max_parallel",
+    "workspace_dir",
+    "repo_dir",
+    "request_timeout_secs",
+    "price",
+    "max_budget",
+    "webhook_url",
+    "webhook_retry",
+    "webhook_timeout_secs",
+    "temperature",
+];
+
+/// 修改后需要重启进程才会生效的配置键。
+const RESTART_REQUIRED_KEYS: &[&str] = &[
+    "base_url",
+    "model",
+    "max_parallel",
+    "workspace_dir",
+    "repo_dir",
+    "request_timeout_secs",
+    "webhook_url",
+    "webhook_retry",
+    "webhook_timeout_secs",
+    "temperature",
+];
+
 impl Config {
     pub fn load() -> Result<Self> {
         let file = Self::load_file()?;
@@ -124,11 +155,32 @@ impl Config {
     }
 
     pub fn set_config_value(key: &str, value: &str) -> Result<()> {
+        Self::validate_config_key(key)?;
         let path = Self::config_file_path();
         Self::update_config_file(&path, key, value)
     }
 
+    /// 判断配置键是否允许通过 `config set` 写入。
+    pub fn is_known_config_key(key: &str) -> bool {
+        CONFIG_KEYS.contains(&key)
+    }
+
+    /// 校验配置键是否允许通过 `config set` 写入。
+    pub fn validate_config_key(key: &str) -> Result<()> {
+        if Self::is_known_config_key(key) {
+            Ok(())
+        } else {
+            anyhow::bail!("未知配置键: {key}; 可用键: {}", CONFIG_KEYS.join(", "))
+        }
+    }
+
+    /// 返回需要重启生效的全部配置键。
+    pub fn restart_required_keys() -> &'static [&'static str] {
+        RESTART_REQUIRED_KEYS
+    }
+
     fn update_config_file(path: &Path, key: &str, value: &str) -> Result<()> {
+        Self::validate_config_key(key)?;
         let mut doc: toml::Value = if path.exists() {
             let text = std::fs::read_to_string(path)
                 .with_context(|| format!("读取配置文件失败: {}", path.display()))?;
@@ -150,7 +202,7 @@ impl Config {
 
     fn parse_value_for_key(key: &str, raw: &str) -> Result<toml::Value> {
         let value = match key {
-            "max_budget" | "price" => {
+            "max_budget" | "price" | "temperature" => {
                 let n: f64 = raw.parse().with_context(|| format!("{key} 需要是数字"))?;
                 toml::Value::Float(n)
             }
@@ -161,19 +213,7 @@ impl Config {
             "api_key" | "base_url" | "model" | "workspace_dir" | "repo_dir" | "webhook_url" => {
                 toml::Value::String(raw.to_string())
             }
-            _ => match raw {
-                "true" => toml::Value::Boolean(true),
-                "false" => toml::Value::Boolean(false),
-                _ => {
-                    if let Ok(n) = raw.parse::<i64>() {
-                        toml::Value::Integer(n)
-                    } else if let Ok(f) = raw.parse::<f64>() {
-                        toml::Value::Float(f)
-                    } else {
-                        toml::Value::String(raw.to_string())
-                    }
-                }
-            },
+            _ => anyhow::bail!("未知配置键: {key}"),
         };
         Ok(value)
     }
@@ -424,6 +464,46 @@ mod tests {
         assert_eq!(doc["model"].as_str(), Some("qwen-max"));
         assert_eq!(doc["max_parallel"].as_integer(), Some(2));
         assert_eq!(doc["some_unknown"].as_str(), Some("keepme"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn legal_config_keys_contains_expected_keys() {
+        assert!(Config::is_known_config_key("model"));
+        assert!(Config::is_known_config_key("temperature"));
+        assert!(Config::is_known_config_key("request_timeout_secs"));
+        assert!(!Config::is_known_config_key("unknown_key"));
+    }
+
+    #[test]
+    fn update_config_file_writes_known_keys() {
+        let path = temp_config_path("known_keys");
+        let initial = "model = \"old-model\"\n";
+        std::fs::write(&path, initial).unwrap();
+
+        Config::update_config_file(&path, "model", "qwen-plus").unwrap();
+        Config::update_config_file(&path, "temperature", "0.7").unwrap();
+        Config::update_config_file(&path, "request_timeout_secs", "45").unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let doc: toml::Value = toml::from_str(&text).unwrap();
+        assert_eq!(doc["model"].as_str(), Some("qwen-plus"));
+        assert_eq!(doc["temperature"].as_float(), Some(0.7));
+        assert_eq!(doc["request_timeout_secs"].as_integer(), Some(45));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn update_config_file_rejects_unknown_key_and_preserves_file() {
+        let path = temp_config_path("unknown_key");
+        let initial = "model = \"qwen-plus\"\n";
+        std::fs::write(&path, initial).unwrap();
+
+        let err = Config::update_config_file(&path, "unknown_key", "value").unwrap_err();
+        assert!(err.to_string().contains("未知配置键"));
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text, initial);
         std::fs::remove_file(&path).ok();
     }
 }

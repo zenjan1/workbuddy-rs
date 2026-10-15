@@ -136,8 +136,9 @@ enum ConfigAction {
     /// 设置配置项
     Set {
         /// 配置键
+        #[arg(long)]
         key: String,
-        /// 配置值
+        /// 配置值（位置参数）
         value: String,
     },
 }
@@ -266,10 +267,19 @@ async fn main() -> Result<()> {
                 if value.trim().is_empty() {
                     return Err(anyhow::anyhow!("配置值不能为空"));
                 }
-                Config::set_config_value(&key, &value)?;
+                Config::set_config_value(&key, &value)
+                    .map_err(|e| anyhow::anyhow!("设置配置 {} 失败: {}", key, e))?;
                 let cfg = Config::load()?;
                 println!("已更新配置：{} = {}", key, value);
                 println!("{}", cfg.summary());
+                // 提示哪些配置需要重启生效
+                let needs_restart = matches!(
+                    key.as_str(),
+                    "model" | "base_url" | "api_key" | "temperature" | "timeout"
+                );
+                if needs_restart {
+                    println!("提示：修改 {} 需要重启 WorkBuddy 才能生效。", key);
+                }
                 Ok(())
             }
         },
