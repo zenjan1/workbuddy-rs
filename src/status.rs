@@ -224,6 +224,9 @@ pub fn format_status(summary: &StatusSummary) -> String {
         "Supervisor: {state}\nLast run: {} completed, {} failed",
         summary.completed_runs, summary.failed_runs
     );
+    if summary.completed_runs == 0 && summary.failed_runs == 0 && summary.recent_logs.is_empty() {
+        output.push_str("\nNo run history.");
+    }
     if summary.recent_logs.is_empty() {
         output.push_str("\nRecent logs: (none)");
     } else {
@@ -633,5 +636,62 @@ mod tests {
                 "log 2".to_string()
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod status_extra_tests {
+    use super::*;
+
+    #[test]
+    fn from_history_only_success_counts_all_completed() {
+        let history = vec![
+            HistoryEntry {
+                success: true,
+                log: "ok 1".to_string(),
+            },
+            HistoryEntry {
+                success: true,
+                log: "ok 2".to_string(),
+            },
+        ];
+        let summary = StatusSummary::from_history(&history);
+        assert_eq!(summary.completed_runs, 2);
+        assert_eq!(summary.failed_runs, 0);
+        assert_eq!(
+            summary.recent_logs,
+            vec!["ok 2".to_string(), "ok 1".to_string()]
+        );
+    }
+
+    #[test]
+    fn from_history_only_failures_counts_all_failed() {
+        let history = vec![
+            HistoryEntry {
+                success: false,
+                log: "fail 1".to_string(),
+            },
+            HistoryEntry {
+                success: false,
+                log: "fail 2".to_string(),
+            },
+        ];
+        let summary = StatusSummary::from_history(&history);
+        assert_eq!(summary.completed_runs, 0);
+        assert_eq!(summary.failed_runs, 2);
+        assert_eq!(
+            summary.recent_logs,
+            vec!["fail 2".to_string(), "fail 1".to_string()]
+        );
+    }
+
+    #[test]
+    fn format_status_empty_history_reports_no_run_history() {
+        let summary = StatusSummary::from_history(&[]);
+        let rendered = format_status(&summary);
+        assert!(rendered.contains("Supervisor: stopped"));
+        assert!(rendered.contains("Last run: 0 completed, 0 failed"));
+        assert!(rendered.contains("No run history."));
+        assert!(rendered.contains("Recent logs: (none)"));
     }
 }
