@@ -19,12 +19,21 @@ struct SupervisorStatus {
 #[derive(Debug, PartialEq, Eq)]
 pub struct StatusSummary {
     pub supervisor_running: bool,
+    pub pid: Option<u32>,
     pub completed_runs: usize,
     pub failed_runs: usize,
     pub recent_logs: Vec<String>,
 }
 
 pub fn run(workspace_dir: &Path) -> Result<(), Box<dyn Error>> {
+    let status_path = workspace_dir.join("status.json");
+    if !status_path.exists() {
+        println!(
+            "No status file found; supervisor is not running or has no recent runs."
+        );
+        return Ok(());
+    }
+
     let summary = parse_status(workspace_dir)?;
     println!("{}", format_status(&summary));
     Ok(())
@@ -33,6 +42,15 @@ pub fn run(workspace_dir: &Path) -> Result<(), Box<dyn Error>> {
 pub fn parse_status(workspace_dir: &Path) -> anyhow::Result<StatusSummary> {
     let status_path = workspace_dir.join("status.json");
     let supervisor_running = read_supervisor_running(&status_path)?;
+    let pid = if status_path.exists() {
+        let data = fs::read_to_string(&status_path)
+            .with_context(|| format!("读取状态文件失败 {}", status_path.display()))?;
+        let status: SupervisorStatus = serde_json::from_str(&data)
+            .with_context(|| format!("解析状态文件失败 {}", status_path.display()))?;
+        status.pid
+    } else {
+        None
+    };
 
     let mut run_files = collect_run_files(workspace_dir)?;
     run_files.sort_by_key(|path| {
@@ -80,6 +98,7 @@ pub fn parse_status(workspace_dir: &Path) -> anyhow::Result<StatusSummary> {
 
     Ok(StatusSummary {
         supervisor_running,
+        pid,
         completed_runs,
         failed_runs,
         recent_logs,
@@ -132,9 +151,12 @@ fn collect_run_files(workspace_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
 
 pub fn format_status(summary: &StatusSummary) -> String {
     let state = if summary.supervisor_running {
-        "running"
+        match summary.pid {
+            Some(pid) => format!("running (pid {pid})"),
+            None => "running".to_string(),
+        }
     } else {
-        "stopped"
+        "stopped".to_string()
     };
     let mut output = format!(
         "Supervisor: {state}\nCompleted runs: {}\nFailed runs: {}",
