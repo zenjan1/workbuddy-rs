@@ -250,6 +250,50 @@ impl Plan {
         }
         out
     }
+
+    /// 将用户输入解析为任务在 steps 数组中的下标。
+    /// 匹配顺序：
+    /// 1) 数字索引(作为 0-based 下标)
+    /// 2) 标题精确匹配(区分大小写)
+    /// 3) 标题大小写不敏感精确匹配
+    /// 4) 标题子串包含匹配(按步骤顺序返回第一个匹配项)
+    pub fn resolve_task_id(&self, query: &str) -> Option<usize> {
+        let query = query.trim();
+        if query.is_empty() {
+            return None;
+        }
+
+        // 1. 数字索引查找(保持原有数字索引行为)
+        if let Ok(idx) = query.parse::<usize>() {
+            if idx < self.steps.len() {
+                return Some(idx);
+            }
+        }
+
+        // 2. 标题精确匹配(区分大小写)
+        for (i, s) in self.steps.iter().enumerate() {
+            if s.name == query {
+                return Some(i);
+            }
+        }
+
+        // 3. 标题大小写不敏感精确匹配
+        for (i, s) in self.steps.iter().enumerate() {
+            if s.name.eq_ignore_ascii_case(query) {
+                return Some(i);
+            }
+        }
+
+        // 4. 标题包含/子串模糊匹配(按顺序确定性,大小写不敏感)
+        let query_lower = query.to_lowercase();
+        for (i, s) in self.steps.iter().enumerate() {
+            if s.name.to_lowercase().contains(&query_lower) {
+                return Some(i);
+            }
+        }
+
+        None
+    }
 }
 
 fn extract_json_object(raw: &str) -> anyhow::Result<String> {
@@ -358,6 +402,54 @@ mod tests {
         let p = Plan::from_llm("x", raw).unwrap();
         assert_eq!(p.steps[0].kind, StepKind::Llm);
         assert_eq!(p.steps[1].kind, StepKind::Llm);
+    }
+
+    #[test]
+    fn resolve_task_id_by_numeric_index() {
+        let p = Plan::from_llm("测试", GOOD).unwrap();
+        assert_eq!(p.resolve_task_id("0"), Some(0));
+        assert_eq!(p.resolve_task_id("1"), Some(1));
+        assert_eq!(p.resolve_task_id("2"), None);
+    }
+
+    #[test]
+    fn resolve_task_id_by_exact_title() {
+        let p = Plan::from_llm("测试", GOOD).unwrap();
+        assert_eq!(p.resolve_task_id("调研"), Some(0));
+        assert_eq!(p.resolve_task_id("终审"), Some(1));
+    }
+
+    #[test]
+    fn resolve_task_id_case_insensitive_title() {
+        // 使用英文标题测试大小写不敏感
+        let raw = r#"{ "goal": "x", "steps": [
+            {"id":1,"name":"Add Login","agent":"researcher","skill":"deep-research","prompt":"p","kind":"llm","needs":[]},
+            {"id":2,"name":"Setup DB","agent":"reviewer","skill":"final-review","prompt":"p","kind":"llm","needs":[1]}
+        ]}"#;
+        let p = Plan::from_llm("x", raw).unwrap();
+        assert_eq!(p.resolve_task_id("add login"), Some(0));
+        assert_eq!(p.resolve_task_id("SETUP DB"), Some(1));
+    }
+
+    #[test]
+    fn resolve_task_id_by_title_substring() {
+        // 使用英文标题测试子串包含匹配
+        let raw = r#"{ "goal": "x", "steps": [
+            {"id":1,"name":"Add Login","agent":"researcher","skill":"deep-research","prompt":"p","kind":"llm","needs":[]},
+            {"id":2,"name":"Setup DB","agent":"reviewer","skill":"final-review","prompt":"p","kind":"llm","needs":[1]}
+        ]}"#;
+        let p = Plan::from_llm("x", raw).unwrap();
+        // "login" 是 "Add Login" 的子串，但不是精确匹配
+        assert_eq!(p.resolve_task_id("login"), Some(0));
+        // "db" 是 "Setup DB" 的子串
+        assert_eq!(p.resolve_task_id("db"), Some(1));
+    }
+
+    #[test]
+    fn resolve_task_id_missing_title_returns_none() {
+        let p = Plan::from_llm("测试", GOOD).unwrap();
+        assert_eq!(p.resolve_task_id("不存在"), None);
+        assert_eq!(p.resolve_task_id(""), None);
     }
 }
 

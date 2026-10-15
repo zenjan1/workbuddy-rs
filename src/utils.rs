@@ -161,3 +161,73 @@ mod tests {
         assert_eq!(parse_task_id("My Task"), "my-task");
     }
 }
+pub fn resolve_task_id(workspace_dir: &std::path::Path, input: &str) -> anyhow::Result<String> {
+    let runs = crate::workspace::Workspace::root(workspace_dir);
+    if runs.is_empty() {
+        return Err(anyhow::anyhow!("workspace 中没有任务"));
+    }
+
+    let input = input.trim();
+    if input.is_empty() {
+        return Err(anyhow::anyhow!("task selector 不能为空"));
+    }
+
+    // 向后兼容：数字索引
+    if let Ok(idx) = input.parse::<usize>() {
+        return runs
+            .get(idx)
+            .map(|r| r.id.clone())
+            .ok_or_else(|| anyhow::anyhow!("task index {} out of range; only {} task(s) available", idx, runs.len()));
+    }
+
+    // 精确匹配 run id 或 goal 标题
+    for r in &runs {
+        if r.id == input || r.goal == input {
+            return Ok(r.id.clone());
+        }
+    }
+
+    // 大小写不敏感精确匹配
+    for r in &runs {
+        if r.id.eq_ignore_ascii_case(input) || r.goal.eq_ignore_ascii_case(input) {
+            return Ok(r.id.clone());
+        }
+    }
+
+    // 标题 slug 匹配
+    let needle_slug = task_slugify(input);
+    if !needle_slug.is_empty() {
+        for r in &runs {
+            if task_slugify(&r.id) == needle_slug || task_slugify(&r.goal) == needle_slug {
+                return Ok(r.id.clone());
+            }
+        }
+    }
+
+    // 子串模糊匹配(大小写不敏感)
+    let query_lower = input.to_lowercase();
+    for r in &runs {
+        if r.id.to_lowercase().contains(&query_lower) || r.goal.to_lowercase().contains(&query_lower) {
+            return Ok(r.id.clone());
+        }
+    }
+
+    Err(anyhow::anyhow!("no task found matching '{input}'"))
+}
+
+fn task_slugify(input: &str) -> String {
+    let mut out = String::new();
+    let mut pending = false;
+    for ch in input.chars() {
+        if ch.is_alphanumeric() {
+            if pending && !out.is_empty() {
+                out.push('-');
+            }
+            out.extend(ch.to_lowercase());
+            pending = false;
+        } else {
+            pending = true;
+        }
+    }
+    out
+}
