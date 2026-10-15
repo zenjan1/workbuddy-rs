@@ -1,8 +1,10 @@
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 #[derive(Debug)]
 pub enum MemoryError {
@@ -35,87 +37,85 @@ impl Error for MemoryError {
 }
 
 pub struct MemoryStore {
-    dir: PathBuf,
+    path: PathBuf,
+    lock: Mutex<()>,
 }
 
 impl MemoryStore {
-    pub fn new(dir: impl AsRef<Path>) -> Self {
-        Self { dir: dir.as_ref().to_path_buf() }
+    /// Creates a new memory store backed by the given JSON file path.
+    ///
+    /// Parent directories are created if missing. The file itself is not
+    /// created until the first write; read operations on a missing file
+    /// return an empty store.
+    pub fn new(path: impl AsRef<Path>) -> Self {
+        let path = path.as_ref().to_path_buf();
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = fs::create_dir_all(parent);
+            }
+        }
+        Self {
+            path,
+            lock: Mutex::new(()),
+        }
     }
 
     pub fn add(&self, key: &str, value: &str) -> Result<(), MemoryError> {
         validate_key_value(key, value)?;
-        fs::create_dir_all(&self.dir).map_err(MemoryError::Io)?;
-
-        let _lock = LockGuard::acquire(&self.lock_path())?;
-        let mut entries = self.read_entries()?;
-        entries.retain(|(existing_key, _)| existing_key.as_str() != key);
-        entries.push((key.to_owned(), value.to_owned()));
-        entries.sort_by(|(left_key, left_value), (right_key, right_value)| {
-            left_key.cmp(right_key).then_with(|| left_value.cmp(right_value))
-        });
+        let _guard = self.lock.lock().map_err(|_| MemoryError::Locked)?;
+        let mut entries = self.read_entries_locked()?;
+        entries.insert(key.to_owned(), value.to_owned());
         self.write_entries_atomic(&entries)
     }
 
     pub fn get(&self, key: &str) -> Result<String, MemoryError> {
-        self.read_entries()?
-            .into_iter()
-            .find(|(existing_key, _)| existing_key == key)
-            .map(|(_, value)| value)
+        let _guard = self.lock.lock().map_err(|_| MemoryError::Locked)?;
+        let entries = self.read_entries_locked()?;
+        entries
+            .get(key)
+            .cloned()
             .ok_or_else(|| MemoryError::NotFound(key.to_owned()))
     }
 
     pub fn list(&self) -> Result<Vec<(String, String)>, MemoryError> {
-        let mut entries = self.read_entries()?;
-        entries.sort_by(|(left_key, left_value), (right_key, right_value)| {
-            left_key.cmp(right_key).then_with(|| left_value.cmp(right_value))
-        });
+        let _guard = self.lock.lock().map_err(|_| MemoryError::Locked)?;
+        let entries = self.read_entries_locked()?;
+        let mut entries: Vec<_> = entries.into_iter().collect();
+        entries.sort_by(|(left_key, _), (right_key, _)| left_key.cmp(right_key));
         Ok(entries)
     }
 
-    fn path(&self) -> PathBuf {
-        self.dir.join("memory.tsv")
-    }
-
-    fn lock_path(&self) -> PathBuf {
-        self.dir.join("memory.lock")
-    }
-
-    fn read_entries(&self) -> Result<Vec<(String, String)>, MemoryError> {
-        let path = self.path();
-        if !path.exists() {
-            return Ok(Vec::new());
+    fn read_entries_locked(&self) -> Result<BTreeMap<String, String>, MemoryError> {
+        if !self.path.exists() {
+            return Ok(BTreeMap::new());
         }
 
-        let content = fs::read_to_string(&path).map_err(MemoryError::Io)?;
-        let mut entries = Vec::new();
+        let content = fs::read_to_string(&self.path).map_err(MemoryError::Io)?;
+        let parsed: serde_json::Value =
+            serde_json::from_str(&content).map_err(|err| MemoryError::Parse(err.to_string()))?;
+        let object = parsed
+            .as_object()
+            .ok_or_else(|| MemoryError::Parse("memory file must contain a JSON object".to_string()))?;
 
-        for (line_index, line) in content.lines().enumerate() {
-            if line.is_empty() {
-                continue;
-            }
-
-            let (key, value) = line
-                .split_once(tab())
-                .ok_or_else(|| {
-                    MemoryError::Parse(format!("line {}: missing tab delimiter", line_index + 1))
-                })?;
-
+        let mut entries = BTreeMap::new();
+        for (key, value) in object {
+            let value = value
+                .as_str()
+                .ok_or_else(|| MemoryError::Parse(format!("value for key '{key}' is not a string")))?;
             validate_key_value(key, value).map_err(|_| {
-                MemoryError::Parse(format!(
-                    "line {}: key and value must be non-empty and contain no newline or tab",
-                    line_index + 1
-                ))
+                MemoryError::Parse(format!("key '{key}' or its value failed validation"))
             })?;
-
-            entries.push((key.to_owned(), value.to_owned()));
+            entries.insert(key.clone(), value.to_owned());
         }
 
         Ok(entries)
     }
 
-    fn write_entries_atomic(&self, entries: &[(String, String)]) -> Result<(), MemoryError> {
-        let tmp_path = self.dir.join("memory.tsv.tmp");
+    fn write_entries_atomic(&self, entries: &BTreeMap<String, String>) -> Result<(), MemoryError> {
+        let tmp_path = self.path.with_extension("json.tmp");
+        let serialized = serde_json::to_string_pretty(entries)
+            .map_err(|err| MemoryError::Parse(err.to_string()))?;
+
         let write_result = (|| -> Result<(), MemoryError> {
             let mut tmp = OpenOptions::new()
                 .write(true)
@@ -123,14 +123,7 @@ impl MemoryStore {
                 .truncate(true)
                 .open(&tmp_path)
                 .map_err(MemoryError::Io)?;
-
-            for (key, value) in entries {
-                tmp.write_all(key.as_bytes()).map_err(MemoryError::Io)?;
-                tmp.write_all(&[TAB_BYTE]).map_err(MemoryError::Io)?;
-                tmp.write_all(value.as_bytes()).map_err(MemoryError::Io)?;
-                tmp.write_all(&[NEWLINE_BYTE]).map_err(MemoryError::Io)?;
-            }
-
+            tmp.write_all(serialized.as_bytes()).map_err(MemoryError::Io)?;
             tmp.sync_all().map_err(MemoryError::Io)?;
             Ok(())
         })();
@@ -140,7 +133,7 @@ impl MemoryStore {
             return Err(err);
         }
 
-        if let Err(err) = fs::rename(&tmp_path, self.path()) {
+        if let Err(err) = fs::rename(&tmp_path, &self.path) {
             let _ = fs::remove_file(&tmp_path);
             return Err(MemoryError::Io(err));
         }
@@ -212,145 +205,188 @@ fn contains_tab_or_newline(value: &str) -> bool {
         .any(|c| c == tab() || c == newline())
 }
 
-struct LockGuard {
-    path: PathBuf,
-    file: Option<File>,
-}
 
-impl LockGuard {
-    fn acquire(lock_path: &Path) -> Result<Self, MemoryError> {
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(lock_path)
-        {
-            Ok(file) => Ok(Self {
-                path: lock_path.to_path_buf(),
-                file: Some(file),
-            }),
-            Err(err) if err.kind() == ErrorKind::AlreadyExists => Err(MemoryError::Locked),
-            Err(err) => Err(MemoryError::Io(err)),
-        }
-    }
-}
-
-impl Drop for LockGuard {
-    fn drop(&mut self) {
-        self.file.take();
-        let _ = fs::remove_file(&self.path);
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::thread;
 
     static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
-    fn temp_dir() -> PathBuf {
+    fn temp_file() -> PathBuf {
         let mut dir = std::env::temp_dir();
         dir.push(format!(
             "workbuddy-memory-test-{}-{}",
             std::process::id(),
             NEXT_ID.fetch_add(1, Ordering::Relaxed)
         ));
-        dir
+        fs::create_dir_all(&dir).unwrap();
+        dir.join("memory.json")
     }
 
-    fn cleanup(dir: &Path) {
-        let _ = fs::remove_dir_all(dir);
+    fn cleanup(path: &Path) {
+        if let Some(parent) = path.parent() {
+            let _ = fs::remove_dir_all(parent);
+        }
     }
 
     #[test]
     fn add_then_get_returns_value() {
-        let dir = temp_dir();
-        fs::create_dir_all(&dir).unwrap();
-        let store = MemoryStore::new(&dir);
+        let file = temp_file();
+        let store = MemoryStore::new(&file);
 
         store.add("foo", "bar").unwrap();
         assert_eq!(store.get("foo").unwrap(), "bar");
 
-        cleanup(&dir);
+        cleanup(&file);
     }
 
     #[test]
-    fn list_returns_all_keys_in_deterministic_order() {
-        let dir = temp_dir();
-        fs::create_dir_all(&dir).unwrap();
-        let store = MemoryStore::new(&dir);
+    fn add_overwrites_existing_key() {
+        let file = temp_file();
+        let store = MemoryStore::new(&file);
+
+        store.add("foo", "bar").unwrap();
+        store.add("foo", "baz").unwrap();
+        assert_eq!(store.get("foo").unwrap(), "baz");
+
+        let content = fs::read_to_string(&file).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["foo"], "baz");
+
+        cleanup(&file);
+    }
+
+    #[test]
+    fn list_returns_all_keys_sorted() {
+        let file = temp_file();
+        let store = MemoryStore::new(&file);
 
         store.add("b", "2").unwrap();
         store.add("a", "1").unwrap();
+        store.add("c", "3").unwrap();
 
+        let entries = store.list().unwrap();
         assert_eq!(
-            store.list().unwrap(),
-            vec![("a".to_owned(), "1".to_owned()), ("b".to_owned(), "2".to_owned())]
+            entries,
+            vec![
+                ("a".to_owned(), "1".to_owned()),
+                ("b".to_owned(), "2".to_owned()),
+                ("c".to_owned(), "3".to_owned()),
+            ]
         );
 
-        cleanup(&dir);
+        cleanup(&file);
     }
 
     #[test]
     fn get_missing_key_returns_not_found() {
-        let dir = temp_dir();
-        fs::create_dir_all(&dir).unwrap();
-        let store = MemoryStore::new(&dir);
+        let file = temp_file();
+        let store = MemoryStore::new(&file);
 
         let err = store.get("missing").unwrap_err();
         assert!(matches!(err, MemoryError::NotFound(_)));
 
-        cleanup(&dir);
+        cleanup(&file);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permission_error_returns_io_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_file();
+        let store_path = dir;
+        let parent = store_path.parent().unwrap();
+        fs::create_dir_all(parent).unwrap();
+
+        // Make the directory read-only.
+        let mut perms = fs::metadata(parent).unwrap().permissions();
+        perms.set_mode(0o555);
+        fs::set_permissions(parent, perms).unwrap();
+
+        let store = MemoryStore::new(&store_path);
+        let result = store.add("foo", "bar");
+
+        // Restore permissions so cleanup can remove the directory.
+        let mut perms = fs::metadata(parent).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(parent, perms).unwrap();
+
+        assert!(matches!(result, Err(MemoryError::Io(_))));
+        cleanup(&store_path);
     }
 
     #[test]
-    fn lock_file_exists_returns_locked() {
-        let dir = temp_dir();
-        fs::create_dir_all(&dir).unwrap();
-        let store = MemoryStore::new(&dir);
+    fn concurrent_writes_preserve_all_entries() {
+        let file = temp_file();
+        let store = Arc::new(MemoryStore::new(&file));
 
-        let lock = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(store.lock_path())
-            .unwrap();
-        drop(lock);
+        let mut handles = vec![];
 
-        let err = store.add("foo", "bar").unwrap_err();
-        assert!(matches!(err, MemoryError::Locked));
+        // Unique keys written by separate threads.
+        for i in 0..10 {
+            let store = Arc::clone(&store);
+            handles.push(thread::spawn(move || {
+                store
+                    .add(&format!("key-{i}"), &format!("value-{i}"))
+                    .unwrap();
+            }));
+        }
 
-        cleanup(&dir);
-    }
+        // Same key written by multiple threads concurrently.
+        for i in 0..5 {
+            let store = Arc::clone(&store);
+            handles.push(thread::spawn(move || {
+                store
+                    .add("shared", &format!("shared-value-{i}"))
+                    .unwrap();
+            }));
+        }
 
-    #[test]
-    fn write_leaves_no_temp_files() {
-        let dir = temp_dir();
-        fs::create_dir_all(&dir).unwrap();
-        let store = MemoryStore::new(&dir);
+        for handle in handles {
+            handle.join().unwrap();
+        }
 
-        store.add("foo", "bar").unwrap();
+        // All unique keys must be present.
+        for i in 0..10 {
+            assert_eq!(
+                store.get(&format!("key-{i}")).unwrap(),
+                format!("value-{i}")
+            );
+        }
 
-        let files: Vec<String> = fs::read_dir(&dir)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
+        // The shared key must exist and be one of the values written.
+        let shared_value = store.get("shared").unwrap();
+        assert!(shared_value.starts_with("shared-value-"));
 
-        assert!(
-            !files.iter().any(|name| name.contains("memory.tsv.tmp")),
-            "temporary file should not remain: {files:?}"
-        );
-        assert!(
-            !files.iter().any(|name| name == "memory.lock"),
-            "lock file should be removed after write: {files:?}"
-        );
+        // The file must be valid JSON and contain exactly 11 keys.
+        let content = fs::read_to_string(&file).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let obj = parsed.as_object().unwrap();
+        assert_eq!(obj.len(), 11);
+        assert!(obj.contains_key("shared"));
 
-        cleanup(&dir);
+        cleanup(&file);
     }
 }
 
 impl MemoryStore {
-    pub fn open(dir: impl AsRef<Path>) -> Result<Self, String> {
-        Ok(Self::new(dir))
+    /// Opens a memory store at the given path.
+    ///
+    /// If `path` refers to a directory, `memory.json` inside that directory
+    /// is used. Otherwise the path is treated as the full file path.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, String> {
+        let path = path.as_ref();
+        let file_path = if path.is_dir() {
+            path.join("memory.json")
+        } else {
+            path.to_path_buf()
+        };
+        Ok(Self::new(file_path))
     }
 }
 

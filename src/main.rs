@@ -324,7 +324,8 @@ async fn main() -> Result<()> {
         }
         Cmd::Selfcheck => cmd_selfcheck(),
         Cmd::Memory { args } => {
-            let store = memory::MemoryStore::open(&cfg.workspace_dir)
+            let memory_path = cfg.workspace_dir.join("memory.json");
+            let store = memory::MemoryStore::open(&memory_path)
                 .map_err(|e| anyhow::anyhow!("打开记忆存储失败: {e}"))?;
             let command = memory::MemoryCommand::parse(&args)
                 .map_err(|e| anyhow::anyhow!("解析记忆命令失败: {e}"))?;
