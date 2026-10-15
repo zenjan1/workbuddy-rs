@@ -59,28 +59,37 @@ impl Executor {
         self
     }
 
-    fn notify_webhook_result(&self, plan: &Plan, result: &Result<(Vec<StepResult>, String)>) {
-        if self.cfg.webhook_url.is_none() {
+    fn notify_webhook_result(
+        &self,
+        plan: &Plan,
+        result: &Result<(Vec<StepResult>, String)>,
+        elapsed_ms: u64,
+    ) {
+        let webhooks = {
+            let guard = crate::config::WEBHOOKS.read().unwrap();
+            guard.clone()
+        };
+        if webhooks.is_empty() {
             return;
         }
-        let (event, summary) = match result {
+        let (status, summary) = match result {
             Ok((results, summary)) => {
                 if results.iter().any(|r| !r.ok) {
-                    ("failed", summary.clone())
+                    ("failure", summary.clone())
                 } else {
-                    ("completed", summary.clone())
+                    ("success", summary.clone())
                 }
             }
-            Err(e) => ("failed", format!("执行失败: {:#}", e)),
+            Err(e) => ("failure", format!("执行失败: {:#}", e)),
         };
-        let cfg = self.cfg.clone();
-        let goal = plan.goal.clone();
-        let webhook_url = self.cfg.webhook_url.clone().unwrap();
-        std::thread::spawn(move || {
-            if let Err(err) = send_webhook(&cfg, &webhook_url, event, &goal, &summary) {
-                eprintln!("[执行] webhook 通知失败: {}", err);
-            }
-        });
+        let urls: Vec<String> = webhooks.iter().map(|w| w.url.clone()).collect();
+        let payload = crate::webhook::Payload {
+            title: format!("[{}] {} — {}", status, plan.goal, summary),
+            status: status.to_string(),
+            summary: summary.clone(),
+            duration_ms: elapsed_ms,
+        };
+        crate::webhook::notify_webhooks(&urls, &payload);
     }
 
     fn save_output(&self, id: usize, text: &str) {
@@ -94,8 +103,10 @@ impl Executor {
     /// 拓扑并行执行计划:无依赖的步骤并发(受 max_parallel 限制),
     /// 失败时其全部下游标记为 skipped。返回 (按 id 排序的结果, 执行摘要)。
     pub async fn execute(&self, plan: &Plan) -> Result<(Vec<StepResult>, String)> {
+        let start = std::time::Instant::now();
         let result = self.execute_inner(plan).await;
-        self.notify_webhook_result(plan, &result);
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+        self.notify_webhook_result(plan, &result, elapsed_ms);
         result
     }
 

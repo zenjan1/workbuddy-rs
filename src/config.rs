@@ -6,6 +6,14 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use clap::Args;
 
+/// Webhook 通知配置。每个 URL 可独立扩展超时、重试等选项。
+#[derive(Debug, Clone, Deserialize)]
+pub struct WebhookConfig {
+    /// Webhook URL，必须是 http/https。
+    pub url: String,
+    // 预留扩展字段：例如 retry、timeout_secs、headers 等。
+}
+
 /// 运行时配置。优先级:命令行 > 环境变量 > 配置文件 > 默认值。
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -27,6 +35,8 @@ pub struct Config {
     pub webhook_timeout_secs: u64,
 }
 
+pub static WEBHOOKS: std::sync::RwLock<Vec<WebhookConfig>> = std::sync::RwLock::new(Vec::new());
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct FileConfig {
@@ -45,6 +55,8 @@ struct FileConfig {
     webhook_url: Option<String>,
     webhook_retry: Option<u32>,
     webhook_timeout_secs: Option<u64>,
+    #[serde(default)]
+    webhooks: Vec<WebhookConfig>,
 }
 
 /// 可通过 `config set` 修改的配置键。键名与 FileConfig/Config 字段保持一致。
@@ -107,7 +119,7 @@ impl Config {
             .repo_dir
             .or_else(|| env::var("WORKBUDDY_REPO").ok().map(PathBuf::from))
             .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-        Ok(Config {
+        let cfg = Config {
             api_key,
             base_url,
             model,
@@ -123,7 +135,9 @@ impl Config {
             webhook_url: file.webhook_url.filter(|u| !u.trim().is_empty()),
             webhook_retry: file.webhook_retry.unwrap_or(3),
             webhook_timeout_secs: file.webhook_timeout_secs.unwrap_or(5),
-        })
+        };
+        *WEBHOOKS.write().unwrap() = file.webhooks;
+        Ok(cfg)
     }
 
     pub fn summary(&self) -> String {

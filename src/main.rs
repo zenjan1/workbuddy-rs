@@ -51,6 +51,7 @@ mod review {
 }
 mod util;
 mod utils;
+mod webhook;
 mod workspace;
 
 use std::sync::Arc;
