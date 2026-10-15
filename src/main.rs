@@ -224,7 +224,7 @@ enum Cmd {
     },
     /// 持久记忆:add/list/get
     Memory {
-        /// 剩余参数:add <key> <value> | list | get <key>
+        /// 剩余参数:add <text> | list | get <id>
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -342,7 +342,7 @@ async fn main() -> Result<()> {
         }
         Cmd::Selfcheck => cmd_selfcheck(),
         Cmd::Memory { args } => {
-            let memory_path = cfg.workspace_dir.join("memory.json");
+            let memory_path = cfg.repo_dir.join(".workbuddy").join("memory.json");
             let store = memory::MemoryStore::open(&memory_path)
                 .map_err(|e| anyhow::anyhow!("打开记忆存储失败: {e}"))?;
             let command = memory::MemoryCommand::parse(&args)

@@ -210,7 +210,7 @@ fn redact_if_sensitive(value: &str) -> String {
 }
 
 pub fn memory_file_path(workspace_dir: &Path) -> PathBuf {
-    workspace_dir.join("memory.json")
+    workspace_dir.join(".workbuddy").join("memory.json")
 }
 
 fn validate_key_value(key: &str, value: &str) -> Result<(), MemoryError> {
@@ -451,6 +451,22 @@ mod tests {
         let result = store.list();
 
         assert!(matches!(result, Err(MemoryError::Parse(_))));
+
+        cleanup(&file);
+    }
+
+    #[test]
+    fn corrupted_file_is_not_overwritten_on_add() {
+        let file = temp_file();
+        let store = MemoryStore::new(&file);
+
+        let original = "{ not json";
+        fs::write(&file, original).unwrap();
+
+        let result = store.add("key", "value");
+
+        assert!(matches!(result, Err(MemoryError::Parse(_))));
+        assert_eq!(fs::read_to_string(&file).unwrap(), original);
 
         cleanup(&file);
     }
