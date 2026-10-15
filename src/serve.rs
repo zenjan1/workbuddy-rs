@@ -126,6 +126,25 @@ fn handle_request(request: Request, workspace_dir: &Path) -> Result<()> {
     }
 }
 
+pub async fn start(workspace_dir: &Path, bind_addr: SocketAddr) -> anyhow::Result<SocketAddr> {
+    let server = Server::http(bind_addr)
+        .map_err(|e| anyhow::anyhow!("failed to bind {bind_addr}: {e}"))?;
+    let local_addr = server.server_addr().to_ip().ok_or_else(|| {
+        anyhow::anyhow!("failed to resolve listen address for {bind_addr}")
+    })?;
+    let workspace_dir = workspace_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        for request in server.incoming_requests() {
+            let ws_dir = workspace_dir.clone();
+            if let Err(e) = handle_request(request, &ws_dir) {
+                eprintln!("request handling error: {e}");
+            }
+        }
+        Ok(())
+    });
+    Ok(local_addr)
+}
+
 pub async fn run(workspace_dir: &Path, bind_addr: SocketAddr) -> anyhow::Result<()> {
     let server = Server::http(bind_addr)
         .map_err(|e| anyhow::anyhow!("failed to bind {bind_addr}: {e}"))?;

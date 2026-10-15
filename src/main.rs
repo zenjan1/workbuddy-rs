@@ -343,6 +343,7 @@ async fn main() -> Result<()> {
         }
         Cmd::Serve { port } => {
             let bind_addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+            println!("只读 HTTP 服务已启动: http://{bind_addr}");
             serve::run(&cfg.workspace_dir, bind_addr)
                 .await
                 .map_err(|e| anyhow::anyhow!("启动只读 HTTP 服务失败: {e:#}"))
