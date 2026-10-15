@@ -130,6 +130,56 @@ impl Workspace {
         }
         lines
     }
+
+    /// 读取 workspace 状态文件并格式化为可读摘要;无状态文件时返回 "not running"。
+    pub fn status_summary(root: &Path) -> String {
+        let status_path = root.join("status.json");
+        let Ok(text) = std::fs::read_to_string(status_path) else {
+            return "not running".to_string();
+        };
+        let Ok(status) = serde_json::from_str::<serde_json::Value>(&text) else {
+            return "not running".to_string();
+        };
+
+        let running = status
+            .get("running")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let completed = status
+            .get("completed")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let failed = status
+            .get("failed")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        let mut lines = vec![
+            format!(
+                "supervisor: {}",
+                if running { "running" } else { "not running" }
+            ),
+            format!("completed: {}", completed),
+            format!("failed: {}", failed),
+        ];
+
+        let logs = status
+            .get("last_logs")
+            .or_else(|| status.get("recent_logs"))
+            .and_then(|v| v.as_array());
+        if let Some(logs) = logs {
+            if !logs.is_empty() {
+                lines.push("recent logs:".to_string());
+                for log in logs {
+                    if let Some(s) = log.as_str() {
+                        lines.push(format!("  - {}", s));
+                    }
+                }
+            }
+        }
+
+        lines.join("\n")
+    }
 }
 
 static RUN_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -221,6 +271,52 @@ mod tests {
         assert!(report.contains("报告"));
         let listed = Workspace::root(&cfg.workspace_dir);
         assert_eq!(listed.len(), 1);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn status_summary_handles_no_status_file() {
+        let tmp = std::env::temp_dir().join(format!("wb-status-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        assert_eq!(Workspace::status_summary(&tmp), "not running");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn status_summary_formats_completed_and_failed() {
+        let tmp = std::env::temp_dir().join(format!("wb-status-records-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join("status.json"),
+            r#"{"running":false,"completed":2,"failed":1,"last_logs":["step 1 ok","step 2 failed"]}"#,
+        )
+        .unwrap();
+        let out = Workspace::status_summary(&tmp);
+        assert!(out.contains("supervisor: not running"));
+        assert!(out.contains("completed: 2"));
+        assert!(out.contains("failed: 1"));
+        assert!(out.contains("step 1 ok"));
+        assert!(out.contains("step 2 failed"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn status_summary_formats_running() {
+        let tmp = std::env::temp_dir().join(format!("wb-status-running-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join("status.json"),
+            r#"{"running":true,"completed":0,"failed":0,"last_logs":["initializing"]}"#,
+        )
+        .unwrap();
+        let out = Workspace::status_summary(&tmp);
+        assert!(out.contains("supervisor: running"));
+        assert!(out.contains("completed: 0"));
+        assert!(out.contains("failed: 0"));
+        assert!(out.contains("initializing"));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

@@ -131,6 +131,8 @@ enum Cmd {
     Selfcheck,
     /// 安全撤销上次 dev 提交:仅当最近提交以 `feat(dev):` 开头时执行 reset --hard
     Undo,
+    /// 查看 workspace 运行状态(只读)
+    Status,
     /// 持久记忆:add/list/get
     Memory {
         /// 剩余参数:add <key> <value> | list | get <key>
@@ -232,6 +234,10 @@ async fn main() -> Result<()> {
             let output = memory::run_memory_command(&store, command)
                 .map_err(|e| anyhow::anyhow!("记忆命令执行失败: {e}"))?;
             println!("{output}");
+            Ok(())
+        }
+        Cmd::Status => {
+            println!("{}", Workspace::status_summary(&cfg.workspace_dir));
             Ok(())
         }
         Cmd::Undo => match run_undo(None) {
