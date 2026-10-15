@@ -487,6 +487,190 @@ fn atomic_write(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
+/// 拆分并校验点号嵌套键。
+fn split_nested_key(key: &str) -> Result<Vec<&str>> {
+    if key.trim().is_empty() {
+        anyhow::bail!("配置键不能为空");
+    }
+    if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.') {
+        anyhow::bail!("配置键包含非法字符: {key}");
+    }
+    let parts: Vec<_> = key.split('.').collect();
+    if parts.iter().any(|p| p.is_empty()) {
+        anyhow::bail!("配置键不能包含空段: {key}");
+    }
+    Ok(parts)
+}
+
+/// 读取配置文件并解析为 toml::Value。空文件返回空表。
+pub fn read_config_toml(path: &Path) -> Result<toml::Value> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("读取配置文件失败: {}", path.display()))?;
+    if text.trim().is_empty() {
+        return Ok(toml::Value::Table(toml::map::Map::new()));
+    }
+    toml::from_str(&text).with_context(|| format!("解析配置文件失败: {}", path.display()))
+}
+
+/// 将 CLI 字符串值按启发式规则解析为 toml::Value。
+fn parse_nested_value(raw: &str) -> Result<toml::Value> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        anyhow::bail!("配置值不能为空");
+    }
+    if raw == "true" || raw == "false" {
+        return Ok(toml::Value::Boolean(raw.parse().unwrap()));
+    }
+    if let Ok(i) = raw.parse::<i64>() {
+        return Ok(toml::Value::Integer(i));
+    }
+    if let Ok(f) = raw.parse::<f64>() {
+        if f.is_finite() {
+            return Ok(toml::Value::Float(f));
+        }
+    }
+    Ok(toml::Value::String(raw.to_string()))
+}
+
+/// 递归写入嵌套键，不存在中间表时自动创建。
+fn set_nested_value_recursive(value: &mut toml::Value, parts: &[&str], new_value: toml::Value) -> Result<()> {
+    if parts.is_empty() {
+        anyhow::bail!("配置键不能为空");
+    }
+    if parts.len() == 1 {
+        let table = value
+            .as_table_mut()
+            .with_context(|| format!("配置路径段 {} 不是表", parts[0]))?;
+        table.insert(parts[0].to_string(), new_value);
+    } else {
+        let table = value
+            .as_table_mut()
+            .context("配置根节点不是表")?;
+        let child = table
+            .entry(parts[0].to_string())
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+        set_nested_value_recursive(child, &parts[1..], new_value)?;
+    }
+    Ok(())
+}
+
+/// 按点号路径读取配置值。
+pub fn get_nested_value<'a>(value: &'a toml::Value, key: &str) -> Result<&'a toml::Value> {
+    let parts = split_nested_key(key)?;
+    let mut current = value;
+    for part in parts {
+        let table = current
+            .as_table()
+            .with_context(|| format!("配置路径段 {} 不是表", part))?;
+        current = table
+            .get(part)
+            .with_context(|| format!("配置键不存在: {key}"))?;
+    }
+    Ok(current)
+}
+
+/// 将 toml::Value 格式化为可读字符串。
+pub fn format_config_value(value: &toml::Value) -> String {
+    match value {
+        toml::Value::String(s) => s.clone(),
+        toml::Value::Integer(i) => i.to_string(),
+        toml::Value::Float(f) => f.to_string(),
+        toml::Value::Boolean(b) => b.to_string(),
+        other => toml::to_string_pretty(other).unwrap_or_else(|_| format!("{other:?}")),
+    }
+}
+
+/// 从配置文件按点号路径读取值的字符串表示。
+pub fn get_config_value(path: &Path, key: &str) -> Result<String> {
+    let root = read_config_toml(path)?;
+    let value = get_nested_value(&root, key)?;
+    Ok(format_config_value(value))
+}
+
+/// 将完整 toml::Value 原子写回配置文件。
+pub fn write_config_toml_atomic(path: &Path, value: &toml::Value) -> Result<()> {
+    let contents = toml::to_string_pretty(value).context("序列化配置失败")?;
+    atomic_write(path, &contents)
+        .with_context(|| format!("写入配置文件失败: {}", path.display()))
+}
+
+/// 读取、修改、原子写回配置文件；支持 llm.model 形式的点号嵌套键。
+pub fn set_nested_config_value_file(path: &Path, key: &str, value: &str) -> Result<()> {
+    let mut root = read_config_toml(path)?;
+    let parsed = parse_nested_value(value)?;
+    let parts = split_nested_key(key)?;
+    set_nested_value_recursive(&mut root, &parts, parsed)?;
+    write_config_toml_atomic(path, &root)
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    fn write_initial(path: &Path) {
+        fs::write(
+            path,
+            r#"
+api_key = "old-key"
+base_url = "https://old.example.com"
+model = "old-model"
+max_parallel = 4
+
+[llm]
+model = "old-llm-model"
+
+[budget]
+max_budget = 10.0
+"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn set_nested_value_preserves_other_keys() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write_initial(&path);
+
+        set_nested_config_value_file(&path, "llm.model", "qwen-plus").unwrap();
+
+        let root = read_config_toml(&path).unwrap();
+        assert_eq!(get_nested_value(&root, "llm.model").unwrap().as_str().unwrap(), "qwen-plus");
+        assert_eq!(get_nested_value(&root, "api_key").unwrap().as_str().unwrap(), "old-key");
+        assert_eq!(get_nested_value(&root, "base_url").unwrap().as_str().unwrap(), "https://old.example.com");
+        assert_eq!(get_nested_value(&root, "budget.max_budget").unwrap().as_float().unwrap(), 10.0);
+
+        let saved = fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("qwen-plus"));
+        assert!(saved.contains("https://old.example.com"));
+    }
+
+    #[test]
+    fn set_nested_value_creates_missing_tables() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "api_key = \"k\"\n").unwrap();
+
+        set_nested_config_value_file(&path, "llm.timeout", "120").unwrap();
+
+        let root = read_config_toml(&path).unwrap();
+        assert_eq!(get_nested_value(&root, "llm.timeout").unwrap().as_integer().unwrap(), 120);
+        assert_eq!(get_nested_value(&root, "api_key").unwrap().as_str().unwrap(), "k");
+    }
+
+    #[test]
+    fn get_nested_value_roundtrip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write_initial(&path);
+
+        set_nested_config_value_file(&path, "budget.max_budget", "42.5").unwrap();
+        assert_eq!(get_config_value(&path, "budget.max_budget").unwrap(), "42.5");
+    }
+}
+
 pub fn validate_config(config: &Config) -> Vec<String> {
     let mut errors = Vec::new();
 

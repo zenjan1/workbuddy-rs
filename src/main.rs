@@ -83,6 +83,11 @@ enum ConfigAction {
         /// 配置值（位置参数）
         value: String,
     },
+    /// 获取配置项
+    Get {
+        /// 配置键
+        key: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -227,6 +232,18 @@ async fn main() -> Result<()> {
                 println!("{}", cfg.summary());
                 Ok(())
             }
+            Some(ConfigAction::Get { key }) => {
+                if key.trim().is_empty() {
+                    return Err(anyhow::anyhow!("配置键不能为空"));
+                }
+
+                let config_path = find_config_path()?;
+                let value = config::get_config_value(&config_path, &key)
+                    .map_err(|e| anyhow::anyhow!("获取配置 {} 失败: {}", key, e))?;
+
+                println!("{} = {}", key, value);
+                Ok(())
+            },
             Some(ConfigAction::Set { key, value }) => {
                 if key.trim().is_empty() {
                     return Err(anyhow::anyhow!("配置键不能为空"));
