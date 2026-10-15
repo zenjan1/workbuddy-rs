@@ -71,57 +71,10 @@ impl Workspace {
     }
 
     /// 将 task_id 字符串解析为任务在 Workspace::root 列表中的索引。
-    /// 数字输入保持原有数字索引语义(0-based);失败后回退到标题精确/前缀匹配。
+    /// 数字输入保持原有数字索引语义(0-based);否则按标题 slug 模糊匹配。
     pub fn resolve_task_id(root: &Path, input: &str) -> Result<usize, String> {
         let runs = Workspace::root(root);
-        if let Ok(idx) = input.parse::<usize>() {
-            if idx >= runs.len() {
-                return Err(format!(
-                    "任务索引 {} 超出范围(共 {} 个任务)",
-                    idx,
-                    runs.len()
-                ));
-            }
-            return Ok(idx);
-        }
-
-        let exact: Vec<(usize, String)> = runs
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| r.goal == input)
-            .map(|(i, r)| (i, r.goal.clone()))
-            .collect();
-        match exact.len() {
-            1 => return Ok(exact[0].0),
-            n if n > 1 => {
-                let titles: Vec<String> = exact.iter().map(|(_, t)| t.clone()).collect();
-                return Err(format!(
-                    "任务标题 '{}' 匹配到多个任务: {}",
-                    input,
-                    titles.join(", ")
-                ));
-            }
-            _ => {}
-        }
-
-        let prefix: Vec<(usize, String)> = runs
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| r.goal.starts_with(input))
-            .map(|(i, r)| (i, r.goal.clone()))
-            .collect();
-        match prefix.len() {
-            1 => Ok(prefix[0].0),
-            0 => Err(format!("未找到任务: {}", input)),
-            _ => {
-                let titles: Vec<String> = prefix.iter().map(|(_, t)| t.clone()).collect();
-                Err(format!(
-                    "任务标题前缀 '{}' 匹配到多个任务: {}",
-                    input,
-                    titles.join(", ")
-                ))
-            }
-        }
+        crate::workspace::resolve_task_id(input, &runs)
     }
 
     pub fn root(root: &Path) -> Vec<RunRecord> {
@@ -250,6 +203,66 @@ impl Workspace {
         }
 
         lines.join("\n")
+    }
+}
+
+/// 纯函数:根据标识符与任务列表解析任务索引。
+/// 数字输入保持原有数字索引语义(0-based);其他输入先归一化为标题 slug,
+/// 再对任务标题做同样归一化后进行唯一匹配。
+pub fn resolve_task_id(input: &str, runs: &[RunRecord]) -> Result<usize, String> {
+    if let Ok(idx) = input.parse::<usize>() {
+        if idx >= runs.len() {
+            return Err(format!(
+                "任务索引 {} 超出范围(共 {} 个任务)",
+                idx,
+                runs.len()
+            ));
+        }
+        return Ok(idx);
+    }
+
+    let normalized_input = slugify(input);
+    let exact_matches: Vec<(usize, String)> = runs
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| slugify(&r.goal) == normalized_input)
+        .map(|(i, r)| (i, r.goal.clone()))
+        .collect();
+
+    match exact_matches.len() {
+        1 => return Ok(exact_matches[0].0),
+        0 => {}
+        _ => {
+            let titles: Vec<String> = exact_matches.iter().map(|(_, t)| t.clone()).collect();
+            return Err(format!(
+                "任务标题 '{}' 匹配到多个任务: {}",
+                input,
+                titles.join(", ")
+            ));
+        }
+    }
+
+    if normalized_input.is_empty() {
+        return Err(format!("未找到任务: {}", input));
+    }
+    let prefix_matches: Vec<(usize, String)> = runs
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| slugify(&r.goal).starts_with(&normalized_input))
+        .map(|(i, r)| (i, r.goal.clone()))
+        .collect();
+
+    match prefix_matches.len() {
+        1 => Ok(prefix_matches[0].0),
+        0 => Err(format!("未找到任务: {}", input)),
+        _ => {
+            let titles: Vec<String> = prefix_matches.iter().map(|(_, t)| t.clone()).collect();
+            Err(format!(
+                "任务标题 '{}' 匹配到多个任务: {}",
+                input,
+                titles.join(", ")
+            ))
+        }
     }
 }
 
@@ -819,5 +832,50 @@ mod run_summary_tests {
         assert!(summary.recent_logs.is_empty());
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+}
+
+#[cfg(test)]
+mod resolve_task_id_pure_tests {
+    use super::*;
+
+    fn rec(id: &str, goal: &str) -> RunRecord {
+        RunRecord {
+            token_usage: None,
+            char_usage: None,
+            id: id.to_string(),
+            goal: goal.to_string(),
+            created: "now".to_string(),
+            model: "mock".to_string(),
+            mock: true,
+            steps: vec![],
+        }
+    }
+
+    #[test]
+    fn numeric_index_is_preserved() {
+        let runs = vec![rec("a", "Alpha"), rec("b", "Beta"), rec("c", "Gamma")];
+        assert_eq!(super::resolve_task_id("1", &runs).unwrap(), 1);
+    }
+
+    #[test]
+    fn unique_slug_matches_title() {
+        let runs = vec![rec("a", "Alpha Project"), rec("b", "Beta")];
+        assert_eq!(super::resolve_task_id("alpha-project", &runs).unwrap(), 0);
+    }
+
+    #[test]
+    fn duplicate_title_matches_error() {
+        let runs = vec![rec("a", "Same Title"), rec("b", "Same Title")];
+        let err = super::resolve_task_id("same-title", &runs).unwrap_err();
+        assert!(err.contains("匹配到多个任务"));
+        assert!(err.contains("Same Title"));
+    }
+
+    #[test]
+    fn no_match_returns_error() {
+        let runs = vec![rec("a", "Alpha")];
+        let err = super::resolve_task_id("no-such-task", &runs).unwrap_err();
+        assert!(err.contains("未找到任务"));
     }
 }

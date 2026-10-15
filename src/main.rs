@@ -501,8 +501,11 @@ fn cmd_list(cfg: Config, since: Option<&str>) -> Result<()> {
 }
 
 fn cmd_show(cfg: Config, id: &str) -> Result<()> {
-    let resolved_id = utils::resolve_task_id(&cfg.workspace_dir, id)?;
-    let ws = Workspace::open(&cfg.workspace_dir, &resolved_id)?;
+    let runs = Workspace::root(&cfg.workspace_dir);
+    let idx = workspace::resolve_task_id(id, &runs)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let rec = runs.get(idx).ok_or_else(|| anyhow::anyhow!("任务 {} 不存在", id))?;
+    let ws = Workspace::open(&cfg.workspace_dir, &rec.id)?;
     let rec = ws.load_record()?;
     println!("# 任务 {}\n\n目标: {}\n模型: {}\n时间: {}\n\n## 步骤\n", rec.id, rec.goal, rec.model, rec.created);
     for s in &rec.steps {
