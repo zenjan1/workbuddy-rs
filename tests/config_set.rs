@@ -379,3 +379,56 @@ fn config_set_updates_string_integer_and_boolean_and_can_be_reloaded() {
     assert!(raw.contains("timeout = 30"), "timeout changed: {}", raw);
     assert!(raw.contains("https://example.com/v1"), "base_url changed: {}", raw);
 }
+
+#[test]
+fn config_set_read_write_consistency_for_supported_types() {
+    let ws = TestWorkspace::new();
+
+    fs::write(
+        ws.config_path(),
+        r#"model = "default-model"
+max_budget = 5000
+timeout = 30
+stream = true
+
+[llm]
+model = "default-llm"
+max_budget = 7000
+base_url = "https://example.com/v1"
+temperature = 0.7
+"#,
+    )
+    .expect("failed to write custom initial config");
+
+    set_config_value(&ws.config_path(), "stream", "false").expect("set stream");
+    set_config_value(&ws.config_path(), "max_budget", "12000").expect("set max_budget");
+    set_config_value(&ws.config_path(), "llm.temperature", "0.9").expect("set llm.temperature");
+    set_config_value(&ws.config_path(), "model", "gpt-4o").expect("set model");
+
+    assert_eq!(
+        get_config_value(&ws.config_path(), "stream").expect("get stream"),
+        "false",
+        "boolean value readback mismatch"
+    );
+    assert_eq!(
+        get_config_value(&ws.config_path(), "max_budget").expect("get max_budget"),
+        "12000",
+        "integer value readback mismatch"
+    );
+    assert_eq!(
+        get_config_value(&ws.config_path(), "llm.temperature").expect("get llm.temperature"),
+        "0.9",
+        "float value readback mismatch"
+    );
+    assert_eq!(
+        get_config_value(&ws.config_path(), "model").expect("get model"),
+        "gpt-4o",
+        "string value readback mismatch"
+    );
+
+    let raw = read_config(&ws);
+    assert!(raw.contains("stream = false"), "boolean not persisted: {}", raw);
+    assert!(raw.contains("max_budget = 12000"), "integer not persisted: {}", raw);
+    assert!(raw.contains("temperature = 0.9"), "float not persisted: {}", raw);
+    assert!(raw.contains("model = \"gpt-4o\""), "string not persisted: {}", raw);
+}

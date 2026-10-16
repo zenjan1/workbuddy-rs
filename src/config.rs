@@ -233,6 +233,14 @@ impl Config {
         self.set_value_with_summary(key, value).map(|_| ())
     }
 
+    /// `config set <key> <value>` 的入口方法。
+    ///
+    /// 该方法复用 [`set_value_with_summary`] 的完整校验和原子写入逻辑：
+    /// 先校验 key/value，再写回配置文件，最后更新内存中的配置。
+    pub fn config_set(&mut self, key: &str, value: &str) -> Result<ConfigUpdateSummary> {
+        self.set_value_with_summary(key, value)
+    }
+
     /// 更新单个配置项并返回生效摘要。
     ///
     /// 该方法先校验键名和值类型，再原子写回配置文件，最后更新内存配置。
@@ -674,8 +682,19 @@ fn set_toml_edit_table(
 
 fn parse_config_set_value(key: &str, raw: &str) -> Result<toml_edit::Item> {
     match key {
-        "max_budget" | "budget.max_budget" | "llm.max_budget" | "price" | "cost_per_1k_tokens" | "cost.input_per_1k" => {
-            let n: f64 = raw
+        "max_budget" | "budget.max_budget" | "llm.max_budget" | "llm.temperature" | "price" | "cost_per_1k_tokens" | "cost.input_per_1k" => {
+            let trimmed = raw.trim();
+            if let Ok(i) = trimmed.parse::<i64>() {
+                match key {
+                    "max_budget" | "budget.max_budget" | "llm.max_budget" if i < 0 => anyhow::bail!("max_budget 必须为非负数"),
+                    "price" | "cost_per_1k_tokens" | "cost.input_per_1k" if i < 0 => {
+                        anyhow::bail!("{key} 不能为负数")
+                    }
+                    _ => {}
+                }
+                return Ok(toml_edit::value(i));
+            }
+            let n: f64 = trimmed
                 .parse()
                 .with_context(|| format!("{key} 需要是数字"))?;
             if !n.is_finite() {

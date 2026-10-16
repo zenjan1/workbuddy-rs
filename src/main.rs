@@ -373,7 +373,9 @@ async fn main() -> Result<()> {
 
                     let config_path = config::find_config_path()?;
                     if let Err(e) = config::set_config(&config_path, &key, &value) {
-                        anyhow::bail!("设置配置 {} 失败: {}", key, e);
+                        eprintln!("设置配置 {} 失败：{}", key, e);
+                        eprintln!("提示：配置键可能不存在或值类型无效，现有配置未修改。");
+                        return Ok(());
                     }
 
                     let cfg = Config::load()?;
