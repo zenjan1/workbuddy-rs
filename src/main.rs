@@ -184,6 +184,9 @@ enum Cmd {
         /// backlog 耗尽时自动生成新任务(每轮 N 个),支撑长期运行
         #[arg(long)]
         extend: Option<usize>,
+        /// 可选:仅运行指定任务（数字索引或标题/前缀）
+        #[arg(long)]
+        task: Option<String>,
         /// 使用 Mock LLM(离线演练)
         #[arg(long)]
         mock: bool,
@@ -403,6 +406,7 @@ async fn main() -> Result<()> {
             minutes,
             repo,
             extend,
+            task,
             mock,
         } => {
             if let Some(r) = repo {
@@ -422,6 +426,7 @@ async fn main() -> Result<()> {
                 llm,
                 cfg.clone(),
                 dev::DevOptions {
+                    task: task.clone(),
                     backlog_path,
                     verify,
                     max_tasks: tasks,

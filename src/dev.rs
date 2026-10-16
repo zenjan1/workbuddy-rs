@@ -416,6 +416,8 @@ pub struct DevOptions {
     pub max_minutes: Option<u64>,
     /// backlog 耗尽时自动生成 N 个新任务(可重复补给,直到达到该上限),支撑长期运行
     pub extend: Option<usize>,
+    /// 可选:只运行指定任务(数字索引或标题/前缀)
+    pub task: Option<String>,
 }
 
 pub struct DevReport {
@@ -447,6 +449,41 @@ pub async fn run_dev_loop(
             true
         }
     });
+
+    // 若用户通过 --task 指定了任务(数字索引或标题/前缀),先解析为目标任务。
+    // 再将 TaskId 转换为 backlog 索引。
+    let selected_task: Option<crate::task_id::TaskId> = if let Some(ref input) = opts.task {
+        let titles: Vec<String> = backlog.iter().map(|t| t.title.clone()).collect();
+        match crate::task_id::resolve_task_id(input, &titles) {
+            Ok(id) => Some(id),
+            Err(e) => bail!("无法解析任务 '{}': {}", input, e),
+        }
+    } else {
+        None
+    };
+    let selected_idx: Option<usize> = match selected_task {
+        Some(crate::task_id::TaskId::Numeric(n)) => {
+            if n < backlog.len() {
+                Some(n)
+            } else {
+                bail!("指定任务索引 {} 超出范围 (共 {} 项)", n, backlog.len())
+            }
+        }
+        Some(crate::task_id::TaskId::Slug(slug)) => {
+            let matches: Vec<usize> = backlog
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| crate::task_id::TaskId::slugify(&t.title) == slug)
+                .map(|(i, _)| i)
+                .collect();
+            match matches.len() {
+                1 => Some(matches[0]),
+                0 => bail!("任务 '{}' 未在 backlog 中找到", slug),
+                _ => bail!("任务 '{}' 匹配多个条目, 请使用数字索引", slug),
+            }
+        }
+        None => None,
+    };
 
     eprintln!(
         "[dev] 仓库: {} | backlog {} 项 | 已完成 {} | 预算: 任务 {} 分钟数 {}",
@@ -529,13 +566,21 @@ pub async fn run_dev_loop(
                 break;
             }
         }
-        // 取下一个未完成任务(按 priority 降序,原顺序稳定)
-        let next = backlog
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| !done_set.contains(task_ids[*i].as_str()))
-            .max_by_key(|(i, t)| (t.priority, -(*i as i32)))
-            .map(|(i, t)| (i, t));
+        // 取下一个未完成任务(按 priority 降序,原顺序稳定);若指定了任务则只取该任务
+        let next = if let Some(idx) = selected_idx {
+            if done_set.contains(task_ids[idx].as_str()) {
+                eprintln!("[dev] 指定任务已完成,停止");
+                break;
+            }
+            backlog.get(idx).map(|t| (idx, t))
+        } else {
+            backlog
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !done_set.contains(task_ids[*i].as_str()))
+                .max_by_key(|(i, t)| (t.priority, -(*i as i32)))
+                .map(|(i, t)| (i, t))
+        };
         let Some((i, task)) = next else {
             // backlog 耗尽:开启 --extend 时自动补给新任务,支撑长期运行
             let Some(per_round) = opts.extend else {
@@ -877,6 +922,7 @@ mod tests {
             llm,
             cfg,
             DevOptions {
+                task: None,
                 backlog_path: dir.join(".workbuddy/backlog.json"),
                 verify: Some("echo verify-ok".into()),
                 max_tasks: Some(2),

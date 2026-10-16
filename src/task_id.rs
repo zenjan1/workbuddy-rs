@@ -398,6 +398,15 @@ mod tests {
     }
 
     #[test]
+    fn resolve_unique_title_prefix_returns_task_id() {
+        let titles = ["my feature", "my bug"];
+        assert_eq!(
+            resolve_task_id("my feat", titles),
+            Ok(TaskId::Slug("my-feature".to_string()))
+        );
+    }
+
+    #[test]
     fn resolve_missing_title_returns_not_found() {
         let titles = ["Write docs", "Fix bug"];
         assert!(matches!(

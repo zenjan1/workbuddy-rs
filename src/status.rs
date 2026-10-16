@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use serde::Deserialize;
 
+use crate::dev::load_backlog;
 use crate::workspace::RunRecord;
 use crate::task_id::TaskId;
 
@@ -120,6 +121,21 @@ pub fn run(workspace_dir: &Path) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+pub fn show(workspace_dir: &Path, task_ref: &str) -> anyhow::Result<()> {
+    let tasks = load_backlog(workspace_dir)?;
+    let titles: Vec<String> = tasks.iter().map(|t| t.title.clone()).collect();
+    match crate::task_id::resolve_task_id(task_ref, &titles) {
+        Ok(task_id) => {
+            println!("{}", task_id);
+            Ok(())
+        }
+        Err(err) => {
+            eprintln!("workbuddy show: 无法识别任务: {}", err);
+            Ok(())
+        }
+    }
 }
 
 pub fn parse_status(workspace_dir: &Path) -> anyhow::Result<StatusSummary> {
