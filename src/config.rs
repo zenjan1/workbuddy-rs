@@ -1635,3 +1635,28 @@ mod config_set_tests {
         assert_eq!(temp_count, 0, "临时文件应被清理");
     }
 }
+
+/// 公开的最小化配置更新入口。
+/// 仅更新已存在的键，保留注释、空行和其他配置项。
+/// 对无效键、不存在的键或值类型不匹配返回明确错误，且不修改文件。
+pub fn set_config(path: &Path, key: &str, value: &str) -> Result<()> {
+    if !path.exists() {
+        anyhow::bail!("配置文件不存在: {}", path.display());
+    }
+
+    let normalized_key = normalize_config_key(key)?;
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("读取配置文件失败: {}", path.display()))?;
+    let doc = text
+        .parse::<toml_edit::DocumentMut>()
+        .with_context(|| format!("解析配置文件失败: {}", path.display()))?;
+
+    if !doc.as_table().contains_key(normalized_key) {
+        anyhow::bail!(
+            "配置键不存在: {key}; 可用键: {} 或别名: llm.api_base, llm.base_url, llm.model, llm.price_per_1k_tokens, llm.timeout",
+            CONFIG_KEYS.join(", ")
+        );
+    }
+
+    set_config_value_file(path, key, value)
+}

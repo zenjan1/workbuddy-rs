@@ -289,7 +289,7 @@ async fn main() -> Result<()> {
                 }
 
                 let config_path = find_config_path()?;
-                config::set_config_value(&config_path, &key, &value)
+                config::set_config(&config_path, &key, &value)
                     .map_err(|e| anyhow::anyhow!("设置配置 {} 失败: {}", key, e))?;
 
                 let cfg = Config::load()?;
@@ -562,7 +562,7 @@ nested = "keep"
 "#,
         );
 
-        crate::config::set_config_value(&path, "timeout", "45").unwrap();
+        crate::config::set_config(&path, "timeout", "45").unwrap();
 
         let contents = read_config(&path);
         assert!(contents.contains("timeout = 45"), "timeout should be updated: {contents}");
@@ -590,7 +590,7 @@ timeout = 30
         );
         let before = read_config(&path);
 
-        let result = crate::config::set_config_value(&path, "timeout", "not-a-number");
+        let result = crate::config::set_config(&path, "timeout", "not-a-number");
 
         assert!(result.is_err(), "invalid timeout value should be rejected");
         let after = read_config(&path);
@@ -610,7 +610,7 @@ timeout = 30
         );
         let before = read_config(&path);
 
-        let result = crate::config::set_config_value(&path, "no_such_key", "x");
+        let result = crate::config::set_config(&path, "no_such_key", "x");
 
         assert!(result.is_err(), "unknown config key should be rejected");
         let after = read_config(&path);

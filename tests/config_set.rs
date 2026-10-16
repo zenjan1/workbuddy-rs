@@ -88,6 +88,8 @@ fn config_set_rejects_unknown_keys() {
     let ws = TestWorkspace::new();
     ws.write_initial_config();
 
+    let original = read_config(&ws);
+
     let result = set_config_value(&ws.config_path(), "llm.unknown_key", "value");
     assert!(
         result.is_err(),
@@ -95,6 +97,11 @@ fn config_set_rejects_unknown_keys() {
     );
 
     let raw = read_config(&ws);
+    assert_eq!(
+        raw, original,
+        "config file changed after rejected key update: {}",
+        raw
+    );
     assert!(
         raw.contains("model = \"default-model\"") && raw.contains("max_budget = 5000"),
         "config was modified after rejected key update: {}",
@@ -112,6 +119,8 @@ fn config_set_rejects_invalid_types() {
     let ws = TestWorkspace::new();
     ws.write_initial_config();
 
+    let original = read_config(&ws);
+
     let result = set_config_value(&ws.config_path(), "max_budget", "not-a-number");
     assert!(
         result.is_err(),
@@ -119,6 +128,11 @@ fn config_set_rejects_invalid_types() {
     );
 
     let raw = read_config(&ws);
+    assert_eq!(
+        raw, original,
+        "config file changed after rejected type update: {}",
+        raw
+    );
     assert!(
         raw.contains("max_budget = 5000"),
         "config was modified after rejected type update: {}",
