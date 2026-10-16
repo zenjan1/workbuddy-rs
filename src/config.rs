@@ -287,11 +287,6 @@ impl Config {
         Ok(())
     }
 
-    pub fn set_config_value(key: &str, value: &str) -> Result<()> {
-        Self::validate_config_key(key)?;
-        let path = Self::config_file_path();
-        Self::update_config_file(&path, key, value)
-    }
 
     /// 判断配置键是否允许通过 `config set` 写入。
     pub fn is_known_config_key(key: &str) -> bool {
@@ -470,7 +465,7 @@ fn validate_url_value(key: &str, raw: &str) -> Result<()> {
     Ok(())
 }
 
-/// 公开的配置更新入口，支持点号路径别名。
+/// 公开的配置更新入口，保留旧名称以兼容已有调用方。
 pub fn update_config_value(path: &Path, key: &str, value: &str) -> Result<()> {
     set_config_value_file(path, key, value)
 }
