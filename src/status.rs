@@ -1009,3 +1009,127 @@ mod cost_display_tests {
         fs::remove_dir_all(&path).unwrap();
     }
 }
+
+#[cfg(test)]
+mod status_presentation_tests {
+    use crate::status::{format_status, parse_status};
+    use crate::workspace::{RunRecord, StepRecord};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    fn step(id: usize, ok: bool, preview: &str) -> StepRecord {
+        StepRecord {
+            id,
+            name: "step".to_string(),
+            agent: "agent".to_string(),
+            skill: "skill".to_string(),
+            kind: "kind".to_string(),
+            ok,
+            error: if ok { None } else { Some("boom".to_string()) },
+            seconds: 0.0,
+            output_preview: preview.to_string(),
+        }
+    }
+
+    fn run(id: &str, steps: Vec<StepRecord>) -> RunRecord {
+        RunRecord {
+            id: id.to_string(),
+            goal: "goal".to_string(),
+            created: "2024-01-01T00:00:00Z".to_string(),
+            model: "model".to_string(),
+            mock: false,
+            steps,
+            token_usage: None,
+            char_usage: None,
+        }
+    }
+
+    fn write_run(dir: &Path, name: &str, record: &RunRecord) {
+        let path = dir.join(name);
+        fs::write(path, serde_json::to_string_pretty(record).unwrap()).unwrap();
+    }
+
+    fn temp_workspace(name: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "workbuddy_status_extra_{}_{}",
+            name,
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(path.join("runs")).unwrap();
+        path
+    }
+
+    #[test]
+    fn no_history_renders_no_history_and_none_logs() {
+        let ws = temp_workspace("no-history");
+        let summary = parse_status(&ws).unwrap();
+        assert!(!summary.supervisor_running);
+        assert_eq!(summary.completed_runs, 0);
+        assert_eq!(summary.failed_runs, 0);
+        assert!(summary.recent_logs.is_empty());
+
+        let rendered = format_status(&summary);
+        assert!(rendered.contains("Supervisor: stopped"));
+        assert!(rendered.contains("Last run: 0 completed, 0 failed"));
+        assert!(rendered.contains("No run history."));
+        assert!(rendered.contains("Recent logs: (none)"));
+
+        fs::remove_dir_all(&ws).unwrap();
+    }
+
+    #[test]
+    fn running_status_without_pid_renders_running_only() {
+        let ws = temp_workspace("running-no-pid");
+        fs::write(
+            ws.join("status.json"),
+            serde_json::to_string(&serde_json::json!({
+                "supervisor_running": true
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let summary = parse_status(&ws).unwrap();
+        assert!(summary.supervisor_running);
+        assert_eq!(summary.pid, None);
+
+        let rendered = format_status(&summary);
+        assert!(rendered.contains("Supervisor: running"));
+        assert!(!rendered.contains("pid"));
+
+        fs::remove_dir_all(&ws).unwrap();
+    }
+
+    #[test]
+    fn fewer_than_five_logs_are_all_rendered() {
+        let ws = temp_workspace("few-logs");
+        write_run(
+            &ws.join("runs"),
+            "run-a.json",
+            &run("run-a", vec![step(1, true, "ok a")]),
+        );
+        write_run(
+            &ws.join("runs"),
+            "run-b.json",
+            &run("run-b", vec![step(1, false, "bad b")]),
+        );
+
+        let summary = parse_status(&ws).unwrap();
+        assert_eq!(summary.completed_runs, 1);
+        assert_eq!(summary.failed_runs, 1);
+        assert_eq!(summary.recent_logs.len(), 2);
+
+        let rendered = format_status(&summary);
+        let log_lines = rendered
+            .lines()
+            .filter(|line| line.starts_with("  - "))
+            .count();
+        assert_eq!(log_lines, 2);
+        assert!(rendered.contains("run-a"));
+        assert!(rendered.contains("run-b"));
+
+        fs::remove_dir_all(&ws).unwrap();
+    }
+}
