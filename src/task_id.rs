@@ -108,7 +108,7 @@ impl fmt::Display for TaskIdError {
         match self {
             TaskIdError::NotFound { query } => write!(f, "task id '{}' not found", query),
             TaskIdError::Ambiguous { query, matches } => {
-                write!(f, "task id '{}' is ambiguous; matches: {}", query, matches.join(", "))
+                write!(f, "task id '{}' is ambiguous; matches: {}; use numeric index to disambiguate", query, matches.join(", "))
             }
             TaskIdError::DuplicateTitle { query, title } => {
                 write!(
@@ -170,6 +170,7 @@ where
         .collect();
 
     let query = normalize_title(raw);
+    let query_slug = TaskId::slugify(raw);
     if query.is_empty() {
         return Err(TaskIdError::NotFound {
             query: raw.to_string(),
@@ -179,7 +180,9 @@ where
     // 非数字输入：优先精确匹配标题（忽略大小写与首尾空格）。
     let mut exact_matches = Vec::new();
     for (index, title) in title_list.iter().enumerate() {
-        if normalize_title(title) == query {
+        let normalized_title = normalize_title(title);
+        let title_slug = TaskId::slugify(title);
+        if normalized_title == query || (!query_slug.is_empty() && title_slug == query_slug) {
             exact_matches.push((index, title.clone()));
         }
     }
@@ -197,16 +200,11 @@ where
     let mut fuzzy_matches: Vec<(usize, String)> = Vec::new();
     for (index, title) in title_list.iter().enumerate() {
         let normalized_title = normalize_title(title);
-        if normalized_title.starts_with(&query) {
+        let title_slug = TaskId::slugify(title);
+        if normalized_title.starts_with(&query)
+            || (!query_slug.is_empty() && title_slug.starts_with(&query_slug))
+        {
             fuzzy_matches.push((index, title.clone()));
-        }
-    }
-    if fuzzy_matches.is_empty() && !query_slug.is_empty() {
-        for (index, title) in title_list.iter().enumerate() {
-            let title_slug = TaskId::slugify(title);
-            if title_slug.starts_with(&query_slug) {
-                fuzzy_matches.push((index, title.clone()));
-            }
         }
     }
 
@@ -338,6 +336,20 @@ mod tests {
         assert_eq!(resolve_task_id("Hello World", titles), Ok(TaskId::Numeric(1)));
         assert_eq!(resolve_task_id("hello   world", titles), Ok(TaskId::Numeric(1)));
         assert_eq!(resolve_task_id("HELLO WORLD", titles), Ok(TaskId::Numeric(1)));
+    }
+
+    #[test]
+    fn resolve_slug_form_matches_title() {
+        let titles = ["Write docs", "Fix login bug", "Hello, World!"];
+        assert_eq!(resolve_task_id("hello-world", titles), Ok(TaskId::Numeric(2)));
+        assert_eq!(resolve_task_id("fix-login-bug", titles), Ok(TaskId::Numeric(1)));
+    }
+
+    #[test]
+    fn resolve_ambiguous_error_prompts_numeric_index() {
+        let titles = ["Setup server", "Setup client"];
+        let err = resolve_task_id("setup", titles).unwrap_err();
+        assert!(err.to_string().contains("numeric index"));
     }
 
 

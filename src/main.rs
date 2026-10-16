@@ -184,9 +184,15 @@ enum Cmd {
     /// 一键健康自检:依次运行 cargo test 与 cargo clippy
     Selfcheck,
     /// 安全撤销上次 dev 提交:仅当最近提交以 `feat(dev):` 开头时执行 reset --hard
-    Undo,
+    Undo {
+        /// 可选：任务标识符（数字索引、标题或 slug）
+        id: Option<String>,
+    },
     /// 查看 workspace 运行状态(只读)
-    Status,
+    Status {
+        /// 可选：任务标识符（数字索引、标题或 slug）
+        id: Option<String>,
+    },
     /// 启动 TUI 界面查看 backlog(只读)
     Tui,
     /// 启动只读 HTTP 服务
@@ -266,14 +272,62 @@ async fn main() -> Result<()> {
         }
         Cmd::List { since, id } => {
             if let Some(id) = id {
-                let run_id = resolve_run_id(&cfg, &id)?;
+                let runs = Workspace::root(&cfg.workspace_dir);
+                let run_id = match crate::task_id::resolve_task_id(
+                    &id,
+                    runs.iter().map(|r: &RunRecord| r.goal.as_str()),
+                ) {
+                    Ok(crate::task_id::TaskId::Numeric(idx)) => {
+                        runs.get(idx)
+                            .map(|r| r.id.clone())
+                            .ok_or_else(|| anyhow::anyhow!("任务索引 {} 超出范围", idx))?
+                    }
+                    Ok(crate::task_id::TaskId::Slug(slug)) => {
+                        runs.iter()
+                            .find(|r| r.id == slug)
+                            .map(|r| r.id.clone())
+                            .ok_or_else(|| anyhow::anyhow!("未找到 slug 为 '{}' 的任务", slug))?
+                    }
+                    Err(e) => {
+                        let msg = e.to_string();
+                        if msg.contains("冲突") || msg.contains("多个匹配") {
+                            anyhow::bail!("任务标题 '{}' 存在多个匹配，请使用数字索引指定任务", id)
+                        } else {
+                            anyhow::bail!("无法解析任务引用 '{}': {}", id, e)
+                        }
+                    }
+                };
                 cmd_show(cfg, &run_id)
             } else {
                 cmd_list_with_slug(cfg, since.as_deref())
             }
         }
         Cmd::Show { id } => {
-            let run_id = resolve_run_id(&cfg, &id)?;
+            let runs = Workspace::root(&cfg.workspace_dir);
+            let run_id = match crate::task_id::resolve_task_id(
+                &id,
+                runs.iter().map(|r: &RunRecord| r.goal.as_str()),
+            ) {
+                Ok(crate::task_id::TaskId::Numeric(idx)) => {
+                    runs.get(idx)
+                        .map(|r| r.id.clone())
+                        .ok_or_else(|| anyhow::anyhow!("任务索引 {} 超出范围", idx))?
+                }
+                Ok(crate::task_id::TaskId::Slug(slug)) => {
+                    runs.iter()
+                        .find(|r| r.id == slug)
+                        .map(|r| r.id.clone())
+                        .ok_or_else(|| anyhow::anyhow!("未找到 slug 为 '{}' 的任务", slug))?
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("冲突") || msg.contains("多个匹配") {
+                        anyhow::bail!("任务标题 '{}' 存在多个匹配，请使用数字索引指定任务", id)
+                    } else {
+                        anyhow::bail!("无法解析任务引用 '{}': {}", id, e)
+                    }
+                }
+            };
             cmd_show(cfg, &run_id)
         }
         Cmd::Agents => cmd_agents(),
@@ -375,8 +429,27 @@ async fn main() -> Result<()> {
         Cmd::Memory { action } => {
             run_memory_command(action, &cfg)
         }
-        Cmd::Status => status::run(&cfg.workspace_dir)
-            .map_err(|e| anyhow::anyhow!("查看 workspace 运行状态失败: {e:#}")),
+        Cmd::Status { id } => {
+            if let Some(id) = id {
+                let runs = Workspace::root(&cfg.workspace_dir);
+                match crate::task_id::resolve_task_id(
+                    &id,
+                    runs.iter().map(|r: &RunRecord| r.goal.as_str()),
+                ) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        let msg = e.to_string();
+                        if msg.contains("冲突") || msg.contains("多个匹配") {
+                            anyhow::bail!("任务标题 '{}' 存在多个匹配，请使用数字索引指定任务", id)
+                        } else {
+                            anyhow::bail!("无法解析任务引用 '{}': {}", id, e)
+                        }
+                    }
+                }
+            }
+            status::run(&cfg.workspace_dir)
+                .map_err(|e| anyhow::anyhow!("查看 workspace 运行状态失败: {e:#}"))
+        },
         Cmd::Tui => {
             if let Err(e) = tui::run(&cfg.workspace_dir) {
                 eprintln!("启动 TUI 失败: {e:#}");
@@ -399,14 +472,33 @@ async fn main() -> Result<()> {
                     .map_err(|e| anyhow::anyhow!("启动只读 HTTP 服务失败: {e:#}"))
             }
         }
-        Cmd::Undo => match run_undo(None) {
-            Ok(short_sha) => {
-                println!("已撤销 dev 提交: {short_sha}");
-                Ok(())
+        Cmd::Undo { id } => {
+            if let Some(id) = id {
+                let runs = Workspace::root(&cfg.workspace_dir);
+                match crate::task_id::resolve_task_id(
+                    &id,
+                    runs.iter().map(|r: &RunRecord| r.goal.as_str()),
+                ) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        let msg = e.to_string();
+                        if msg.contains("冲突") || msg.contains("多个匹配") {
+                            anyhow::bail!("任务标题 '{}' 存在多个匹配，请使用数字索引指定任务", id)
+                        } else {
+                            anyhow::bail!("无法解析任务引用 '{}': {}", id, e)
+                        }
+                    }
+                }
             }
-            Err(reason) => {
-                eprintln!("拒绝撤销：{reason}");
-                Ok(())
+            match run_undo(None) {
+                Ok(short_sha) => {
+                    println!("已撤销 dev 提交: {short_sha}");
+                    Ok(())
+                }
+                Err(reason) => {
+                    eprintln!("拒绝撤销：{reason}");
+                    Ok(())
+                }
             }
         },
         Cmd::RoadmapAdvance => {
@@ -461,7 +553,7 @@ mod status_cmd_tests {
     fn cli_parses_status() {
         let cli = Cli::try_parse_from(["workbuddy", "status"]).expect("parse status");
         match cli.cmd {
-            Cmd::Status => {}
+            Cmd::Status { id: None } => {}
             _ => panic!("expected status command"),
         }
     }
