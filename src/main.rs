@@ -479,7 +479,7 @@ async fn main() -> Result<()> {
         }
         Cmd::Serve { data_dir, addr, port, readonly } => {
             let workspace_dir = data_dir.unwrap_or_else(|| cfg.workspace_dir.clone());
-            if readonly || port == 0 {
+            if readonly {
                 let actual_addr = serve::serve_readonly(&workspace_dir)
                     .map_err(|e| anyhow::anyhow!("启动只读 HTTP 服务失败: {e:#}"))?;
                 println!("只读 HTTP 服务已启动: http://{actual_addr}");
@@ -607,6 +607,16 @@ mod serve_cmd_tests {
         match cli.cmd {
             Cmd::Serve { port, .. } => assert_eq!(port, 9090),
             _ => panic!("expected serve command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_serve_readonly_flag() {
+        let cli = Cli::try_parse_from(["workbuddy", "serve", "--readonly"])
+            .expect("parse serve readonly");
+        match cli.cmd {
+            Cmd::Serve { readonly: true, .. } => {}
+            _ => panic!("expected serve command with readonly flag"),
         }
     }
 }
