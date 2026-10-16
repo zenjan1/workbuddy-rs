@@ -1,4 +1,5 @@
-use std::net::SocketAddr;
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -128,6 +129,141 @@ async fn get_run(
         )
     })?;
     Ok(Json(run))
+}
+
+fn readonly_http_response(status_code: u16, reason: &str, body: &str) -> String {
+    format!(
+        "HTTP/1.1 {status_code} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+fn readonly_route(workspace_dir: &Path, path: &str) -> (u16, &'static str, String) {
+    if path == "health" {
+        return (200, "OK", json!({ "status": "ok" }).to_string());
+    }
+
+    if path == "runs" {
+        let all_runs = Workspace::root(workspace_dir);
+        match runs_to_json(&all_runs) {
+            Ok(body) => return (200, "OK", body),
+            Err(e) => {
+                return (
+                    500,
+                    "Internal Server Error",
+                    json!({ "error": format!("failed to serialize runs: {e}") }).to_string(),
+                )
+            }
+        }
+    }
+
+    if let Some(rest) = path.strip_prefix("runs/") {
+        if rest.is_empty() || rest.contains('/') {
+            return (404, "Not Found", json!({ "error": "not found" }).to_string());
+        }
+        let ws = match Workspace::open(workspace_dir, rest) {
+            Ok(ws) => ws,
+            Err(_) => {
+                return (
+                    404,
+                    "Not Found",
+                    json!({ "error": format!("run {rest} not found") }).to_string(),
+                )
+            }
+        };
+        match ws.load_record() {
+            Ok(run) => match run_to_json(&run) {
+                Ok(body) => return (200, "OK", body),
+                Err(e) => {
+                    return (
+                        500,
+                        "Internal Server Error",
+                        json!({ "error": format!("failed to serialize run {rest}: {e}") }).to_string(),
+                    )
+                }
+            },
+            Err(e) => {
+                return (
+                    500,
+                    "Internal Server Error",
+                    json!({ "error": format!("failed to load run {rest}: {e}") }).to_string(),
+                )
+            }
+        }
+    }
+
+    (404, "Not Found", json!({ "error": "not found" }).to_string())
+}
+
+fn handle_readonly_connection(stream: &mut TcpStream, workspace_dir: &Path) -> std::io::Result<()> {
+    let mut buffer = Vec::new();
+    let mut tmp = [0u8; 1024];
+    loop {
+        let n = stream.read(&mut tmp)?;
+        if n == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&tmp[..n]);
+        if buffer.windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
+    }
+
+    if buffer.is_empty() {
+        return Ok(());
+    }
+
+    let request = String::from_utf8_lossy(&buffer);
+    let mut lines = request.split("\r\n");
+    let request_line = lines.next().unwrap_or("");
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or("");
+    let target = parts.next().unwrap_or("");
+
+    if method != "GET" {
+        let body = json!({ "error": "method not allowed" }).to_string();
+        let response = readonly_http_response(405, "Method Not Allowed", &body);
+        stream.write_all(response.as_bytes())?;
+        return Ok(());
+    }
+
+    let path = target.split('?').next().unwrap_or(target);
+    let path = path.trim_start_matches('/');
+    let (status_code, reason, body) = readonly_route(workspace_dir, path);
+    let response = readonly_http_response(status_code, reason, &body);
+    stream.write_all(response.as_bytes())?;
+    Ok(())
+}
+
+impl AsRef<Path> for Workspace {
+    fn as_ref(&self) -> &Path {
+        self.dir.as_path()
+    }
+}
+
+pub fn serve_readonly<P: AsRef<Path>>(workspace_dir: P) -> Result<SocketAddr> {
+    let workspace_dir = workspace_dir.as_ref();
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    let local_addr = listener.local_addr()?;
+    let dir = workspace_dir.to_path_buf();
+
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            match stream {
+                Ok(mut stream) => {
+                    if let Err(e) = handle_readonly_connection(&mut stream, &dir) {
+                        eprintln!("readonly connection error: {e}");
+                    }
+                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                }
+                Err(e) => {
+                    eprintln!("readonly accept error: {e}");
+                }
+            }
+        }
+    });
+
+    Ok(local_addr)
 }
 
 pub async fn serve_with_dir(workspace_dir: &Path, bind_addr: SocketAddr) -> anyhow::Result<SocketAddr> {
@@ -342,5 +478,51 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let json: Value = serde_json::from_slice(&body).unwrap();
         assert!(json["error"].as_str().unwrap().contains("not found"));
+    }
+
+    #[test]
+    fn serve_readonly_health_and_runs() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+
+        let (workspace_dir, run_id) = create_test_workspace();
+        let addr = serve_readonly(&workspace_dir).unwrap();
+
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response.contains("Content-Type: application/json"));
+        let body = response.split("\r\n\r\n").nth(1).unwrap();
+        let json: Value = serde_json::from_str(body).unwrap();
+        assert_eq!(json["status"], "ok");
+
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .write_all(b"GET /runs HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        let body = response.split("\r\n\r\n").nth(1).unwrap();
+        let json: Value = serde_json::from_str(body).unwrap();
+        assert!(json.is_array());
+        assert_eq!(json.as_array().unwrap().len(), 1);
+        assert_eq!(json[0]["id"].as_str(), Some(run_id.as_str()));
+    }
+}
+
+impl Workspace {
+    pub fn create(root: PathBuf) -> Result<Self> {
+        Workspace::create_new(&root, "serve-test-workspace")
     }
 }

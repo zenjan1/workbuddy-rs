@@ -195,6 +195,9 @@ enum Cmd {
         /// 监听端口（默认 8080）
         #[arg(short, long, default_value = "8080")]
         port: u16,
+        /// 只读模式：使用随机端口 127.0.0.1:0，输出实际端口
+        #[arg(long)]
+        readonly: bool,
     },
     /// 持久记忆:add/list/get
     Memory {
@@ -347,12 +350,19 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Serve { addr, port } => {
-            let bind_addr = std::net::SocketAddr::new(addr, port);
-            println!("只读 HTTP 服务已启动: http://{bind_addr}");
-            serve::run(&cfg.workspace_dir, bind_addr)
-                .await
-                .map_err(|e| anyhow::anyhow!("启动只读 HTTP 服务失败: {e:#}"))
+        Cmd::Serve { addr, port, readonly } => {
+            if readonly {
+                let actual_addr = serve::serve_readonly(&cfg.workspace_dir)
+                    .map_err(|e| anyhow::anyhow!("启动只读 HTTP 服务失败: {e:#}"))?;
+                println!("只读 HTTP 服务已启动: http://{actual_addr}");
+                Ok(())
+            } else {
+                let bind_addr = std::net::SocketAddr::new(addr, port);
+                println!("只读 HTTP 服务已启动: http://{bind_addr}");
+                serve::run(&cfg.workspace_dir, bind_addr)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("启动只读 HTTP 服务失败: {e:#}"))
+            }
         }
         Cmd::Undo => match run_undo(None) {
             Ok(short_sha) => {
