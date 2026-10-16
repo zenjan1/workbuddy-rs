@@ -481,6 +481,63 @@ mod tests {
         fs::remove_dir_all(&workspace).unwrap();
     }
 
+    #[test]
+    fn history_entries_from_run_formats_success_and_failure_logs_with_usage() {
+        let success_record = run_record(
+            "run-success",
+            vec![step(1, "plan", true, None, "planned")],
+        );
+        let success_raw = serde_json::json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "total_tokens": 150,
+            "char_usage": 200
+        });
+        let success_entries =
+            history_entries_from_run(&success_record, &success_raw, Some(0.02));
+        assert_eq!(success_entries.len(), 1);
+        assert!(success_entries[0].success);
+        let success_log = &success_entries[0].log;
+        assert!(success_log.contains("completed"));
+        assert!(success_log.contains("prompt_tokens: 100"));
+        assert!(success_log.contains("completion_tokens: 50"));
+        assert!(success_log.contains("total_tokens: 150"));
+        assert!(success_log.contains("chars: 200"));
+        assert!(success_log.contains("estimated cost: $0.0030")); // 0.02 * 150/1000 = 0.003
+
+        let failure_record = run_record(
+            "run-failure",
+            vec![
+                step(1, "plan", true, None, "planned"),
+                step(2, "build", false, Some("boom"), "build failed"),
+            ],
+        );
+        let failure_raw = serde_json::json!({});
+        let failure_entries =
+            history_entries_from_run(&failure_record, &failure_raw, None);
+        assert_eq!(failure_entries.len(), 1);
+        assert!(!failure_entries[0].success);
+        let failure_log = &failure_entries[0].log;
+        assert!(failure_log.contains("failed"));
+        assert!(failure_log.contains("boom"));
+    }
+
+    #[test]
+    fn from_history_with_limit_counts_and_limits_logs() {
+        let history: Vec<HistoryEntry> = (1..=10)
+            .map(|i| HistoryEntry {
+                success: i % 2 == 0,
+                log: format!("log-{}", i),
+            })
+            .collect();
+        let summary = StatusSummary::from_history_with_limit(&history, 3);
+        assert_eq!(summary.completed_runs, 5); // even numbers: 2,4,6,8,10
+        assert_eq!(summary.failed_runs, 5);
+        assert_eq!(summary.recent_logs, vec!["log-10", "log-9", "log-8"]);
+        assert!(!summary.supervisor_running);
+        assert_eq!(summary.pid, None);
+    }
+
     fn test_workspace(name: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
         let unique = format!(

@@ -439,6 +439,20 @@ fn run_memory_command(action: MemoryAction, cfg: &Config) -> Result<()> {
 }
 
 #[cfg(test)]
+mod status_cmd_tests {
+    use super::*;
+
+    #[test]
+    fn cli_parses_status() {
+        let cli = Cli::try_parse_from(["workbuddy", "status"]).expect("parse status");
+        match cli.cmd {
+            Cmd::Status => {}
+            _ => panic!("expected status command"),
+        }
+    }
+}
+
+#[cfg(test)]
 mod memory_cmd_tests {
     use super::*;
     use clap::error::ErrorKind;
