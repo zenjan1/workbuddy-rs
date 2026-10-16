@@ -125,7 +125,10 @@ impl fmt::Display for TaskIdError {
 impl std::error::Error for TaskIdError {}
 
 fn normalize_title(title: &str) -> String {
-    title.trim().to_lowercase()
+    title.chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_lowercase()
 }
 
 fn duplicate_or_ambiguous(query: &str, matches: Vec<(usize, String)>) -> TaskIdError {
@@ -327,6 +330,14 @@ mod tests {
             resolve_task_id("Write docs", &titles),
             Err(TaskIdError::DuplicateTitle { .. })
         ));
+    }
+
+    #[test]
+    fn resolve_title_ignores_internal_spaces() {
+        let titles = ["Write docs", "Hello   World"];
+        assert_eq!(resolve_task_id("Hello World", titles), Ok(TaskId::Numeric(1)));
+        assert_eq!(resolve_task_id("hello   world", titles), Ok(TaskId::Numeric(1)));
+        assert_eq!(resolve_task_id("HELLO WORLD", titles), Ok(TaskId::Numeric(1)));
     }
 
 

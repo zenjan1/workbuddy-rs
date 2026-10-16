@@ -227,10 +227,34 @@ async fn main() -> Result<()> {
             model,
             parallel,
         } => {
-            let goal = goal.join(" ");
-            if goal.trim().is_empty() {
+            let input = goal.join(" ");
+            if input.trim().is_empty() {
                 anyhow::bail!("任务目标不能为空");
             }
+
+            // 解析输入：数字索引、标题/slug 或新任务目标
+            let runs = Workspace::root(&cfg.workspace_dir);
+            let goal = match crate::task_id::resolve_task_id(
+                &input,
+                runs.iter().map(|r: &RunRecord| r.goal.as_str()),
+            ) {
+                Ok(crate::task_id::TaskId::Numeric(idx)) => {
+                    runs.get(idx)
+                        .ok_or_else(|| anyhow::anyhow!("任务索引 {} 超出范围", idx))?
+                        .goal
+                        .clone()
+                }
+                Ok(crate::task_id::TaskId::Slug(slug)) => {
+                    runs.iter()
+                        .find(|r| r.id == slug)
+                        .ok_or_else(|| anyhow::anyhow!("未找到 slug 为 '{}' 的任务", slug))?
+                        .goal
+                        .clone()
+                }
+                Err(crate::task_id::TaskIdError::NotFound { .. }) => input,
+                Err(e) => anyhow::bail!("无法解析任务引用 '{}': {}", input, e),
+            };
+
             if let Some(m) = model {
                 cfg.model = m;
             }
