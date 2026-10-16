@@ -342,7 +342,7 @@ async fn main() -> Result<()> {
         }
         Cmd::Selfcheck => cmd_selfcheck(),
         Cmd::Memory { action } => {
-            run_memory_command_at(&cfg.workspace_dir, action)
+            run_memory_command(action)
         }
         Cmd::Status => status::run(&cfg.workspace_dir)
             .map_err(|e| anyhow::anyhow!("查看 workspace 运行状态失败: {e:#}")),
@@ -386,31 +386,36 @@ async fn main() -> Result<()> {
     }
 }
 
-fn run_memory_command_at(workspace_dir: &std::path::Path, action: MemoryAction) -> Result<()> {
+fn run_memory_command(action: MemoryAction) -> Result<()> {
+    let store = memory::MemoryStore::open_default()?;
     match action {
-        MemoryAction::Add { text, tag } => {
+        MemoryAction::Add { text, tag: _ } => {
             if text.trim().is_empty() {
                 anyhow::bail!("记忆文本不能为空");
             }
-            memory::add_memory(workspace_dir, &text, tag.as_deref().unwrap_or(""))
+            let entry = store
+                .add(&text)
                 .map_err(|e| anyhow::anyhow!("添加记忆失败: {e}"))?;
-            println!("已保存记忆");
+            println!("已保存记忆 #{}, 时间戳 {}", entry.id, entry.created_at);
         }
         MemoryAction::List { tag: _ } => {
-            let entries = memory::list_memory(workspace_dir)
-                .map_err(|e| anyhow::anyhow!("列出记忆失败: {e}"))?;
+            let entries = store.list();
             if entries.is_empty() {
                 println!("(暂无记忆)");
             } else {
                 for entry in entries {
-                    println!("{:?}", entry);
+                    println!("#{}\t{}\t{}", entry.id, entry.created_at, entry.content);
                 }
             }
         }
         MemoryAction::Get { id } => {
-            let entry = memory::get_memory(workspace_dir, &id)
-                .map_err(|e| anyhow::anyhow!("获取记忆失败: {e}"))?;
-            println!("{:?}", entry);
+            let id_num: u64 = id
+                .parse()
+                .map_err(|_| anyhow::anyhow!("记忆 ID 必须是整数: {id}"))?;
+            match store.get(id_num) {
+                Some(entry) => println!("#{}\t{}\t{}", entry.id, entry.created_at, entry.content),
+                None => anyhow::bail!("未找到记忆: {id}"),
+            }
         }
     }
     Ok(())

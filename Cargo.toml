@@ -23,7 +23,6 @@ toml = "=0.8.2"
 toml_edit = "0.22"
 ratatui = "0.29.0"
 crossterm = "0.28.1"
-tempfile = "3"
 ureq = { version = "2", features = ["tls"] }
 tiny_http = "0.12"
 ctrlc = "3"
@@ -36,3 +35,4 @@ reqwest = { version = "0.12", features = ["json"] }
 tower = "0.5"
 hyper = "1.12.0"
 http-body-util = "0.1"
+tempfile = "3"
