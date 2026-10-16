@@ -12,6 +12,7 @@ pub enum MemoryError {
     Io(std::io::Error),
     NotFound(String),
     Invalid(String),
+    Conflict(String),
     Parse(String),
 }
 
@@ -21,6 +22,7 @@ impl fmt::Display for MemoryError {
             MemoryError::Io(err) => write!(f, "memory io error: {err}"),
             MemoryError::NotFound(id) => write!(f, "memory entry not found: {id}"),
             MemoryError::Invalid(msg) => write!(f, "invalid memory entry: {msg}"),
+            MemoryError::Conflict(msg) => write!(f, "memory conflict: {msg}"),
             MemoryError::Parse(msg) => write!(f, "failed to parse memory file: {msg}"),
         }
     }
@@ -92,12 +94,8 @@ impl MemoryStore {
 
         let mut entries = self.read_entries()?;
 
-        if let Some(existing) = entries.iter_mut().find(|entry| entry.key.as_str() == key) {
-            existing.text = text.to_owned();
-            existing.tags = tags;
-            let saved = existing.clone();
-            self.write_entries(&entries)?;
-            return Ok(saved);
+        if entries.iter().any(|entry| entry.key.as_str() == key) {
+            return Err(MemoryError::Conflict(format!("duplicate key: {key}")));
         }
 
         let entry = MemoryEntry {
@@ -124,6 +122,22 @@ impl MemoryStore {
             .into_iter()
             .find(|entry| entry.key.as_str() == key)
             .ok_or_else(|| MemoryError::NotFound(key.to_owned()))
+    }
+
+    pub fn remove(&self, key: &str) -> Result<MemoryEntry, MemoryError> {
+        let key = key.trim();
+        let mut entries = self.read_entries()?;
+        if let Some(pos) = entries.iter().position(|entry| entry.key.as_str() == key) {
+            let removed = entries.remove(pos);
+            self.write_entries(&entries)?;
+            Ok(removed)
+        } else {
+            Err(MemoryError::NotFound(key.to_owned()))
+        }
+    }
+
+    pub fn delete(&self, key: &str) -> Result<(), MemoryError> {
+        self.remove(key).map(|_| ())
     }
 
     fn read_entries(&self) -> Result<Vec<MemoryEntry>, MemoryError> {
@@ -238,17 +252,42 @@ mod tests {
     }
 
     #[test]
-    fn add_updates_existing_key_instead_of_duplicating() {
+    fn add_duplicate_key_returns_conflict_error() {
         let dir = temp_workspace();
         let store = MemoryStore::open(&dir).unwrap();
 
         store.add("key", "first", &tag_list(&["one"])).unwrap();
-        store.add("key", "second", &tag_list(&["two"])).unwrap();
+        let err = store
+            .add("key", "second", &tag_list(&["two"]))
+            .unwrap_err();
+        assert!(matches!(err, MemoryError::Conflict(_)));
 
         let entries = store.list().unwrap();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].text, "second");
-        assert_eq!(entries[0].tags, tag_list(&["two"]));
+        assert_eq!(entries[0].text, "first");
+        assert_eq!(entries[0].tags, tag_list(&["one"]));
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn remove_deletes_entry_and_persists() {
+        let dir = temp_workspace();
+        let store = MemoryStore::open(&dir).unwrap();
+
+        store.add("alpha", "one", &[]).unwrap();
+        store.add("beta", "two", &[]).unwrap();
+
+        let removed = store.remove("alpha").unwrap();
+        assert_eq!(removed.key, "alpha");
+        assert!(matches!(store.get("alpha"), Err(MemoryError::NotFound(_))));
+        assert!(matches!(store.remove("missing"), Err(MemoryError::NotFound(_))));
+
+        drop(store);
+        let reopened = MemoryStore::open(&dir).unwrap();
+        let entries = reopened.list().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key, "beta");
 
         cleanup(&dir);
     }

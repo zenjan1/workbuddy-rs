@@ -1,9 +1,11 @@
+use std::collections::hash_map::DefaultHasher;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io::ErrorKind;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// 按字符数安全截断字符串(保证返回合法 &str,不切断多字节字符)。
@@ -49,6 +51,30 @@ fn memory_now_timestamp() -> u64 {
         .unwrap_or(0)
 }
 
+/// 计算文件当前内容的指纹，用于轻量级读-改-写冲突检测。
+/// 文件不存在时返回 None。
+fn compute_memory_fingerprint(path: &Path) -> Result<Option<u64>> {
+    match fs::read(path) {
+        Ok(bytes) => {
+            let mut hasher = DefaultHasher::new();
+            bytes.hash(&mut hasher);
+            Ok(Some(hasher.finish()))
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).context("读取 memory.json 失败"),
+    }
+}
+
+/// 公开的加载 memory.json 工具函数，文件不存在时返回空列表。
+pub fn load_memory_json(path: &Path) -> Result<Vec<MemoryEntry>> {
+    load_memories(path)
+}
+
+/// 公开的保存 memory.json 工具函数，会创建父目录；并发控制请配合 add_memory 使用。
+pub fn save_memory_json(path: &Path, memories: &[MemoryEntry]) -> Result<()> {
+    save_memories(path, memories)
+}
+
 fn load_memories(path: &Path) -> Result<Vec<MemoryEntry>> {
     match fs::read_to_string(path) {
         Ok(s) if s.trim().is_empty() => Ok(Vec::new()),
@@ -70,6 +96,8 @@ fn save_memories(path: &Path, memories: &[MemoryEntry]) -> Result<()> {
 }
 
 pub fn add_memory(path: &Path, content: &str) -> Result<MemoryEntry> {
+    // 读-改-写冲突检测：先记录当前文件指纹，保存前再次比对。
+    let original_fingerprint = compute_memory_fingerprint(path)?;
     let mut memories = load_memories(path)?;
     let id = memories.iter().map(|m| m.id).max().unwrap_or(0) + 1;
     let entry = MemoryEntry {
@@ -78,6 +106,12 @@ pub fn add_memory(path: &Path, content: &str) -> Result<MemoryEntry> {
         created_at: memory_now_timestamp(),
     };
     memories.push(entry.clone());
+
+    let current_fingerprint = compute_memory_fingerprint(path)?;
+    if original_fingerprint != current_fingerprint {
+        bail!("memory.json 已被并发修改，请重试");
+    }
+
     save_memories(path, &memories)?;
     Ok(entry)
 }

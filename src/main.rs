@@ -104,6 +104,7 @@ enum MemoryAction {
         /// 键
         key: String,
         /// 文本内容
+        #[arg(value_name = "value")]
         text: String,
         /// 标签列表（逗号分隔）
         #[arg(long, short)]
@@ -216,7 +217,12 @@ enum Cmd {
         #[arg(long)]
         readonly: bool,
     },
-    /// 持久记忆:add/list/get
+    /// 持久记忆：添加、列出或获取键值对
+    ///
+    /// 示例：
+    ///   workbuddy memory add greeting "hello"
+    ///   workbuddy memory list
+    ///   workbuddy memory get greeting
     Memory {
         #[command(subcommand)]
         action: MemoryAction,
