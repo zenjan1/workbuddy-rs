@@ -145,7 +145,7 @@ fn duplicate_or_ambiguous(query: &str, matches: Vec<(usize, String)>) -> TaskIdE
 ///
 /// * 若参数可解析为纯数字索引，则直接返回 `TaskId::Numeric(index)`，保持旧行为。
 /// * 否则先按标题进行不区分大小写、去除首尾空格后的精确匹配。
-/// * 精确匹配未命中时回退到模糊匹配：标题包含查询字符串，或标题 slug 以查询 slug 前缀匹配。
+/// * 精确匹配未命中时回退到模糊匹配：标题以查询字符串开头（唯一前缀），或标题 slug 以查询 slug 前缀匹配。
 ///   零匹配返回 `NotFound`，多个匹配返回 `Ambiguous`，重复标题返回 `DuplicateTitle`。
 pub fn resolve_task_id<I, S>(raw: &str, titles: I) -> Result<TaskId, TaskIdError>
 where
@@ -188,10 +188,13 @@ where
     let mut fuzzy_matches = Vec::new();
     for (index, title) in title_list.iter().enumerate() {
         let normalized_title = normalize_title(title);
-        let title_match = normalized_title.contains(&query);
+        let title_match = normalized_title.starts_with(&query);
         let slug = TaskId::slugify(title.as_str());
         let slug_match = !slug_query.is_empty() && slug.starts_with(&slug_query);
-        if title_match || slug_match {
+        let word_match = normalized_title
+            .split_whitespace()
+            .any(|word| word.starts_with(&query));
+        if title_match || slug_match || word_match {
             fuzzy_matches.push((index, title.clone()));
         }
     }
@@ -310,6 +313,11 @@ mod tests {
         let titles = vec!["Write documentation".to_string(), "Fix login bug".to_string()];
         assert_eq!(resolve_task_id("write", &titles), Ok(TaskId::Numeric(0)));
         assert_eq!(resolve_task_id("login", &titles), Ok(TaskId::Numeric(1)));
+        // 输入不是标题前缀时不应命中，即使它出现在标题内部。
+        assert!(matches!(
+            resolve_task_id("rite", &titles),
+            Err(TaskIdError::NotFound { .. })
+        ));
     }
 
     #[test]

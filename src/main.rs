@@ -1,3 +1,8 @@
+#![allow(dead_code)]
+#![allow(unused_variables)]
+#![allow(unused_mut)]
+#![allow(unused_imports)]
+#![allow(dropping_references)]
 mod agents;
 mod config;
 mod dev;
@@ -128,6 +133,8 @@ enum Cmd {
     },
     /// 列出历史任务
     List {
+        /// 可选：按数字索引、任务标题或标题唯一前缀查看任务详情
+        id: Option<String>,
         /// 仅显示该日期(含)之后创建的任务 (YYYY-MM-DD)
         #[arg(long)]
         since: Option<String>,
@@ -220,20 +227,7 @@ async fn main() -> Result<()> {
             model,
             parallel,
         } => {
-            let goal = if goal.len() == 1 {
-                let runs = Workspace::root(&cfg.workspace_dir);
-                let ref_input = goal[0].clone();
-                match crate::task_id::resolve_task_id(&ref_input, runs.iter().map(|r: &RunRecord| r.goal.as_str())) {
-                    Ok(crate::task_id::TaskId::Numeric(idx)) => runs
-                        .get(idx)
-                        .map(|r| r.goal.clone())
-                        .unwrap_or_else(|| goal.join(" ")),
-                    Ok(crate::task_id::TaskId::Slug(_)) => goal.join(" "),
-                    Err(_) => goal.join(" "),
-                }
-            } else {
-                goal.join(" ")
-            };
+            let goal = goal.join(" ");
             if goal.trim().is_empty() {
                 anyhow::bail!("任务目标不能为空");
             }
@@ -246,17 +240,25 @@ async fn main() -> Result<()> {
             cfg.mock = mock;
             run_task(cfg, &goal).await
         }
-        Cmd::List { since } => cmd_list_with_slug(cfg, since.as_deref()),
+        Cmd::List { since, id } => {
+            if let Some(id) = id {
+                cmd_show(cfg, &id)
+            } else {
+                cmd_list_with_slug(cfg, since.as_deref())
+            }
+        }
         Cmd::Show { id } => {
             let runs = Workspace::root(&cfg.workspace_dir);
-            let idx = match crate::task_id::resolve_task_id(&id, runs.iter().map(|r: &RunRecord| r.goal.as_str())) {
-                Ok(crate::task_id::TaskId::Numeric(idx)) => idx,
-                Ok(crate::task_id::TaskId::Slug(_)) => anyhow::bail!("内部错误：标题别名解析应返回数字索引"),
+            let run = match crate::task_id::resolve_task_id(&id, runs.iter().map(|r: &RunRecord| r.goal.as_str())) {
+                Ok(crate::task_id::TaskId::Numeric(idx)) => runs
+                    .get(idx)
+                    .ok_or_else(|| anyhow::anyhow!("任务索引 {} 超出范围", idx))?,
+                Ok(crate::task_id::TaskId::Slug(slug)) => runs
+                    .iter()
+                    .find(|r| r.id == slug)
+                    .ok_or_else(|| anyhow::anyhow!("未找到 slug 为 '{}' 的任务", slug))?,
                 Err(e) => anyhow::bail!("无法解析任务引用 '{}': {}", id, e),
             };
-            let run = runs
-                .get(idx)
-                .ok_or_else(|| anyhow::anyhow!("任务索引 {} 超出范围", idx))?;
             cmd_show(cfg, &run.id)
         }
         Cmd::Agents => cmd_agents(),
@@ -775,8 +777,10 @@ fn cmd_list(cfg: Config, since: Option<&str>) -> Result<()> {
 
 fn cmd_show(cfg: Config, id: &str) -> Result<()> {
     let runs = Workspace::root(&cfg.workspace_dir);
-    let idx = match crate::task_id::resolve_task_id(id, runs.iter().map(|r: &RunRecord| r.goal.as_str())) {
-        Ok(crate::task_id::TaskId::Numeric(idx)) => idx,
+    let rec = match crate::task_id::resolve_task_id(id, runs.iter().map(|r: &RunRecord| r.goal.as_str())) {
+        Ok(crate::task_id::TaskId::Numeric(idx)) => runs
+            .get(idx)
+            .ok_or_else(|| anyhow::anyhow!("任务索引 {} 超出范围", idx))?,
         Ok(crate::task_id::TaskId::Slug(_)) => anyhow::bail!("内部错误：标题别名解析应返回数字索引"),
         Err(crate::task_id::TaskIdError::Ambiguous { .. }) => {
             anyhow::bail!(
@@ -791,10 +795,11 @@ fn cmd_show(cfg: Config, id: &str) -> Result<()> {
             );
         }
         Err(crate::task_id::TaskIdError::NotFound { .. }) => {
-            anyhow::bail!("未找到任务 '{}'", id);
+            runs.iter()
+                .find(|r| r.id.as_str() == id)
+                .ok_or_else(|| anyhow::anyhow!("未找到任务 '{}'", id))?
         }
     };
-    let rec = runs.get(idx).ok_or_else(|| anyhow::anyhow!("任务 {} 不存在", id))?;
     let ws = Workspace::open(&cfg.workspace_dir, &rec.id)?;
     let rec = ws.load_record()?;
     let total_tokens = rec
