@@ -454,8 +454,9 @@ async fn main() -> Result<()> {
                     anyhow::anyhow!("未找到任务 '{}'。请使用 `workbuddy list` 查看任务列表。", id)
                 })?;
             }
-            status::run(&cfg.workspace_dir)
-                .map_err(|e| anyhow::anyhow!("查看 workspace 运行状态失败: {e:#}"))
+            let summary = workspace::Workspace::status_summary(&cfg.workspace_dir);
+            println!("{}", summary);
+            Ok(())
         },
         Cmd::Tui => {
             if let Err(e) = tui::run(&cfg.workspace_dir) {

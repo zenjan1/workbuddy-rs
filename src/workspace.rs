@@ -268,50 +268,80 @@ impl Workspace {
         lines
     }
 
-    /// 读取 workspace 状态文件并格式化为可读摘要;无状态文件时返回 "not running"。
+    /// 只读状态汇总:读取 supervisor 运行状态(若存在 status.json)并基于运行历史记录
+    /// 统计已完成/失败任务数,输出最近 5 条日志摘要。无历史记录时回退显示 status.json 中的统计。
     pub fn status_summary(root: &Path) -> String {
-        let status_path = root.join("status.json");
-        let Ok(text) = std::fs::read_to_string(status_path) else {
-            return "not running".to_string();
+        let status_json: Option<serde_json::Value> = {
+            let status_path = root.join("status.json");
+            std::fs::read_to_string(status_path)
+                .ok()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
         };
-        let Ok(status) = serde_json::from_str::<serde_json::Value>(&text) else {
-            return "not running".to_string();
-        };
-
-        let running = status
-            .get("running")
-            .and_then(|v| v.as_bool())
+        let supervisor_running = status_json
+            .as_ref()
+            .and_then(|v| v.get("running").and_then(|r| r.as_bool()))
             .unwrap_or(false);
-        let completed = status
-            .get("completed")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        let failed = status
-            .get("failed")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
+
+        // 复用只读历史记录接口,按最新排序(Workspace::root 内部已排序)
+        let runs = Workspace::root(root);
+        let mut completed = 0usize;
+        let mut failed = 0usize;
+        let mut recent_logs: Vec<String> = Vec::new();
+
+        if runs.is_empty() {
+            if let Some(v) = &status_json {
+                completed = v.get("completed").and_then(|c| c.as_u64()).unwrap_or(0) as usize;
+                failed = v.get("failed").and_then(|c| c.as_u64()).unwrap_or(0) as usize;
+                if let Some(logs) = v.get("last_logs").and_then(|l| l.as_array()) {
+                    for log in logs {
+                        if let Some(s) = log.as_str() {
+                            recent_logs.push(s.to_string());
+                        }
+                        if recent_logs.len() >= 5 {
+                            break;
+                        }
+                    }
+                }
+            }
+        } else {
+            for record in &runs {
+                if record.steps.is_empty() {
+                    continue;
+                }
+                // 运行中任一 step 失败记为失败,全部成功记为完成
+                if record.steps.iter().all(|s| s.ok) {
+                    completed += 1;
+                } else {
+                    failed += 1;
+                }
+
+                // 每个运行取最后一个 step 作为日志摘要,保持每次运行一条
+                if recent_logs.len() < 5 {
+                    if let Some(last_step) = record.steps.last() {
+                        let status = if last_step.ok { "ok" } else { "failed" };
+                        let summary = format!(
+                            "[{}] {}: {} ({})",
+                            record.id, last_step.name, last_step.output_preview, status
+                        );
+                        recent_logs.push(summary);
+                    }
+                }
+            }
+        }
 
         let mut lines = vec![
             format!(
                 "supervisor: {}",
-                if running { "running" } else { "not running" }
+                if supervisor_running { "running" } else { "not running" }
             ),
             format!("completed: {}", completed),
             format!("failed: {}", failed),
         ];
 
-        let logs = status
-            .get("last_logs")
-            .or_else(|| status.get("recent_logs"))
-            .and_then(|v| v.as_array());
-        if let Some(logs) = logs {
-            if !logs.is_empty() {
-                lines.push("recent logs:".to_string());
-                for log in logs {
-                    if let Some(s) = log.as_str() {
-                        lines.push(format!("  - {}", s));
-                    }
-                }
+        if !recent_logs.is_empty() {
+            lines.push("recent logs:".to_string());
+            for log in recent_logs {
+                lines.push(format!("  - {}", log));
             }
         }
 
@@ -611,6 +641,106 @@ mod tests {
         assert_ne!(a, b);
     }
 
+    fn make_run_record(id: &str, steps_ok: Vec<bool>) -> RunRecord {
+        let steps = steps_ok
+            .iter()
+            .enumerate()
+            .map(|(i, ok)| StepRecord {
+                id: i,
+                name: format!("step-{}", i),
+                agent: "test".into(),
+                skill: "test".into(),
+                kind: "test".into(),
+                ok: *ok,
+                error: if *ok { None } else { Some("failure".into()) },
+                seconds: 0.1,
+                output_preview: format!("output-{}-{}", id, i),
+            })
+            .collect();
+        RunRecord {
+            token_usage: None,
+            char_usage: None,
+            id: id.to_string(),
+            goal: format!("goal-{}", id),
+            created: "now".into(),
+            model: "mock".into(),
+            mock: true,
+            steps,
+        }
+    }
+
+    #[test]
+    fn status_summary_reads_run_history() {
+        let root = std::env::temp_dir().join(format!("wb-status-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        // 空历史:无任何运行记录且无 status.json
+        let summary = Workspace::status_summary(&root);
+        assert!(summary.contains("supervisor: not running"));
+        assert!(summary.contains("completed: 0"));
+        assert!(summary.contains("failed: 0"));
+        assert!(!summary.contains("recent logs:"));
+
+        // 写入 status.json 模拟 supervisor 运行中
+        std::fs::write(
+            root.join("status.json"),
+            r#"{"running":true,"completed":99,"failed":99}"#,
+        )
+        .unwrap();
+
+        // 部分成功/失败:两个运行,一个成功,一个失败
+        let run1 = root.join("run1");
+        std::fs::create_dir_all(&run1).unwrap();
+        std::fs::write(
+            run1.join("meta.json"),
+            serde_json::to_string_pretty(&make_run_record("1", vec![true, true])).unwrap(),
+        )
+        .unwrap();
+        let run2 = root.join("run2");
+        std::fs::create_dir_all(&run2).unwrap();
+        std::fs::write(
+            run2.join("meta.json"),
+            serde_json::to_string_pretty(&make_run_record("2", vec![true, false])).unwrap(),
+        )
+        .unwrap();
+
+        let summary = Workspace::status_summary(&root);
+        assert!(summary.contains("supervisor: running"));
+        assert!(summary.contains("completed: 1"));
+        assert!(summary.contains("failed: 1"));
+        assert!(summary.contains("recent logs:"));
+        // 最近日志应包含两个运行的日志，且按最新在前（id 降序，"2" 比 "1" 大所以 "2" 在前）
+        assert!(summary.contains("[2] step-1: output-2-1 (failed)"));
+        assert!(summary.contains("[1] step-1: output-1-1 (ok)"));
+
+        // 日志超过 5 条:创建 6 个运行,只取最近 5 条
+        for id in ["3", "4", "5", "6", "7", "8"] {
+            let run_dir = root.join(format!("run{}", id));
+            std::fs::create_dir_all(&run_dir).unwrap();
+            std::fs::write(
+                run_dir.join("meta.json"),
+                serde_json::to_string_pretty(&make_run_record(id, vec![true])).unwrap(),
+            )
+            .unwrap();
+        }
+
+        let summary = Workspace::status_summary(&root);
+        // 最近 5 条应该是 id "8","7","6","5","4"（由于排序降序）
+        assert!(summary.contains("[8] step-0: output-8-0 (ok)"));
+        assert!(summary.contains("[7] step-0: output-7-0 (ok)"));
+        assert!(summary.contains("[6] step-0: output-6-0 (ok)"));
+        assert!(summary.contains("[5] step-0: output-5-0 (ok)"));
+        assert!(summary.contains("[4] step-0: output-4-0 (ok)"));
+        // 不应包含 id "3" 的日志（最早）
+        assert!(!summary.contains("[3] step-0: output-3-0 (ok)"));
+        // 已完成和失败数量:现在总共有 8 个运行(两个之前的 + 六个新的),其中成功: run1(1) + 6 个新 = 7,失败: run2(1)
+        assert!(summary.contains("completed: 7"));
+        assert!(summary.contains("failed: 1"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn workspace_lifecycle() {
         let tmp = std::env::temp_dir().join(format!("wb-test-{}", std::process::id()));
@@ -681,7 +811,11 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("wb-status-none-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        assert_eq!(Workspace::status_summary(&tmp), "not running");
+        let out = Workspace::status_summary(&tmp);
+        assert!(out.contains("supervisor: not running"));
+        assert!(out.contains("completed: 0"));
+        assert!(out.contains("failed: 0"));
+        assert!(!out.contains("recent logs:"));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
