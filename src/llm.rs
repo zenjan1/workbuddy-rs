@@ -49,16 +49,71 @@ impl LlmUsage {
 /// 兼容别名，便于外部使用 `Usage`。
 pub type Usage = LlmUsage;
 
+/// 可序列化/反序列化的 token/字符用量统计。
+/// 字段均为可选，旧响应缺少 usage 或 token 统计时 estimated 为 true。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TokenUsage {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub input_chars: Option<usize>,
+    pub output_chars: Option<usize>,
+    /// true 表示 token 字段缺失，字符数为按输入/输出文本长度估算。
+    pub estimated: bool,
+}
+
 /// LLM 响应:文本 + 可选用量(若上游未提供 usage 则为 None/默认零)。
 pub struct LlmResponse {
     pub text: String,
     pub usage: Option<Usage>,
+    /// 新用量结构：token 字段为 Option，均可选且可序列化。
+    pub token_usage: Option<TokenUsage>,
 }
 
 /// 从 OpenAI 兼容响应的 JSON 中提取 token 用量与字符数。
 /// 兼容旧调用：输入字符数记 0。
 pub fn extract_usage(v: &serde_json::Value, text: &str) -> LlmUsage {
     extract_usage_with_input(v, text, 0)
+}
+
+/// 从 OpenAI 兼容响应的 JSON 中提取可序列化的 TokenUsage。
+/// 优先解析 token 统计字段；若缺失则基于输入/输出文本长度估算字符数并标记 estimated=true。
+pub fn extract_token_usage_with_input(v: &serde_json::Value, text: &str, input_chars: usize) -> TokenUsage {
+    let output_chars = text.chars().count();
+    match v.get("usage") {
+        Some(usage) => {
+            let input_tokens = usage.get("prompt_tokens").and_then(|v| v.as_u64());
+            let output_tokens = usage.get("completion_tokens").and_then(|v| v.as_u64());
+            let total_tokens = usage.get("total_tokens").and_then(|v| v.as_u64());
+            if input_tokens.is_some() || output_tokens.is_some() || total_tokens.is_some() {
+                TokenUsage {
+                    input_tokens,
+                    output_tokens,
+                    total_tokens,
+                    input_chars: Some(input_chars),
+                    output_chars: Some(output_chars),
+                    estimated: false,
+                }
+            } else {
+                TokenUsage {
+                    input_tokens: None,
+                    output_tokens: None,
+                    total_tokens: None,
+                    input_chars: Some(input_chars),
+                    output_chars: Some(output_chars),
+                    estimated: true,
+                }
+            }
+        }
+        None => TokenUsage {
+            input_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            input_chars: Some(input_chars),
+            output_chars: Some(output_chars),
+            estimated: true,
+        },
+    }
 }
 
 /// 从 OpenAI 兼容响应的 JSON 中提取 token 用量与字符数。
@@ -225,9 +280,11 @@ impl Llm for OpenAiCompat {
                     .to_string();
                 if !content.trim().is_empty() {
                     let usage = extract_usage_with_input(&v, &content, input_chars);
+                    let token_usage = extract_token_usage_with_input(&v, &content, input_chars);
                     return Ok(LlmResponse {
                         text: content,
                         usage: Some(usage),
+                        token_usage: Some(token_usage),
                     });
                 }
                 let reasoning = v
@@ -237,6 +294,7 @@ impl Llm for OpenAiCompat {
                     .to_string();
                 if !reasoning.trim().is_empty() {
                     let usage = extract_usage_with_input(&v, &reasoning, input_chars);
+                    let token_usage = extract_token_usage_with_input(&v, &reasoning, input_chars);
                     eprintln!(
                         "[llm] content 为空,回退使用 reasoning_content({} 字符)",
                         reasoning.len()
@@ -244,6 +302,7 @@ impl Llm for OpenAiCompat {
                     return Ok(LlmResponse {
                         text: reasoning,
                         usage: Some(usage),
+                        token_usage: Some(token_usage),
                     });
                 }
                 last_err = "响应中 content 与 reasoning_content 均为空".to_string();
@@ -309,7 +368,15 @@ impl Llm for MockLlm {
                 character_count: output.chars().count(),
                 ..Default::default()
             };
-            Ok(LlmResponse { text: output, usage: Some(usage) })
+            let token_usage = TokenUsage {
+                input_tokens: None,
+                output_tokens: None,
+                total_tokens: None,
+                input_chars: Some(input_chars),
+                output_chars: Some(output.chars().count()),
+                estimated: true,
+            };
+            Ok(LlmResponse { text: output, usage: Some(usage), token_usage: Some(token_usage) })
         })
     }
 }

@@ -880,7 +880,7 @@ mod tests {
             self.users.lock().unwrap().push(user.to_string());
             let r = r#"{"edits":[{"path":"code.rs","old_string":"","new_string":"x","replace_all":false}]}"#
                 .to_string();
-            Box::pin(async move { Ok(crate::llm::LlmResponse { text: r, usage: None }) })
+            Box::pin(async move { Ok(crate::llm::LlmResponse { text: r, usage: None, token_usage: None }) })
         }
     }
 
