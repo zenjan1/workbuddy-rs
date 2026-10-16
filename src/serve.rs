@@ -149,26 +149,34 @@ async fn list_runs(
 async fn get_run(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
-) -> Result<Json<RunRecord>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     if let Ok(ws) = Workspace::open(&state.workspace_dir, &id) {
         match ws.load_record() {
-            Ok(run) => return Ok(Json(run)),
-            Err(e) => {
+            Ok(run) => {
+                let value = serde_json::to_value(run).map_err(|_| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": "internal server error" })),
+                    )
+                })?;
+                return Ok(Json(summarize_run_json(&value)));
+            }
+            Err(_) => {
                 return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "error": format!("failed to load run {id}: {e}") })),
+                    Json(json!({ "error": "internal server error" })),
                 ));
             }
         }
     }
 
     if let Some(body) = find_run_in_history_files(&state.workspace_dir, &id) {
-        match serde_json::from_str::<RunRecord>(&body) {
-            Ok(run) => return Ok(Json(run)),
-            Err(e) => {
+        match serde_json::from_str::<serde_json::Value>(&body) {
+            Ok(value) => return Ok(Json(summarize_run_json(&value))),
+            Err(_) => {
                 return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "error": format!("failed to parse run {id}: {e}") })),
+                    Json(json!({ "error": "internal server error" })),
                 ));
             }
         }
@@ -244,27 +252,33 @@ fn readonly_route(workspace_dir: &Path, target: &str) -> (u16, &'static str, Str
         }
         match Workspace::open(workspace_dir, rest) {
             Ok(ws) => match ws.load_record() {
-                Ok(run) => match run_to_json(&run) {
-                    Ok(body) => return (200, "OK", body),
-                    Err(e) => {
-                        return (
-                            500,
-                            "Internal Server Error",
-                            json!({ "error": format!("failed to serialize run {rest}: {e}") }).to_string(),
-                        )
+                Ok(run) => {
+                    match serde_json::to_value(run)
+                        .map(|v| summarize_run_json(&v).to_string())
+                    {
+                        Ok(body) => return (200, "OK", body),
+                        Err(_) => {
+                            return (
+                                500,
+                                "Internal Server Error",
+                                json!({ "error": "internal server error" }).to_string(),
+                            )
+                        }
                     }
-                },
-                Err(e) => {
+                }
+                Err(_) => {
                     return (
                         500,
                         "Internal Server Error",
-                        json!({ "error": format!("failed to load run {rest}: {e}") }).to_string(),
+                        json!({ "error": "internal server error" }).to_string(),
                     )
                 }
             },
             Err(_) => {
                 if let Some(body) = find_run_in_history_files(workspace_dir, rest) {
-                    return (200, "OK", body);
+                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) {
+                        return (200, "OK", summarize_run_json(&value).to_string());
+                    }
                 }
                 return (
                     404,
@@ -362,10 +376,11 @@ pub async fn serve_with_dir(workspace_dir: &Path, bind_addr: SocketAddr) -> anyh
     Ok(local_addr)
 }
 
-pub async fn serve(addr: SocketAddr) -> anyhow::Result<SocketAddr> {
+pub async fn serve(port: u16) -> anyhow::Result<SocketAddr> {
     let workspace_dir = std::env::var("WORKBUDDY_WORKSPACE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(".workbuddy"));
+    let addr = SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
     serve_with_dir(&workspace_dir, addr).await
 }
 

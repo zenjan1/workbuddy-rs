@@ -26,13 +26,13 @@ crossterm = "0.28.1"
 ureq = { version = "2", features = ["tls"] }
 tiny_http = "0.12"
 ctrlc = "3"
+tower = { version = "0.5", features = ["util"] }
 
 [profile.release]
 strip = true
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json"] }
-tower = { version = "0.5", features = ["util"] }
 hyper = "1.12.0"
 http-body-util = "0.1"
 tempfile = "3"
