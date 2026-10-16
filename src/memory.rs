@@ -86,6 +86,9 @@ impl MemoryStore {
             data: RwLock::new(Vec::new()),
         };
         store.load()?;
+        if !store.path.exists() {
+            store.save()?;
+        }
         Ok(store)
     }
 
@@ -189,7 +192,7 @@ impl MemoryStore {
         }
 
         let entries: Vec<MemoryEntry> = serde_json::from_str(&content)
-            .map_err(|err| MemoryError::Parse(format!("invalid JSON in memory file: {err}")))?;
+            .map_err(|err| MemoryError::Parse(format!("invalid JSON in memory file {}: {err}", self.path.display())))?;
 
         let mut data = self.data.write().unwrap();
         *data = entries;
