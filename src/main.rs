@@ -241,12 +241,42 @@ fn resolve_task_run<'a>(
         Err(e) => {
             let msg = e.to_string();
             if msg.contains("冲突") || msg.contains("多个匹配") {
-                anyhow::bail!("任务标识 '{}' 存在多个匹配，请使用数字索引指定任务", id)
+                let candidates = match_titles(runs, id);
+                let mut detail = String::new();
+                if !candidates.is_empty() {
+                    detail.push_str("\n候选任务:\n");
+                    for (idx, goal) in candidates {
+                        detail.push_str(&format!("  [{}] {}\n", idx, goal));
+                    }
+                }
+                anyhow::bail!(
+                    "任务标识 '{}' 存在多个匹配，请使用数字索引指定任务。{}",
+                    id,
+                    detail
+                )
             } else {
                 anyhow::bail!("无法解析任务标识 '{}': {}", id, e)
             }
         }
     }
+}
+
+fn match_titles(runs: &[RunRecord], id: &str) -> Vec<(usize, String)> {
+    let trimmed = id.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let slug_id = crate::task_id::TaskId::slugify(trimmed);
+    runs.iter()
+        .enumerate()
+        .filter(|(_, run)| {
+            let goal = run.goal.trim();
+            let slug_goal = crate::task_id::TaskId::slugify(&run.goal);
+            goal.starts_with(trimmed)
+                || (!slug_id.is_empty() && slug_goal.starts_with(&slug_id))
+        })
+        .map(|(idx, run)| (idx, run.goal.clone()))
+        .collect()
 }
 
 #[tokio::main]
