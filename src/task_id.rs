@@ -92,6 +92,69 @@ impl FromStr for TaskId {
     }
 }
 
+/// 表示标题解析失败。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskIdError {
+    /// 未找到匹配任务
+    NotFound { query: String },
+    /// 找到多个匹配任务，返回候选标题。
+    Ambiguous { query: String, matches: Vec<String> },
+}
+
+impl fmt::Display for TaskIdError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TaskIdError::NotFound { query } => write!(f, "task id '{}' not found", query),
+            TaskIdError::Ambiguous { query, matches } => {
+                write!(f, "task id '{}' is ambiguous; matches: {}", query, matches.join(", "))
+            }
+        }
+    }
+}
+
+impl std::error::Error for TaskIdError {}
+
+/// 解析原始 task_id 参数。
+///
+/// * 若参数可解析为纯数字索引，则直接返回该数字，保持旧行为。
+/// * 否则将参数和每个 backlog 标题做 slug 化后比较。
+///   唯一匹配返回其在 `titles` 中的内部索引（从 0 开始）。
+pub fn resolve_task_id<I, S>(raw: &str, titles: I) -> Result<usize, TaskIdError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    if let Ok(index) = raw.parse::<usize>() {
+        return Ok(index);
+    }
+
+    let normalized = TaskId::slugify(raw);
+    if normalized.is_empty() {
+        return Err(TaskIdError::NotFound {
+            query: raw.to_string(),
+        });
+    }
+
+    let mut matches = Vec::new();
+    for (index, title) in titles.into_iter().enumerate() {
+        let title = title.as_ref();
+        if TaskId::slugify(title) == normalized {
+            matches.push((index, title.to_string()));
+        }
+    }
+
+    match matches.len() {
+        0 => Err(TaskIdError::NotFound {
+            query: raw.to_string(),
+        }),
+        1 => Ok(matches[0].0),
+        _ => Err(TaskIdError::Ambiguous {
+            query: raw.to_string(),
+            matches: matches.into_iter().map(|(_, title)| title).collect(),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,5 +210,46 @@ mod tests {
         existing.insert("task-2");
         assert_eq!(TaskId::unique_slug("task", &existing), "task-3");
         assert_eq!(TaskId::unique_slug("brand-new", &existing), "brand-new");
+    }
+
+    #[test]
+    fn resolve_numeric_index_passthrough() {
+        let titles = ["Write docs", "Fix bug"];
+        assert_eq!(resolve_task_id("1", titles), Ok(1));
+        assert_eq!(resolve_task_id("0", titles), Ok(0));
+    }
+
+    #[test]
+    fn resolve_unique_title_match() {
+        let titles = ["Write docs", "Fix login bug"];
+        assert_eq!(resolve_task_id("fix-login-bug", titles), Ok(1));
+        assert_eq!(resolve_task_id("Fix Login Bug", titles), Ok(1));
+    }
+
+    #[test]
+    fn resolve_title_match_ignores_case_spaces_and_slug_variants() {
+        let titles = ["Write docs", "  Hello   World  "];
+        assert_eq!(resolve_task_id("  HELLO   world  ", titles), Ok(1));
+        assert_eq!(resolve_task_id("hello-world", titles), Ok(1));
+        // 纯数字参数仍然优先，不受标题影响
+        assert_eq!(resolve_task_id("0", titles), Ok(0));
+    }
+
+    #[test]
+    fn resolve_ambiguous_title_returns_error() {
+        let titles = ["Setup server", "setup-server", "Setup Server!"];
+        assert!(matches!(
+            resolve_task_id("setup-server", titles),
+            Err(TaskIdError::Ambiguous { .. })
+        ));
+    }
+
+    #[test]
+    fn resolve_missing_title_returns_not_found() {
+        let titles = ["Write docs", "Fix bug"];
+        assert!(matches!(
+            resolve_task_id("deploy", titles),
+            Err(TaskIdError::NotFound { .. })
+        ));
     }
 }

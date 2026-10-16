@@ -228,14 +228,7 @@ async fn main() -> Result<()> {
             run_task(cfg, &goal).await
         }
         Cmd::List { since } => cmd_list_with_slug(cfg, since.as_deref()),
-        Cmd::Show { id } => {
-            if id.parse::<usize>().is_ok() {
-                cmd_show(cfg, &id)
-            } else {
-                let slug = crate::task_id::TaskId::from_slug(id.as_str()).to_string();
-                cmd_show_by_slug(cfg, &slug)
-            }
-        }
+        Cmd::Show { id } => cmd_show(cfg, &id),
         Cmd::Agents => cmd_agents(),
         Cmd::Review => review::review(cfg).await,
         Cmd::Config { action } => match action {
@@ -926,15 +919,15 @@ fn cmd_list(cfg: Config, since: Option<&str>) -> Result<()> {
 
 fn cmd_show(cfg: Config, id: &str) -> Result<()> {
     let runs = Workspace::root(&cfg.workspace_dir);
-    let idx = match resolver::resolve_task_id(&runs, id, |run: &RunRecord| run.goal.as_str()) {
+    let idx = match crate::task_id::resolve_task_id(id, runs.iter().map(|r: &RunRecord| r.goal.as_str())) {
         Ok(idx) => idx,
-        Err(resolver::ResolveError::Ambiguous(_)) => {
+        Err(crate::task_id::TaskIdError::Ambiguous { .. }) => {
             anyhow::bail!(
                 "任务标识 '{}' 不唯一，存在多个匹配任务。提示：若任务标题存在冲突，请使用任务索引（数字 id）引用任务。",
                 id
             );
         }
-        Err(resolver::ResolveError::NotFound) => {
+        Err(crate::task_id::TaskIdError::NotFound { .. }) => {
             anyhow::bail!("未找到任务 '{}'", id);
         }
     };
