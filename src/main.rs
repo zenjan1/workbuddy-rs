@@ -228,7 +228,12 @@ async fn main() -> Result<()> {
             run_task(cfg, &goal).await
         }
         Cmd::List { since } => cmd_list_with_slug(cfg, since.as_deref()),
-        Cmd::Show { id } => cmd_show(cfg, &id),
+        Cmd::Show { id } => {
+            let runs = Workspace::root(&cfg.workspace_dir);
+            let resolved_id = crate::task_id::resolve_task_id(&id, runs.iter().map(|r: &RunRecord| r.goal.as_str()))
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            cmd_show(cfg, &resolved_id.to_string())
+        }
         Cmd::Agents => cmd_agents(),
         Cmd::Review => review::review(cfg).await,
         Cmd::Config { action } => match action {
@@ -924,6 +929,12 @@ fn cmd_show(cfg: Config, id: &str) -> Result<()> {
         Err(crate::task_id::TaskIdError::Ambiguous { .. }) => {
             anyhow::bail!(
                 "任务标识 '{}' 不唯一，存在多个匹配任务。提示：若任务标题存在冲突，请使用任务索引（数字 id）引用任务。",
+                id
+            );
+        }
+        Err(crate::task_id::TaskIdError::DuplicateTitle { .. }) => {
+            anyhow::bail!(
+                "任务标识 '{}' 不唯一，存在多个同名任务。请使用任务索引（数字 id）引用任务。",
                 id
             );
         }

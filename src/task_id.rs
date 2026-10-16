@@ -99,6 +99,8 @@ pub enum TaskIdError {
     NotFound { query: String },
     /// 找到多个匹配任务，返回候选标题。
     Ambiguous { query: String, matches: Vec<String> },
+    /// 找到多个匹配任务，但它们的标题完全相同。
+    DuplicateTitle { query: String, title: String },
 }
 
 impl fmt::Display for TaskIdError {
@@ -108,11 +110,36 @@ impl fmt::Display for TaskIdError {
             TaskIdError::Ambiguous { query, matches } => {
                 write!(f, "task id '{}' is ambiguous; matches: {}", query, matches.join(", "))
             }
+            TaskIdError::DuplicateTitle { query, title } => {
+                write!(f, "task id '{}' is duplicated; title: {}", query, title)
+            }
         }
     }
 }
 
 impl std::error::Error for TaskIdError {}
+
+fn normalize_title(title: &str) -> String {
+    title.trim().to_lowercase()
+}
+
+fn duplicate_or_ambiguous(query: &str, matches: Vec<(usize, String)>) -> TaskIdError {
+    let unique_titles: HashSet<String> = matches
+        .iter()
+        .map(|(_, title)| normalize_title(title))
+        .collect();
+    if unique_titles.len() == 1 {
+        TaskIdError::DuplicateTitle {
+            query: query.to_string(),
+            title: matches[0].1.clone(),
+        }
+    } else {
+        TaskIdError::Ambiguous {
+            query: query.to_string(),
+            matches: matches.into_iter().map(|(_, title)| title).collect(),
+        }
+    }
+}
 
 /// 解析原始 task_id 参数。
 ///
@@ -128,6 +155,11 @@ where
         return Ok(index);
     }
 
+    let title_list: Vec<String> = titles
+        .into_iter()
+        .map(|s| s.as_ref().to_string())
+        .collect();
+
     let normalized = TaskId::slugify(raw);
     if normalized.is_empty() {
         return Err(TaskIdError::NotFound {
@@ -135,23 +167,37 @@ where
         });
     }
 
+    // 精确 slug 匹配：保持原有的 slugify 后比较逻辑。
     let mut matches = Vec::new();
-    for (index, title) in titles.into_iter().enumerate() {
-        let title = title.as_ref();
+    for (index, title) in title_list.iter().enumerate() {
         if TaskId::slugify(title) == normalized {
-            matches.push((index, title.to_string()));
+            matches.push((index, title.clone()));
         }
     }
 
     match matches.len() {
-        0 => Err(TaskIdError::NotFound {
-            query: raw.to_string(),
-        }),
+        0 => {
+            // 精确 slug 匹配未命中，进行模糊匹配：标题归一化或 slug 包含查询。
+            let query_normalized = normalize_title(raw);
+            let query_slug = normalized.as_str();
+            for (index, title) in title_list.iter().enumerate() {
+                let title_normalized = normalize_title(title);
+                let title_slug = TaskId::slugify(title);
+                if title_normalized.contains(query_normalized.as_str()) || title_slug.contains(query_slug) {
+                    matches.push((index, title.clone()));
+                }
+            }
+
+            match matches.len() {
+                0 => Err(TaskIdError::NotFound {
+                    query: raw.to_string(),
+                }),
+                1 => Ok(matches[0].0),
+                _ => Err(duplicate_or_ambiguous(raw, matches)),
+            }
+        }
         1 => Ok(matches[0].0),
-        _ => Err(TaskIdError::Ambiguous {
-            query: raw.to_string(),
-            matches: matches.into_iter().map(|(_, title)| title).collect(),
-        }),
+        _ => Err(duplicate_or_ambiguous(raw, matches)),
     }
 }
 
@@ -250,6 +296,22 @@ mod tests {
         assert!(matches!(
             resolve_task_id("deploy", titles),
             Err(TaskIdError::NotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn resolve_fuzzy_title_match_uses_contains() {
+        let titles = vec!["Write documentation".to_string(), "Fix login bug".to_string()];
+        assert_eq!(resolve_task_id("login", &titles), Ok(1));
+        assert_eq!(resolve_task_id("documentation", &titles), Ok(0));
+    }
+
+    #[test]
+    fn resolve_duplicate_title_returns_error() {
+        let titles = vec!["Write docs".to_string(), " write docs ".to_string()];
+        assert!(matches!(
+            resolve_task_id("Write docs", &titles),
+            Err(TaskIdError::DuplicateTitle { .. })
         ));
     }
 }
