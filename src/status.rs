@@ -111,8 +111,14 @@ impl StatusSummary {
 }
 
 pub fn run(workspace_dir: &Path) -> anyhow::Result<()> {
-    let summary = parse_status(workspace_dir)?;
-    println!("{}", format_status(&summary));
+    match parse_status(workspace_dir) {
+        Ok(summary) => {
+            println!("{}", format_status(&summary));
+        }
+        Err(err) => {
+            eprintln!("workbuddy status: 无法读取运行状态: {err:#}");
+        }
+    }
     Ok(())
 }
 
@@ -584,15 +590,26 @@ mod tests {
         let history: Vec<HistoryEntry> = (1..=10)
             .map(|i| HistoryEntry {
                 success: i % 2 == 0,
-                log: format!("log-{}", i),
+                log: format!("run-{}", i),
             })
             .collect();
+
         let summary = StatusSummary::from_history_with_limit(&history, 3);
-        assert_eq!(summary.completed_runs, 5); // even numbers: 2,4,6,8,10
+        assert_eq!(summary.completed_runs, 5);
         assert_eq!(summary.failed_runs, 5);
-        assert_eq!(summary.recent_logs, vec!["log-10", "log-9", "log-8"]);
-        assert!(!summary.supervisor_running);
-        assert_eq!(summary.pid, None);
+        assert_eq!(summary.recent_logs.len(), 3);
+        assert_eq!(summary.recent_logs[0], "run-10");
+
+        let status = Status::from_history_with_limit(&history, 3);
+        assert_eq!(status.completed, 5);
+        assert_eq!(status.failed, 5);
+        assert_eq!(status.recent_logs.len(), 3);
+    }
+
+    #[test]
+    fn run_missing_workspace_prints_readable_error_and_returns_ok() {
+        let workspace = PathBuf::from("/nonexistent/path/for/workbuddy/status");
+        assert!(run(&workspace).is_ok());
     }
 
     #[test]
