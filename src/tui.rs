@@ -19,6 +19,7 @@ pub struct BacklogItem {
     pub id: usize,
     pub title: String,
     pub status: String,
+    pub priority: i64,
 }
 
 impl BacklogItem {
@@ -27,12 +28,40 @@ impl BacklogItem {
             id,
             title: title.into(),
             status: status.into(),
+            priority: 0,
+        }
+    }
+
+    pub fn with_priority(
+        id: usize,
+        title: impl Into<String>,
+        status: impl Into<String>,
+        priority: i64,
+    ) -> Self {
+        Self {
+            id,
+            title: title.into(),
+            status: status.into(),
+            priority,
         }
     }
 }
 
 /// Task alias for external callers that already use the name `Task`.
 pub type Task = BacklogItem;
+
+/// Aggregated state handed to the TUI renderer/loop. Kept separate from
+/// terminal/runtime concerns so tests can exercise the pure renderer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BacklogState {
+    pub tasks: Vec<BacklogItem>,
+}
+
+impl BacklogState {
+    pub fn new(tasks: Vec<BacklogItem>) -> Self {
+        Self { tasks }
+    }
+}
 
 /// Pure mapping from backlog data to list row strings.
 ///
@@ -87,20 +116,39 @@ pub fn load_backlog(workspace_dir: &std::path::Path) -> Result<Vec<Task>> {
             } else {
                 format!("优先级 {}", priority)
             };
-            items.push(Task::new(idx + 1, title, status));
+            items.push(Task::with_priority(idx + 1, title, status, priority));
         }
     }
     Ok(items)
 }
 
-/// Pure rendering function: draws the backlog list with ratatui's TestBackend
-/// and returns the resulting static snapshot as a string. It includes the
-/// "Backlog" title and task count in the output.
-pub fn render_backlog(tasks: &[Task]) -> String {
+fn status_rank(status: &str) -> u8 {
+    match status {
+        "待办" | "pending" => 0,
+        "运行中" | "running" => 1,
+        "失败" | "failed" => 2,
+        "完成" | "done" => 3,
+        _ => 4,
+    }
+}
+
+/// Pure rendering function: sorts the backlog list by status and priority,
+/// draws it with ratatui's TestBackend, and returns the resulting static
+/// snapshot as a string. It includes the "Backlog" title and task count in
+/// the output.
+pub fn render_backlog(state: &BacklogState) -> String {
+    let mut tasks = state.tasks.clone();
+    tasks.sort_by(|a, b| {
+        status_rank(&a.status)
+            .cmp(&status_rank(&b.status))
+            .then_with(|| b.priority.cmp(&a.priority))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
     let rows = if tasks.is_empty() {
         vec!["No backlog tasks".to_string()]
     } else {
-        render_backlog_tasks(tasks)
+        render_backlog_tasks(&tasks)
     };
 
     let list_items: Vec<ListItem> = rows.iter().map(|row| ListItem::new(row.clone())).collect();
@@ -159,6 +207,13 @@ pub fn handle_key(key: KeyCode, selected: usize, item_count: usize) -> (usize, K
 /// Run the blocking TUI. Renders `items` as a selectable list, supports
 /// Up/Down to move the cursor and `q` to quit.
 pub fn run_tui(tasks: Vec<Task>) -> Result<()> {
+    let mut tasks = tasks;
+    tasks.sort_by(|a, b| {
+        status_rank(&a.status)
+            .cmp(&status_rank(&b.status))
+            .then_with(|| b.priority.cmp(&a.priority))
+            .then_with(|| a.id.cmp(&b.id))
+    });
     let items = &tasks;
     enable_raw_mode()?;
     let mut stdout = stdout();
@@ -290,22 +345,44 @@ mod tests {
 
     #[test]
     fn render_backlog_contains_title_and_count() {
-        let tasks = sample_items();
-        let output = render_backlog(&tasks);
+        let state = BacklogState::new(sample_items());
+        let output = render_backlog(&state);
 
         assert!(output.contains("Backlog"), "output should contain title: {output}");
         assert!(output.contains("3"), "output should contain task count: {output}");
-        assert!(output.contains("[design-tui-module]   1. Design TUI module [pending]"), "output should contain first row: {output}");
+        assert!(output.find("[design-tui-module]   1. Design TUI module [pending]").is_some(), "output should contain first pending row: {output}");
+        assert!(output.find("[render-backlog-list]   2. Render backlog list [pending]").is_some(), "output should contain second pending row: {output}");
     }
 
     #[test]
-    fn render_backlog_empty_does_not_panic() {
-        let tasks: Vec<Task> = vec![];
-        let output = render_backlog(&tasks);
+    fn render_backlog_empty_shows_placeholder() {
+        let state = BacklogState::new(vec![]);
+        let output = render_backlog(&state);
 
         assert!(output.contains("Backlog"), "output should contain title: {output}");
         assert!(output.contains("0"), "output should contain zero task count: {output}");
         assert!(output.contains("No backlog tasks"), "output should contain empty placeholder: {output}");
+    }
+
+    #[test]
+    fn render_backlog_sorts_by_status_and_priority() {
+        let tasks = vec![
+            BacklogItem::with_priority(3, "Failed step", "失败", 5),
+            BacklogItem::with_priority(1, "Write plan", "待办", 7),
+            BacklogItem::with_priority(2, "Execute plan", "运行中", 9),
+            BacklogItem::with_priority(4, "Second pending", "待办", 2),
+        ];
+        let state = BacklogState::new(tasks);
+        let output = render_backlog(&state);
+
+        let idx_pending_first = output.find("[write-plan]").expect("first pending row");
+        let idx_pending_second = output.find("[second-pending]").expect("second pending row");
+        let idx_running = output.find("[execute-plan]").expect("running row");
+        let idx_failed = output.find("[failed-step]").expect("failed row");
+
+        assert!(idx_pending_first < idx_pending_second, "higher priority pending task should come first: {output}");
+        assert!(idx_pending_second < idx_running, "pending tasks before running: {output}");
+        assert!(idx_running < idx_failed, "running tasks before failed: {output}");
     }
 
     #[test]
