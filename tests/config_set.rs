@@ -37,6 +37,8 @@ timeout = 30
 stream = true
 
 [llm]
+model = "default-llm"
+max_budget = 7000
 base_url = "https://example.com/v1"
 "#,
         )
@@ -239,5 +241,89 @@ fn config_set_common_keys_are_reloaded_from_disk() {
         get_config_value(&ws.config_path(), "timeout").expect("get timeout"),
         "45",
         "config --get returned unexpected timeout value after config set"
+    );
+}
+
+#[test]
+fn config_set_updates_nested_llm_keys_and_preserves_siblings() {
+    let ws = TestWorkspace::new();
+    ws.write_initial_config();
+
+    set_config_value(&ws.config_path(), "llm.model", "gpt-4o").expect("set llm.model");
+    set_config_value(&ws.config_path(), "llm.max_budget", "12000").expect("set llm.max_budget");
+
+    let raw = read_config(&ws);
+    assert!(
+        raw.contains("model = \"gpt-4o\""),
+        "llm.model was not updated: {}",
+        raw
+    );
+    assert!(
+        raw.contains("max_budget = 12000"),
+        "llm.max_budget was not updated: {}",
+        raw
+    );
+    assert!(
+        raw.contains("base_url = \"https://example.com/v1\""),
+        "unmodified llm.base_url changed: {}",
+        raw
+    );
+    assert!(
+        raw.contains("model = \"default-model\""),
+        "top-level model should not have changed: {}",
+        raw
+    );
+    assert!(
+        raw.contains("max_budget = 5000"),
+        "top-level max_budget should not have changed: {}",
+        raw
+    );
+
+    assert_eq!(
+        get_config_value(&ws.config_path(), "llm.model").expect("get llm.model"),
+        "gpt-4o",
+        "config --get returned unexpected llm.model value after config set"
+    );
+    assert_eq!(
+        get_config_value(&ws.config_path(), "llm.max_budget").expect("get llm.max_budget"),
+        "12000",
+        "config --get returned unexpected llm.max_budget value after config set"
+    );
+}
+
+#[test]
+fn config_set_rejects_invalid_nested_type_values_without_writes() {
+    let ws = TestWorkspace::new();
+    ws.write_initial_config();
+
+    let original = read_config(&ws);
+
+    let invalid_budget = set_config_value(&ws.config_path(), "llm.max_budget", "not-a-number");
+    assert!(
+        invalid_budget.is_err(),
+        "setting llm.max_budget to a non-integer should fail"
+    );
+
+    let invalid_model = set_config_value(&ws.config_path(), "llm.model", "123");
+    assert!(
+        invalid_model.is_err(),
+        "setting llm.model to a non-string value should fail"
+    );
+
+    let raw = read_config(&ws);
+    assert_eq!(
+        raw, original,
+        "config file changed after rejected nested type updates: {}",
+        raw
+    );
+    assert!(
+        raw.contains("max_budget = 7000"),
+        "llm.max_budget changed after rejected update: {}",
+        raw
+    );
+    assert!(
+        raw.contains("model = \"default-llm\""),
+        "llm.model changed after rejected update: {}",
+        raw
     );
 }

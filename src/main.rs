@@ -340,13 +340,12 @@ async fn main() -> Result<()> {
                     if key.trim().is_empty() {
                         return Err(anyhow::anyhow!("配置键不能为空"));
                     }
-                    if value.trim().is_empty() {
-                        return Err(anyhow::anyhow!("配置值不能为空"));
-                    }
 
                     let config_path = config::find_config_path()?;
-                    config::set_config(&config_path, &key, &value)
-                        .map_err(|e| anyhow::anyhow!("设置配置 {} 失败: {}", key, e))?;
+                    if let Err(e) = config::set_config(&config_path, &key, &value) {
+                        eprintln!("设置配置 {} 失败: {}", key, e);
+                        std::process::exit(1);
+                    }
 
                     let cfg = Config::load()?;
                     println!("已更新配置：{} = {}", key, value);

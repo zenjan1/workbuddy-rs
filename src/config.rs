@@ -377,7 +377,10 @@ impl Config {
 /// 使用 toml_edit 更新配置文件，保留注释和未知键。
 pub fn set_config_value_file(path: &Path, key: &str, value: &str) -> Result<()> {
     validate_key_syntax(key)?;
-    let normalized_key = if key == "stream" {
+    let is_nested = key.contains('.') && key != "stream";
+    let normalized_key = if is_nested {
+        key
+    } else if key == "stream" {
         "stream"
     } else {
         normalize_config_key(key)?
@@ -393,19 +396,26 @@ pub fn set_config_value_file(path: &Path, key: &str, value: &str) -> Result<()> 
     };
 
     let parsed = parse_config_set_value(normalized_key, value)?;
-    let mut table = doc.as_table_mut();
-    if let Some(existing) = table.get_mut(normalized_key) {
-        let decor = existing.as_value_mut().map(|v| v.decor().clone());
-        *existing = parsed;
-        if let Some(decor) = decor {
-            if let Some(v) = existing.as_value_mut() {
-                *v.decor_mut() = decor;
+    {
+        let root_table = doc.as_table_mut();
+        if is_nested {
+            let parts: Vec<&str> = normalized_key.split('.').collect();
+            set_toml_edit_table(root_table, &parts, parsed)?;
+        } else {
+            let table = root_table;
+            if let Some(existing) = table.get_mut(normalized_key) {
+                let decor = existing.as_value_mut().map(|v| v.decor().clone());
+                *existing = parsed;
+                if let Some(decor) = decor {
+                    if let Some(v) = existing.as_value_mut() {
+                        *v.decor_mut() = decor;
+                    }
+                }
+            } else {
+                table.insert(normalized_key, parsed);
             }
         }
-    } else {
-        table.insert(normalized_key, parsed);
     }
-    drop(table);
 
     let backup_path = if path.exists() {
         let bak = PathBuf::from(format!("{}.bak", path.display()));
@@ -483,7 +493,7 @@ fn set_toml_edit_table(
 
 fn parse_config_set_value(key: &str, raw: &str) -> Result<toml_edit::Item> {
     match key {
-        "max_budget" | "budget.max_budget" | "price" | "cost_per_1k_tokens" | "cost.input_per_1k" => {
+        "max_budget" | "budget.max_budget" | "llm.max_budget" | "price" | "cost_per_1k_tokens" | "cost.input_per_1k" => {
             let n: f64 = raw
                 .parse()
                 .with_context(|| format!("{key} 需要是数字"))?;
@@ -491,7 +501,7 @@ fn parse_config_set_value(key: &str, raw: &str) -> Result<toml_edit::Item> {
                 anyhow::bail!("{key} 必须是有限数字");
             }
             match key {
-                "max_budget" | "budget.max_budget" if n < 0.0 => anyhow::bail!("max_budget 必须为非负数"),
+                "max_budget" | "budget.max_budget" | "llm.max_budget" if n < 0.0 => anyhow::bail!("max_budget 必须为非负数"),
                 "price" | "cost_per_1k_tokens" | "cost.input_per_1k" if n < 0.0 => {
                     anyhow::bail!("{key} 不能为负数")
                 }
@@ -525,6 +535,11 @@ fn parse_config_set_value(key: &str, raw: &str) -> Result<toml_edit::Item> {
             if (key == "model" || key == "llm.model" || key == "workspace_dir" || key == "repo_dir") && raw.trim().is_empty() {
                 anyhow::bail!("{key} 不能为空");
             }
+            if (key == "model" || key == "llm.model")
+                && (raw.parse::<i64>().is_ok() || raw.parse::<f64>().is_ok() || raw.parse::<bool>().is_ok())
+            {
+                anyhow::bail!("{key} 需要是字符串，不能是数字或布尔值");
+            }
             Ok(toml_edit::value(raw.to_string()))
         }
         _ => anyhow::bail!(
@@ -553,6 +568,13 @@ fn validate_url_value(key: &str, raw: &str) -> Result<()> {
 /// 公开的配置更新入口，保留旧名称以兼容已有调用方。
 pub fn update_config_value(path: &Path, key: &str, value: &str) -> Result<()> {
     set_config_value_file(path, key, value)
+}
+
+/// 配置 set 的公共入口：加载当前配置，校验并写回配置文件。
+pub fn set_current_config_value(key: &str, value: &str) -> Result<()> {
+    let mut cfg = Config::load()?;
+    cfg.set_value(key, value)?;
+    Ok(())
 }
 
 
@@ -591,6 +613,7 @@ fn normalize_config_key(key: &str) -> Result<&str> {
         "llm.timeout" => Ok("request_timeout_secs"),
         "llm.api_key" => Ok("api_key"),
         "llm.max_parallel" => Ok("max_parallel"),
+        "llm.max_budget" => Ok("max_budget"),
         "webhook.url" => Ok("webhook_url"),
         "webhook.enabled" => Ok("webhook_enabled"),
         "webhook.retry" => Ok("webhook_retry"),
