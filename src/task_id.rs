@@ -213,15 +213,15 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    let title_list: Vec<String> = titles
-        .into_iter()
-        .map(|s| s.as_ref().to_string())
-        .collect();
-
     // 数字索引优先，保持旧行为，不检查索引是否存在。
     if let Ok(index) = raw.parse::<usize>() {
         return Ok(TaskId::Numeric(index));
     }
+
+    let title_list: Vec<String> = titles
+        .into_iter()
+        .map(|s| s.as_ref().to_string())
+        .collect();
 
     let query_slug = TaskId::slugify(raw);
     if query_slug.is_empty() {
@@ -516,5 +516,11 @@ mod tests {
             resolve_task_id("hello-world", titles),
             Ok(TaskId::Slug("hello-world".to_string()))
         );
+    }
+
+    #[test]
+    fn resolve_numeric_index_does_not_require_title_list() {
+        let titles: Vec<&str> = Vec::new();
+        assert_eq!(resolve_task_id("7", titles), Ok(TaskId::Numeric(7)));
     }
 }
