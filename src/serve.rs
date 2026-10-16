@@ -188,6 +188,34 @@ async fn get_run(
     ))
 }
 
+fn build_health() -> serde_json::Value {
+    json!({ "status": "ok" })
+}
+
+fn build_runs(workspace_dir: &Path, query: Option<&str>) -> Vec<serde_json::Value> {
+    let all_runs = combined_runs_json(workspace_dir);
+    let (limit, offset) = parse_pagination(query);
+    all_runs.into_iter().skip(offset).take(limit).collect()
+}
+
+fn build_run_by_id(workspace_dir: &Path, id: &str) -> Option<serde_json::Value> {
+    if let Ok(ws) = Workspace::open(workspace_dir, id) {
+        if let Ok(run) = ws.load_record() {
+            if let Ok(value) = serde_json::to_value(run) {
+                return Some(summarize_run_json(&value));
+            }
+        }
+    }
+
+    if let Some(body) = find_run_in_history_files(workspace_dir, id) {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) {
+            return Some(summarize_run_json(&value));
+        }
+    }
+
+    None
+}
+
 fn readonly_http_response(status_code: u16, reason: &str, body: &str) -> String {
     format!(
         "HTTP/1.1 {status_code} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -226,67 +254,37 @@ fn find_run_in_history_files(workspace_dir: &Path, id: &str) -> Option<String> {
 fn readonly_route(workspace_dir: &Path, target: &str) -> (u16, &'static str, String) {
     let (raw_path, query) = target.split_once('?').unwrap_or((target, ""));
     let path = raw_path.trim_start_matches('/');
+
     if path == "health" {
-        return (200, "OK", json!({ "status": "ok" }).to_string());
+        return (200, "OK", build_health().to_string());
     }
 
     if path == "runs" {
-        let all_runs = combined_runs_json(workspace_dir);
-        let (limit, offset) = parse_pagination(Some(query));
-        let runs: Vec<_> = all_runs.into_iter().skip(offset).take(limit).collect();
-        match serde_json::to_string(&runs) {
-            Ok(body) => return (200, "OK", body),
+        let runs = build_runs(workspace_dir, Some(query));
+        return match serde_json::to_string(&runs) {
+            Ok(body) => (200, "OK", body),
             Err(e) => {
-                return (
+                (
                     500,
                     "Internal Server Error",
                     json!({ "error": format!("failed to serialize runs: {e}") }).to_string(),
                 )
             }
-        }
+        };
     }
 
     if let Some(rest) = path.strip_prefix("runs/") {
         if rest.is_empty() || rest.contains('/') {
             return (404, "Not Found", json!({ "error": "not found" }).to_string());
         }
-        match Workspace::open(workspace_dir, rest) {
-            Ok(ws) => match ws.load_record() {
-                Ok(run) => {
-                    match serde_json::to_value(run)
-                        .map(|v| summarize_run_json(&v).to_string())
-                    {
-                        Ok(body) => return (200, "OK", body),
-                        Err(_) => {
-                            return (
-                                500,
-                                "Internal Server Error",
-                                json!({ "error": "internal server error" }).to_string(),
-                            )
-                        }
-                    }
-                }
-                Err(_) => {
-                    return (
-                        500,
-                        "Internal Server Error",
-                        json!({ "error": "internal server error" }).to_string(),
-                    )
-                }
-            },
-            Err(_) => {
-                if let Some(body) = find_run_in_history_files(workspace_dir, rest) {
-                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) {
-                        return (200, "OK", summarize_run_json(&value).to_string());
-                    }
-                }
-                return (
-                    404,
-                    "Not Found",
-                    json!({ "error": format!("run {rest} not found") }).to_string(),
-                );
-            }
+        if let Some(value) = build_run_by_id(workspace_dir, rest) {
+            return (200, "OK", value.to_string());
         }
+        return (
+            404,
+            "Not Found",
+            json!({ "error": format!("run {rest} not found") }).to_string(),
+        );
     }
 
     (404, "Not Found", json!({ "error": "not found" }).to_string())
@@ -672,3 +670,80 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod serve_readonly_extra_tests {
+    use super::*;
+    use serde_json::Value;
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let unique = format!(
+            "workbuddy-serve-{}-{}-{}",
+            tag,
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock before unix epoch")
+                .as_nanos()
+        );
+        let dir = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn http_request(addr: SocketAddr, method: &str, path: &str) -> (u16, String) {
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let req = format!(
+            "{} {} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+            method, path
+        );
+        stream.write_all(req.as_bytes()).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        let status_code = response
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|code| code.parse::<u16>().ok())
+            .unwrap_or(0);
+        let body = response.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+        (status_code, body)
+    }
+
+    #[test]
+    fn test_health_does_not_leak_secrets() {
+        let dir = temp_dir("health");
+        let addr = serve_readonly(&dir).unwrap();
+
+        let (status, body) = http_request(addr, "GET", "/health");
+        assert_eq!(status, 200);
+        let value: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(value["status"], "ok");
+        let body_lower = body.to_lowercase();
+        for key in ["token", "key", "secret", "password", "api"] {
+            assert!(
+                !body_lower.contains(key),
+                "/health should not leak {key}: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_readonly_http_404_and_405() {
+        let dir = temp_dir("route-errors");
+        let addr = serve_readonly(&dir).unwrap();
+
+        let (status, body) = http_request(addr, "POST", "/runs");
+        assert_eq!(status, 405);
+        assert!(body.contains("error"));
+
+        let (status, body) = http_request(addr, "GET", "/runs/nope");
+        assert_eq!(status, 404);
+        assert!(body.contains("not found"));
+    }
+}

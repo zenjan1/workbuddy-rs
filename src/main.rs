@@ -202,20 +202,14 @@ enum Cmd {
     },
     /// 启动 TUI 界面查看 backlog(只读)
     Tui,
-    /// 启动只读 HTTP 服务
+    /// 启动只读 HTTP 服务（固定绑定 127.0.0.1）
     Serve {
         /// 数据目录（默认使用配置的 workspace_dir）
         #[arg(long)]
         data_dir: Option<std::path::PathBuf>,
-        /// 监听地址（默认 127.0.0.1，可用 --bind 别名）
-        #[arg(long, visible_alias = "bind", default_value = "127.0.0.1")]
-        addr: std::net::IpAddr,
-        /// 监听端口（默认 8080）
+        /// 监听端口（默认 8080；测试可传 0 由系统分配）
         #[arg(short, long, default_value_t = 8080)]
         port: u16,
-        /// 只读模式：使用随机端口 127.0.0.1:0，输出实际端口
-        #[arg(long)]
-        readonly: bool,
     },
     /// 持久记忆：添加、列出或获取键值对
     ///
@@ -470,20 +464,14 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Serve { data_dir, addr, port, readonly } => {
+        Cmd::Serve { data_dir, port } => {
             let workspace_dir = data_dir.unwrap_or_else(|| cfg.workspace_dir.clone());
-            if readonly {
-                let actual_addr = serve::serve_readonly(&workspace_dir)
-                    .map_err(|e| anyhow::anyhow!("启动只读 HTTP 服务失败: {e:#}"))?;
-                println!("只读 HTTP 服务已启动: http://{actual_addr}");
-                Ok(())
-            } else {
-                let bind_addr = std::net::SocketAddr::new(addr, port);
-                println!("只读 HTTP 服务已启动: http://{bind_addr}");
-                serve::run(&workspace_dir, bind_addr)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("启动只读 HTTP 服务失败: {e:#}"))
-            }
+            let bind_addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+            println!("只读 HTTP 服务已启动: http://{bind_addr}");
+            serve::run(&workspace_dir, bind_addr)
+                .await
+                .map_err(|e| anyhow::anyhow!("启动只读 HTTP 服务失败: {e:#}"))?;
+            Ok(())
         }
         Cmd::Undo { id } => {
             if let Some(id) = id {
@@ -578,11 +566,8 @@ mod serve_cmd_tests {
         match cli.cmd {
             Cmd::Serve {
                 data_dir: None,
-                addr,
                 port,
-                readonly: false,
             } => {
-                assert_eq!(addr, "127.0.0.1".parse::<std::net::IpAddr>().unwrap());
                 assert_eq!(port, 8080);
             }
             _ => panic!("expected serve command with defaults"),
@@ -600,12 +585,12 @@ mod serve_cmd_tests {
     }
 
     #[test]
-    fn cli_parses_serve_readonly_flag() {
-        let cli = Cli::try_parse_from(["workbuddy", "serve", "--readonly"])
-            .expect("parse serve readonly");
+    fn cli_parses_serve_port_zero() {
+        let cli = Cli::try_parse_from(["workbuddy", "serve", "--port", "0"])
+            .expect("parse serve port zero");
         match cli.cmd {
-            Cmd::Serve { readonly: true, .. } => {}
-            _ => panic!("expected serve command with readonly flag"),
+            Cmd::Serve { port, .. } => assert_eq!(port, 0),
+            _ => panic!("expected serve command"),
         }
     }
 }
