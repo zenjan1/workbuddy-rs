@@ -41,7 +41,11 @@ pub type Task = BacklogItem;
 pub fn map_backlog_to_rows(items: &[Task]) -> Vec<String> {
     items
         .iter()
-        .map(|item| format!("{:>3}. {} [{}]", item.id, item.title, item.status))
+        .map(|item| {
+            let existing_slugs: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            let slug = crate::task_id::TaskId::from_title(&item.title, item.id, &existing_slugs).to_string();
+            format!("[{}] {:>3}. {} [{}]", slug, item.id, item.title, item.status)
+        })
         .collect()
 }
 
@@ -186,17 +190,10 @@ pub fn run_tui(tasks: Vec<Task>) -> Result<()> {
 }
 
 fn draw_ui(frame: &mut Frame, items: &[BacklogItem], selected: usize) {
-    let existing_slugs: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let rows = if items.is_empty() {
         vec!["No backlog tasks".to_string()]
     } else {
-        items
-            .iter()
-            .map(|item| {
-                let slug = crate::task_id::TaskId::from_title(&item.title, item.id, &existing_slugs).to_string();
-                format!("[{}] {:>3}. {} [{}]", slug, item.id, item.title, item.status)
-            })
-            .collect()
+        render_backlog_tasks(items)
     };
 
     let list_items: Vec<ListItem> = rows
@@ -243,9 +240,9 @@ mod tests {
         let rows = map_backlog_to_rows(&sample_items());
 
         assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0], "  1. Design TUI module [pending]");
-        assert_eq!(rows[1], "  2. Render backlog list [pending]");
-        assert_eq!(rows[2], "  3. Handle q to quit [done]");
+        assert_eq!(rows[0], "[design-tui-module]   1. Design TUI module [pending]");
+        assert_eq!(rows[1], "[render-backlog-list]   2. Render backlog list [pending]");
+        assert_eq!(rows[2], "[handle-q-to-quit]   3. Handle q to quit [done]");
     }
 
     #[test]
@@ -284,9 +281,9 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                "  1. Fix \"quotes\" & <angles> [done]".to_string(),
-                "  2. Unicode: 任务 ✓ [pending]".to_string(),
-                "  3. Line\nbreak [todo]".to_string(),
+                "[fix-quotes-angles]   1. Fix \"quotes\" & <angles> [done]".to_string(),
+                "[unicode-任务]   2. Unicode: 任务 ✓ [pending]".to_string(),
+                "[line-break]   3. Line\nbreak [todo]".to_string(),
             ]
         );
     }
@@ -298,7 +295,7 @@ mod tests {
 
         assert!(output.contains("Backlog"), "output should contain title: {output}");
         assert!(output.contains("3"), "output should contain task count: {output}");
-        assert!(output.contains("  1. Design TUI module [pending]"), "output should contain first row: {output}");
+        assert!(output.contains("[design-tui-module]   1. Design TUI module [pending]"), "output should contain first row: {output}");
     }
 
     #[test]
@@ -316,9 +313,9 @@ mod tests {
         let rows = render_backlog_tasks(&sample_items());
 
         assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0], "  1. Design TUI module [pending]");
-        assert_eq!(rows[1], "  2. Render backlog list [pending]");
-        assert_eq!(rows[2], "  3. Handle q to quit [done]");
+        assert_eq!(rows[0], "[design-tui-module]   1. Design TUI module [pending]");
+        assert_eq!(rows[1], "[render-backlog-list]   2. Render backlog list [pending]");
+        assert_eq!(rows[2], "[handle-q-to-quit]   3. Handle q to quit [done]");
     }
 }
 

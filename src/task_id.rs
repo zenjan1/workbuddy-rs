@@ -29,8 +29,8 @@ impl TaskId {
         let mut last_dash = false;
 
         for ch in title.trim().chars() {
-            if ch.is_ascii_alphanumeric() {
-                out.push(ch.to_ascii_lowercase());
+            if ch.is_alphanumeric() {
+                out.extend(ch.to_lowercase());
                 last_dash = false;
             } else if !out.is_empty() && !last_dash {
                 out.push('-');
@@ -131,6 +131,7 @@ pub enum TaskIdError {
     Ambiguous { query: String, matches: Vec<String> },
     /// 找到多个匹配任务，但它们的标题完全相同。
     DuplicateTitle { query: String, title: String },
+
 }
 
 impl fmt::Display for TaskIdError {
@@ -148,6 +149,7 @@ impl fmt::Display for TaskIdError {
                     title
                 )
             }
+
         }
     }
 }
@@ -167,15 +169,28 @@ fn duplicate_or_ambiguous(query: &str, matches: Vec<(usize, String)>) -> TaskIdE
         .map(|(_, title)| normalize_title(title))
         .collect();
     if unique_titles.len() == 1 {
-        TaskIdError::DuplicateTitle {
+        return TaskIdError::DuplicateTitle {
             query: query.to_string(),
             title: matches[0].1.clone(),
-        }
-    } else {
-        TaskIdError::Ambiguous {
+        };
+    }
+
+    let unique_slugs: HashSet<String> = matches
+        .iter()
+        .map(|(_, title)| TaskId::slugify(title))
+        .filter(|slug| !slug.is_empty())
+        .collect();
+    if unique_slugs.len() == 1 && matches.len() > 1 {
+        let match_titles = matches.into_iter().map(|(_, title)| title).collect();
+        return TaskIdError::Ambiguous {
             query: query.to_string(),
-            matches: matches.into_iter().map(|(_, title)| title).collect(),
-        }
+            matches: match_titles,
+        };
+    }
+
+    TaskIdError::Ambiguous {
+        query: query.to_string(),
+        matches: matches.into_iter().map(|(_, title)| title).collect(),
     }
 }
 
@@ -431,6 +446,14 @@ mod tests {
     fn resolve_ambiguous_error_prompts_numeric_index() {
         let titles = ["Setup server", "Setup client"];
         let err = resolve_task_id("setup", titles).unwrap_err();
+        assert!(err.to_string().contains("numeric index"));
+    }
+
+    #[test]
+    fn resolve_slug_conflict_different_titles_returns_error() {
+        let titles = ["Hello World!", "Hello World?"];
+        let err = resolve_task_id("hello-world", titles).unwrap_err();
+        assert!(matches!(err, TaskIdError::Ambiguous { .. }));
         assert!(err.to_string().contains("numeric index"));
     }
 }
