@@ -45,6 +45,19 @@ pub struct Config {
     pub webhook_timeout_secs: u64,
 }
 
+/// `config set` 更新后的生效摘要。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigUpdateSummary {
+    /// 规范化后的配置键名。
+    pub key: String,
+    /// 更新前的字符串表示（由 get_value 产生）。
+    pub old_value: String,
+    /// 更新后的字符串表示（由 get_value 产生）。
+    pub new_value: String,
+    /// 该配置是否需要重启进程才会生效。
+    pub restart_required: bool,
+}
+
 pub static WEBHOOKS: std::sync::RwLock<Vec<WebhookConfig>> = std::sync::RwLock::new(Vec::new());
 
 #[derive(Debug, Default, Deserialize)]
@@ -217,15 +230,34 @@ impl Config {
     }
 
     pub fn set_value(&mut self, key: &str, value: &str) -> Result<()> {
+        self.set_value_with_summary(key, value).map(|_| ())
+    }
+
+    /// 更新单个配置项并返回生效摘要。
+    ///
+    /// 该方法先校验键名和值类型，再原子写回配置文件，最后更新内存配置。
+    /// 任何一步失败都不会污染内存或配置文件。
+    pub fn set_value_with_summary(&mut self, key: &str, value: &str) -> Result<ConfigUpdateSummary> {
         Self::validate_config_key(key)?;
-        let normalized_key = normalize_config_key(key)?;
+        let canonical_key = normalize_config_key(key)?;
         let path = Self::config_file_path();
-        // 先在副本上校验并应用，确认类型等检查全部通过后再持久化，
-        // 避免配置文件已写入但内存配置更新失败导致的不一致。
-        let updated = self.updated(normalized_key, value)?;
-        Self::update_config_file(&path, normalized_key, value)?;
+
+        let old_value = self.get_value(canonical_key)
+            .with_context(|| format!("读取旧值失败: {canonical_key}"))?;
+        let updated = self.updated(canonical_key, value)?;
+        Self::update_config_file(&path, canonical_key, value)
+            .with_context(|| format!("写入配置文件失败: {}", path.display()))?;
+
+        let new_value = updated.get_value(canonical_key)
+            .with_context(|| format!("读取新值失败: {canonical_key}"))?;
         *self = updated;
-        Ok(())
+
+        Ok(ConfigUpdateSummary {
+            key: canonical_key.to_string(),
+            old_value,
+            new_value,
+            restart_required: RESTART_REQUIRED_KEYS.contains(&canonical_key),
+        })
     }
 
     fn apply_value(&mut self, key: &str, value: &str) -> Result<()> {
@@ -286,7 +318,12 @@ impl Config {
                     .with_context(|| format!("{key} 需要是布尔值 true/false"))?;
                 self.webhook_enabled = b;
             }
-            "api_key" => self.api_key = Some(value.to_string()),
+            "api_key" => {
+                if value.trim().is_empty() {
+                    anyhow::bail!("api_key 不能为空");
+                }
+                self.api_key = Some(value.to_string());
+            }
             "model" => {
                 if value.trim().is_empty() {
                     anyhow::bail!("model 不能为空");
@@ -316,13 +353,23 @@ impl Config {
 
     /// 判断配置键是否允许通过 `config set` 写入。
     pub fn is_known_config_key(key: &str) -> bool {
-        validate_key_syntax(key).is_ok() && normalize_config_key(key).is_ok()
+        validate_key_syntax(key).is_ok()
+            && normalize_config_key(key)
+                .map(|canonical| CONFIG_KEYS.contains(&canonical))
+                .unwrap_or(false)
     }
 
     /// 校验配置键是否允许通过 `config set` 写入。
     pub fn validate_config_key(key: &str) -> Result<()> {
         validate_key_syntax(key)?;
-        normalize_config_key(key).map(|_| ())
+        let canonical = normalize_config_key(key)?;
+        if !CONFIG_KEYS.contains(&canonical) {
+            anyhow::bail!(
+                "未知配置键: {key}; 可用键: {}",
+                CONFIG_KEYS.join(", ")
+            );
+        }
+        Ok(())
     }
 
     /// 返回需要重启生效的全部配置键。

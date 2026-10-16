@@ -343,8 +343,7 @@ async fn main() -> Result<()> {
 
                     let config_path = config::find_config_path()?;
                     if let Err(e) = config::set_config(&config_path, &key, &value) {
-                        eprintln!("设置配置 {} 失败: {}", key, e);
-                        std::process::exit(1);
+                        anyhow::bail!("设置配置 {} 失败: {}", key, e);
                     }
 
                     let cfg = Config::load()?;
@@ -1267,4 +1266,35 @@ fn cmd_show_by_slug(cfg: Config, slug: &str) -> Result<()> {
         .find(|r| r.id == slug)
         .ok_or_else(|| anyhow::anyhow!("未找到 slug 为 '{}' 的任务", slug))?;
     cmd_show(cfg, &run.id.to_string())
+}
+
+#[cfg(test)]
+mod config_set_cli_tests {
+    use super::*;
+    use clap::error::ErrorKind;
+
+    #[test]
+    fn cli_parses_config_set() {
+        let cli = Cli::try_parse_from(["workbuddy", "config", "set", "model", "gpt-4o"])
+            .expect("parse config set");
+        match cli.cmd {
+            Cmd::Config {
+                action: Some(ConfigAction::Set { key, value }),
+                get: None,
+            } => {
+                assert_eq!(key, "model");
+                assert_eq!(value, "gpt-4o");
+            }
+            _ => panic!("expected config set command"),
+        }
+    }
+
+    #[test]
+    fn cli_config_set_requires_value() {
+        let result = Cli::try_parse_from(["workbuddy", "config", "set", "model"]);
+        match result {
+            Ok(_) => panic!("expected missing value error"),
+            Err(e) => assert_eq!(e.kind(), ErrorKind::MissingRequiredArgument),
+        }
+    }
 }

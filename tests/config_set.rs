@@ -327,3 +327,55 @@ fn config_set_rejects_invalid_nested_type_values_without_writes() {
         raw
     );
 }
+
+#[test]
+fn config_set_rejects_readonly_keys() {
+    let ws = TestWorkspace::new();
+    ws.write_initial_config();
+
+    let original = read_config(&ws);
+
+    let result = set_config_value(&ws.config_path(), "llm.base_url", "https://changed.example.com");
+    assert!(
+        result.is_err(),
+        "setting a read-only key should return an error"
+    );
+
+    let raw = read_config(&ws);
+    assert_eq!(
+        raw, original,
+        "config file changed after rejected read-only key update: {}",
+        raw
+    );
+}
+
+#[test]
+fn config_set_updates_string_integer_and_boolean_and_can_be_reloaded() {
+    let ws = TestWorkspace::new();
+    ws.write_initial_config();
+
+    set_config_value(&ws.config_path(), "model", "gpt-4o").expect("set model");
+    set_config_value(&ws.config_path(), "max_budget", "12000").expect("set max_budget");
+    set_config_value(&ws.config_path(), "stream", "false").expect("set stream");
+
+    let raw = read_config(&ws);
+    assert!(raw.contains("gpt-4o"), "model not updated: {}", raw);
+    assert!(raw.contains("max_budget = 12000"), "max_budget not updated: {}", raw);
+    assert!(raw.contains("stream = false"), "stream not updated: {}", raw);
+
+    assert_eq!(
+        get_config_value(&ws.config_path(), "model").expect("get model"),
+        "gpt-4o"
+    );
+    assert_eq!(
+        get_config_value(&ws.config_path(), "max_budget").expect("get max_budget"),
+        "12000"
+    );
+    assert_eq!(
+        get_config_value(&ws.config_path(), "stream").expect("get stream"),
+        "false"
+    );
+
+    assert!(raw.contains("timeout = 30"), "timeout changed: {}", raw);
+    assert!(raw.contains("https://example.com/v1"), "base_url changed: {}", raw);
+}
