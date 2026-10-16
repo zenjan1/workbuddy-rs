@@ -35,3 +35,4 @@ strip = true
 reqwest = { version = "0.12", features = ["json"] }
 tower = "0.5"
 hyper = "1.12.0"
+http-body-util = "0.1"

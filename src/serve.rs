@@ -79,12 +79,41 @@ fn parse_pagination(query: Option<&str>) -> (usize, usize) {
     (limit, offset)
 }
 
-#[derive(serde::Serialize)]
-struct RunsResponse {
-    runs: Vec<RunRecord>,
-    limit: usize,
-    offset: usize,
-    total: usize,
+fn run_id_of_value(value: &serde_json::Value) -> Option<&str> {
+    value.get("id").and_then(|v| v.as_str())
+}
+
+fn load_history_values(workspace_dir: &Path) -> Vec<serde_json::Value> {
+    let mut values = Vec::new();
+    if let Ok(contents) = std::fs::read_to_string(workspace_dir.join("runs.json")) {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&contents) {
+            if let Some(arr) = parsed.as_array() {
+                values.extend(arr.iter().cloned());
+            }
+        }
+    }
+    if let Ok(contents) = std::fs::read_to_string(workspace_dir.join("runs.jsonl")) {
+        for line in contents.lines() {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+                values.push(value);
+            }
+        }
+    }
+    values
+}
+
+fn combined_runs_json(workspace_dir: &Path) -> Vec<serde_json::Value> {
+    let mut runs: Vec<serde_json::Value> = Workspace::root(workspace_dir)
+        .iter()
+        .filter_map(|run| serde_json::to_value(run).ok())
+        .collect();
+    for value in load_history_values(workspace_dir) {
+        let id = run_id_of_value(&value).unwrap_or("");
+        if id.is_empty() || !runs.iter().any(|existing| run_id_of_value(existing) == Some(id)) {
+            runs.push(value);
+        }
+    }
+    runs
 }
 
 #[derive(Clone)]
@@ -99,17 +128,11 @@ async fn health() -> impl axum::response::IntoResponse {
 async fn list_runs(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
-) -> Result<Json<RunsResponse>, (StatusCode, Json<serde_json::Value>)> {
-    let all_runs = Workspace::root(&state.workspace_dir);
-    let total = all_runs.len();
+) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, Json<serde_json::Value>)> {
+    let all_runs = combined_runs_json(&state.workspace_dir);
     let (limit, offset) = parse_pagination(query.as_deref());
     let runs = all_runs.into_iter().skip(offset).take(limit).collect();
-    Ok(Json(RunsResponse {
-        runs,
-        limit,
-        offset,
-        total,
-    }))
+    Ok(Json(runs))
 }
 
 async fn get_run(
@@ -138,14 +161,42 @@ fn readonly_http_response(status_code: u16, reason: &str, body: &str) -> String 
     )
 }
 
+fn find_run_in_history_files(workspace_dir: &Path, id: &str) -> Option<String> {
+    let json_path = workspace_dir.join("runs.json");
+    if let Ok(contents) = std::fs::read_to_string(&json_path) {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) {
+            if let Some(arr) = value.as_array() {
+                for item in arr {
+                    if item.get("id").and_then(|v| v.as_str()) == Some(id) {
+                        return Some(item.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    let jsonl_path = workspace_dir.join("runs.jsonl");
+    if let Ok(contents) = std::fs::read_to_string(&jsonl_path) {
+        for line in contents.lines() {
+            if let Ok(item) = serde_json::from_str::<serde_json::Value>(line) {
+                if item.get("id").and_then(|v| v.as_str()) == Some(id) {
+                    return Some(item.to_string());
+                }
+            }
+        }
+    }
+
+    None
+}
+
 fn readonly_route(workspace_dir: &Path, path: &str) -> (u16, &'static str, String) {
     if path == "health" {
         return (200, "OK", json!({ "status": "ok" }).to_string());
     }
 
     if path == "runs" {
-        let all_runs = Workspace::root(workspace_dir);
-        match runs_to_json(&all_runs) {
+        let all_runs = combined_runs_json(workspace_dir);
+        match serde_json::to_string(&all_runs) {
             Ok(body) => return (200, "OK", body),
             Err(e) => {
                 return (
@@ -161,33 +212,35 @@ fn readonly_route(workspace_dir: &Path, path: &str) -> (u16, &'static str, Strin
         if rest.is_empty() || rest.contains('/') {
             return (404, "Not Found", json!({ "error": "not found" }).to_string());
         }
-        let ws = match Workspace::open(workspace_dir, rest) {
-            Ok(ws) => ws,
-            Err(_) => {
-                return (
-                    404,
-                    "Not Found",
-                    json!({ "error": format!("run {rest} not found") }).to_string(),
-                )
-            }
-        };
-        match ws.load_record() {
-            Ok(run) => match run_to_json(&run) {
-                Ok(body) => return (200, "OK", body),
+        match Workspace::open(workspace_dir, rest) {
+            Ok(ws) => match ws.load_record() {
+                Ok(run) => match run_to_json(&run) {
+                    Ok(body) => return (200, "OK", body),
+                    Err(e) => {
+                        return (
+                            500,
+                            "Internal Server Error",
+                            json!({ "error": format!("failed to serialize run {rest}: {e}") }).to_string(),
+                        )
+                    }
+                },
                 Err(e) => {
                     return (
                         500,
                         "Internal Server Error",
-                        json!({ "error": format!("failed to serialize run {rest}: {e}") }).to_string(),
+                        json!({ "error": format!("failed to load run {rest}: {e}") }).to_string(),
                     )
                 }
             },
-            Err(e) => {
+            Err(_) => {
+                if let Some(body) = find_run_in_history_files(workspace_dir, rest) {
+                    return (200, "OK", body);
+                }
                 return (
-                    500,
-                    "Internal Server Error",
-                    json!({ "error": format!("failed to load run {rest}: {e}") }).to_string(),
-                )
+                    404,
+                    "Not Found",
+                    json!({ "error": format!("run {rest} not found") }).to_string(),
+                );
             }
         }
     }
@@ -235,11 +288,7 @@ fn handle_readonly_connection(stream: &mut TcpStream, workspace_dir: &Path) -> s
     Ok(())
 }
 
-impl AsRef<Path> for Workspace {
-    fn as_ref(&self) -> &Path {
-        self.dir.as_path()
-    }
-}
+
 
 pub fn serve_readonly<P: AsRef<Path>>(workspace_dir: P) -> Result<SocketAddr> {
     let workspace_dir = workspace_dir.as_ref();
@@ -276,7 +325,8 @@ pub async fn serve_with_dir(workspace_dir: &Path, bind_addr: SocketAddr) -> anyh
         .route("/runs/{id}", get(get_run))
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind(bind_addr).await?;
+    let loopback = SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, bind_addr.port()));
+    let listener = tokio::net::TcpListener::bind(loopback).await?;
     let local_addr = listener.local_addr()?;
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
@@ -423,10 +473,8 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let json: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["limit"].as_u64(), Some(20));
-        assert_eq!(json["offset"].as_u64(), Some(0));
-        assert_eq!(json["total"].as_u64(), Some(1));
-        let runs = json["runs"].as_array().unwrap();
+        assert!(json.is_array());
+        let runs = json.as_array().unwrap();
         assert_eq!(runs.len(), 1);
 
         // runs with pagination query: offset=1 should skip the only run
@@ -443,10 +491,8 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let json: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["limit"].as_u64(), Some(5));
-        assert_eq!(json["offset"].as_u64(), Some(1));
-        assert_eq!(json["total"].as_u64(), Some(1));
-        assert_eq!(json["runs"].as_array().unwrap().len(), 0);
+        assert!(json.is_array());
+        assert_eq!(json.as_array().unwrap().len(), 0);
 
         // runs/{id}
         let response = app
@@ -521,8 +567,3 @@ mod tests {
     }
 }
 
-impl Workspace {
-    pub fn create(root: PathBuf) -> Result<Self> {
-        Workspace::create_new(&root, "serve-test-workspace")
-    }
-}

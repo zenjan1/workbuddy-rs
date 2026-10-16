@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use workbuddy_rs::serve::serve_readonly;
-use workbuddy_rs::workspace::Workspace;
 
 struct TestWorkspace {
     path: PathBuf,
@@ -75,10 +74,7 @@ fn http_request(addr: SocketAddr, method: &str, target: &str) -> (u16, String) {
 fn serve_readonly_health_runs_and_method_not_allowed() {
     let temp = TestWorkspace::new();
 
-    let workspace = Workspace::create(temp.path().to_path_buf())
-        .expect("failed to create workspace");
-
-    let addr = serve_readonly(&workspace).expect("failed to start read-only server");
+    let addr = serve_readonly(temp.path()).expect("failed to start read-only server");
 
     let (status, body) = http_request(addr, "GET", "/health");
     assert_eq!(status, 200, "/health returned status {status}, body: {body}");
@@ -97,4 +93,85 @@ fn serve_readonly_health_runs_and_method_not_allowed() {
 
     let (status, _body) = http_request(addr, "POST", "/runs");
     assert_eq!(status, 405, "POST /runs should return 405");
+}
+
+fn seed_mock_run_history(temp: &TestWorkspace, run_id: &str) {
+    let cwd = temp.path().to_string_lossy().to_string();
+    let run = serde_json::json!({
+        "id": run_id,
+        "command": "echo hello",
+        "cwd": cwd,
+        "started_at": "2024-01-01T00:00:00Z",
+        "start_time": "2024-01-01T00:00:00Z",
+        "started": "2024-01-01T00:00:00Z",
+        "finished_at": "2024-01-01T00:00:01Z",
+        "finish_time": "2024-01-01T00:00:01Z",
+        "ended_at": "2024-01-01T00:00:01Z",
+        "finished": "2024-01-01T00:00:01Z",
+        "ended": "2024-01-01T00:00:01Z",
+        "exit_code": 0,
+        "exit_status": 0,
+        "created_at": "2024-01-01T00:00:00Z",
+        "updated_at": "2024-01-01T00:00:01Z",
+        "output_files": []
+    });
+    let runs = serde_json::json!([run.clone()]);
+
+    for root in [temp.path().join(".workbuddy"), temp.path().to_path_buf()] {
+        fs::create_dir_all(&root).expect("failed to create run storage directory");
+
+        fs::write(
+            root.join("runs.json"),
+            serde_json::to_vec_pretty(&runs).expect("failed to serialize mock runs"),
+        )
+        .expect("failed to write mock runs.json");
+
+        fs::write(
+            root.join("runs.jsonl"),
+            format!(
+                "{}\n",
+                serde_json::to_string(&run).expect("failed to serialize mock run")
+            ),
+        )
+        .expect("failed to write mock runs.jsonl");
+    }
+}
+
+#[test]
+fn serve_readonly_run_lookup_uses_mock_history_and_returns_404_for_unknown_id() {
+    let temp = TestWorkspace::new();
+
+    let run_id = "mock-run-id";
+    seed_mock_run_history(&temp, run_id);
+
+    let addr = serve_readonly(temp.path()).expect("failed to start read-only server");
+
+    let (status, body) = http_request(addr, "GET", &format!("/runs/{run_id}"));
+    assert_eq!(status, 200, "/runs/{run_id} returned status {status}, body: {body}");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&body).expect("response body is not valid JSON");
+    assert_eq!(
+        parsed["id"].as_str(),
+        Some(run_id),
+        "unexpected run JSON: {body}"
+    );
+
+    let (status, body) = http_request(addr, "GET", "/runs/unknown-run-id");
+    assert_eq!(
+        status,
+        404,
+        "GET /runs/unknown-run-id should return 404, body: {body}"
+    );
+
+    let (status, body) = http_request(addr, "GET", "/runs");
+    assert_eq!(status, 200, "/runs returned status {status}, body: {body}");
+    let runs: serde_json::Value =
+        serde_json::from_str(&body).expect("response body is not valid JSON");
+    assert!(
+        runs.as_array()
+            .expect("/runs should be a JSON array")
+            .iter()
+            .any(|run| run["id"].as_str() == Some(run_id)),
+        "/runs did not include mock run: {body}"
+    );
 }

@@ -2430,6 +2430,7 @@ dependencies = [
  "ctrlc",
  "fs2",
  "futures",
+ "http-body-util",
  "hyper",
  "ratatui",
  "reqwest",
