@@ -298,10 +298,21 @@ fn history_entries_from_run(
     let content = truncate_chars(&content, 80);
     let state = if success { "completed" } else { "failed" };
     let task_id_display = format_task_id(record.id.as_str());
+    let timestamp = raw
+        .get("timestamp")
+        .or_else(|| raw.get("created_at"))
+        .or_else(|| raw.get("started_at"))
+        .or_else(|| raw.get("finished_at"))
+        .or_else(|| raw.get("start_time"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown");
+    let title = truncate_chars(&record.goal, 60);
     let log = format!(
-        "[{}] {} ({} steps): {} {}",
+        "[{}] {} {} {} ({} steps): {} {}",
+        timestamp,
         task_id_display,
         state,
+        title,
         record.steps.len(),
         content,
         usage_text
@@ -1452,5 +1463,67 @@ mod edge_case_tests {
         assert!(result.is_err());
 
         fs::remove_dir_all(&ws).unwrap();
+    }
+}
+
+
+#[cfg(test)]
+mod status_history_tests {
+    use super::*;
+
+    fn entry(success: bool, log: &str) -> HistoryEntry {
+        HistoryEntry {
+            success,
+            log: log.to_string(),
+        }
+    }
+
+    #[test]
+    fn status_summary_from_history_counts_completed_failed_and_recent_logs() {
+        let history = vec![
+            entry(true, "log1"),
+            entry(false, "log2"),
+            entry(true, "log3"),
+            entry(true, "log4"),
+            entry(false, "log5"),
+            entry(true, "log6"),
+        ];
+        let summary = StatusSummary::from_history(&history);
+        assert_eq!(summary.completed_runs, 4);
+        assert_eq!(summary.failed_runs, 2);
+        assert_eq!(summary.recent_logs.len(), 5);
+        assert_eq!(summary.recent_logs[0], "log6");
+        assert_eq!(summary.recent_logs[4], "log2");
+    }
+
+    #[test]
+    fn status_from_history_has_running_false_and_counts() {
+        let history = vec![entry(true, "log1"), entry(false, "log2")];
+        let status = Status::from_history(&history);
+        assert!(!status.running);
+        assert_eq!(status.completed, 1);
+        assert_eq!(status.failed, 1);
+        assert_eq!(status.recent_logs, vec!["log2".to_string(), "log1".to_string()]);
+    }
+
+    #[test]
+    fn format_status_renders_timestamp_title_and_state() {
+        let summary = StatusSummary {
+            supervisor_running: false,
+            pid: None,
+            completed_runs: 1,
+            failed_runs: 0,
+            recent_logs: vec![
+                "[2025-01-01T00:00:00Z] task-1 completed My Task: done (prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, chars: 0)".to_string(),
+            ],
+            running: false,
+            completed: 1,
+            failed: 0,
+        };
+        let rendered = format_status(&summary);
+        assert!(rendered.contains("Last run: 1 completed, 0 failed"));
+        assert!(rendered.contains("2025-01-01T00:00:00Z"));
+        assert!(rendered.contains("My Task"));
+        assert!(rendered.contains("completed"));
     }
 }
