@@ -33,6 +33,7 @@ impl TestWorkspace {
             r#"# WorkBuddy configuration
 model = "default-model"
 max_budget = 5000
+timeout = 30
 stream = true
 
 [llm]
@@ -212,5 +213,31 @@ fn config_set_leaves_default_config_unchanged_without_updates() {
     assert_eq!(
         before, after,
         "default config changed after read-only access"
+    );
+}
+
+#[test]
+fn config_set_common_keys_are_reloaded_from_disk() {
+    let ws = TestWorkspace::new();
+    ws.write_initial_config();
+
+    set_config_value(&ws.config_path(), "model", "gpt-4o").expect("set model");
+    set_config_value(&ws.config_path(), "max_budget", "12000").expect("set max_budget");
+    set_config_value(&ws.config_path(), "timeout", "45").expect("set timeout");
+
+    assert_eq!(
+        get_config_value(&ws.config_path(), "model").expect("get model"),
+        "gpt-4o",
+        "config --get returned unexpected model value after config set"
+    );
+    assert_eq!(
+        get_config_value(&ws.config_path(), "max_budget").expect("get max_budget"),
+        "12000",
+        "config --get returned unexpected max_budget value after config set"
+    );
+    assert_eq!(
+        get_config_value(&ws.config_path(), "timeout").expect("get timeout"),
+        "45",
+        "config --get returned unexpected timeout value after config set"
     );
 }

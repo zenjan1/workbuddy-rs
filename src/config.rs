@@ -58,6 +58,7 @@ struct FileConfig {
     repo_dir: Option<PathBuf>,
     memory_path: Option<PathBuf>,
     request_timeout_secs: Option<u64>,
+    timeout: Option<u64>,
     price: Option<f64>,
     max_budget: Option<f64>,
     cost_per_1k_tokens: f64,
@@ -139,7 +140,7 @@ impl Config {
             max_parallel: file.max_parallel.unwrap_or(4).max(1),
             workspace_dir,
             repo_dir,
-            request_timeout_secs: file.request_timeout_secs.unwrap_or(300),
+            request_timeout_secs: file.request_timeout_secs.or(file.timeout).unwrap_or(300),
             price: file.price.unwrap_or(0.0),
             max_budget: file.max_budget.unwrap_or(0.0),
             cost_per_1k_tokens: file.cost_per_1k_tokens,
@@ -554,6 +555,21 @@ pub fn update_config_value(path: &Path, key: &str, value: &str) -> Result<()> {
     set_config_value_file(path, key, value)
 }
 
+
+
+/// 查找现有配置文件路径；没有则返回第一个候选路径。
+pub fn find_config_path() -> Result<PathBuf> {
+    for path in Config::config_candidates() {
+        if path.exists() {
+            return Ok(path);
+        }
+    }
+    Ok(Config::config_candidates()
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| PathBuf::from("config.toml")))
+}
+
 /// 校验配置键的基本语法：非空且仅包含字母、数字、下划线、连字符、点号。
 fn validate_key_syntax(key: &str) -> Result<()> {
     if key.trim().is_empty() {
@@ -579,6 +595,7 @@ fn normalize_config_key(key: &str) -> Result<&str> {
         "webhook.enabled" => Ok("webhook_enabled"),
         "webhook.retry" => Ok("webhook_retry"),
         "webhook.timeout_secs" => Ok("webhook_timeout_secs"),
+        "timeout" => Ok("timeout"),
         _ if CONFIG_KEYS.contains(&key) => Ok(key),
         _ => anyhow::bail!(
             "未知配置键: {key}; 可用键: {} 或别名: llm.api_base, llm.base_url, llm.model, llm.price_per_1k_tokens, llm.timeout",
@@ -596,38 +613,23 @@ fn atomic_write(path: &Path, contents: &str) -> Result<()> {
     std::fs::create_dir_all(dir)
         .with_context(|| format!("创建配置目录失败: {}", dir.display()))?;
 
-    let file_name = path.file_name().unwrap_or_default().to_string_lossy();
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let tmp_path = dir.join(format!(
-        ".{}.{}.{}.tmp",
-        file_name,
-        std::process::id(),
-        unique
-    ));
-
+    let tmp_path = path.with_extension(format!("tmp.{}", std::process::id()));
     let write_result = (|| -> Result<()> {
-        let mut tmp = std::fs::File::create(&tmp_path)
+        let mut file = std::fs::File::create(&tmp_path)
             .with_context(|| format!("创建临时文件失败: {}", tmp_path.display()))?;
-        tmp.write_all(contents.as_bytes())
+        file.write_all(contents.as_bytes())
             .with_context(|| format!("写入临时文件失败: {}", tmp_path.display()))?;
-        tmp.sync_all()
+        file.sync_all()
             .with_context(|| format!("同步临时文件失败: {}", tmp_path.display()))?;
+        std::fs::rename(&tmp_path, path)
+            .with_context(|| format!("替换配置文件失败: {}", path.display()))?;
         Ok(())
     })();
 
-    if let Err(e) = write_result {
+    if write_result.is_err() {
         let _ = std::fs::remove_file(&tmp_path);
-        return Err(e);
     }
-
-    std::fs::rename(&tmp_path, path).with_context(|| {
-        let _ = std::fs::remove_file(&tmp_path);
-        format!("替换配置文件失败: {}", path.display())
-    })?;
-    Ok(())
+    write_result
 }
 
 /// 拆分并校验点号嵌套键。

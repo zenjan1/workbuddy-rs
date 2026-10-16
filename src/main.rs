@@ -309,7 +309,7 @@ async fn main() -> Result<()> {
                     return Err(anyhow::anyhow!("配置键不能为空"));
                 }
 
-                let config_path = find_config_path()?;
+                let config_path = config::find_config_path()?;
                 let value = config::get_config_value(&config_path, &key)
                     .map_err(|e| anyhow::anyhow!("获取配置 {} 失败: {}", key, e))?;
 
@@ -326,7 +326,7 @@ async fn main() -> Result<()> {
                         return Err(anyhow::anyhow!("配置键不能为空"));
                     }
 
-                    let config_path = find_config_path()?;
+                    let config_path = config::find_config_path()?;
                     let value = config::get_config_value(&config_path, &key)
                         .map_err(|e| anyhow::anyhow!("获取配置 {} 失败: {}", key, e))?;
 
@@ -341,7 +341,7 @@ async fn main() -> Result<()> {
                         return Err(anyhow::anyhow!("配置值不能为空"));
                     }
 
-                    let config_path = find_config_path()?;
+                    let config_path = config::find_config_path()?;
                     config::set_config(&config_path, &key, &value)
                         .map_err(|e| anyhow::anyhow!("设置配置 {} 失败: {}", key, e))?;
 
