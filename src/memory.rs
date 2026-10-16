@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
-use crate::workspace::Workspace;
+
 
 #[derive(Debug)]
 pub enum MemoryError {
@@ -69,47 +69,61 @@ impl MemoryStore {
         Ok(Self { path })
     }
 
+    /// Opens the workspace-scoped memory file.
     pub fn open(workspace_dir: impl AsRef<Path>) -> Result<Self, MemoryError> {
-        let workspace = Workspace {
-            dir: workspace_dir.as_ref().to_path_buf(),
-        };
-        Self::new(memory_file_path(&workspace.dir))
+        Self::new(memory_file_path(workspace_dir.as_ref()))
     }
 
-    pub fn add(&self, key: &str, text: &str, tags: &[String]) -> Result<MemoryEntry, MemoryError> {
+    /// Selects workspace memory when a workspace dir is provided, otherwise the
+    /// user config directory memory.json.
+    pub fn open_in_workspace_or_config(workspace_dir: Option<&Path>) -> Result<Self, MemoryError> {
+        let path = match workspace_dir {
+            Some(dir) => memory_file_path(dir),
+            None => default_memory_file_path(),
+        };
+        Self::new(path)
+    }
+
+    pub fn add(&self, key: &str, value: &str) -> Result<MemoryEntry, MemoryError> {
         let key = key.trim();
-        let text = text.trim();
+        let value = value.trim();
         if key.is_empty() {
             return Err(MemoryError::Invalid("memory key must not be empty".to_owned()));
         }
-        if text.is_empty() {
-            return Err(MemoryError::Invalid("memory text must not be empty".to_owned()));
+        if value.is_empty() {
+            return Err(MemoryError::Invalid("memory value must not be empty".to_owned()));
         }
-
-        let tags = tags
-            .iter()
-            .map(|tag| tag.trim().to_owned())
-            .filter(|tag| !tag.is_empty())
-            .collect::<Vec<_>>();
 
         let mut entries = self.read_entries()?;
 
-        if entries.iter().any(|entry| entry.key.as_str() == key) {
-            return Err(MemoryError::Conflict(format!("duplicate key: {key}")));
+        if let Some(pos) = entries.iter().position(|entry| entry.key.as_str() == key) {
+            entries[pos].text = value.to_owned();
+            entries[pos].tags.clear();
+            self.write_entries(&entries)?;
+            return Ok(entries[pos].clone());
         }
 
         let entry = MemoryEntry {
             key: key.to_owned(),
-            text: text.to_owned(),
-            tags,
+            text: value.to_owned(),
+            tags: Vec::new(),
         };
         entries.push(entry.clone());
         self.write_entries(&entries)?;
         Ok(entry)
     }
 
-    pub fn list(&self) -> Result<Vec<MemoryEntry>, MemoryError> {
-        self.read_entries()
+    /// Lists entries. When `filter` is `Some`, only entries whose key contains
+    /// the substring are returned.
+    pub fn list(&self, filter: Option<&str>) -> Result<Vec<MemoryEntry>, MemoryError> {
+        let entries = self.read_entries()?;
+        match filter {
+            Some(substr) if !substr.is_empty() => Ok(entries
+                .into_iter()
+                .filter(|entry| entry.key.contains(substr))
+                .collect()),
+            _ => Ok(entries),
+        }
     }
 
     pub fn get(&self, key: &str) -> Result<MemoryEntry, MemoryError> {
@@ -180,23 +194,35 @@ pub fn memory_file_path(workspace_dir: &Path) -> PathBuf {
     workspace_dir.join(".workbuddy").join("memory.json")
 }
 
+pub fn config_memory_file_path() -> PathBuf {
+    default_memory_file_path()
+}
+
+fn default_memory_file_path() -> PathBuf {
+    std::env::current_dir()
+        .map(|dir| dir.join(".workbuddy").join("memory.json"))
+        .unwrap_or_else(|_| PathBuf::from(".workbuddy").join("memory.json"))
+}
+
 pub fn add(
-    workspace_dir: &Path,
+    workspace_dir: Option<&Path>,
     key: &str,
-    text: &str,
-    tags: &[String],
+    value: &str,
 ) -> Result<MemoryEntry, MemoryError> {
-    let store = MemoryStore::open(workspace_dir)?;
-    store.add(key, text, tags)
+    let store = MemoryStore::open_in_workspace_or_config(workspace_dir)?;
+    store.add(key, value)
 }
 
-pub fn list(workspace_dir: &Path) -> Result<Vec<MemoryEntry>, MemoryError> {
-    let store = MemoryStore::open(workspace_dir)?;
-    store.list()
+pub fn list(
+    workspace_dir: Option<&Path>,
+    filter: Option<&str>,
+) -> Result<Vec<MemoryEntry>, MemoryError> {
+    let store = MemoryStore::open_in_workspace_or_config(workspace_dir)?;
+    store.list(filter)
 }
 
-pub fn get(workspace_dir: &Path, key: &str) -> Result<MemoryEntry, MemoryError> {
-    let store = MemoryStore::open(workspace_dir)?;
+pub fn get(workspace_dir: Option<&Path>, key: &str) -> Result<MemoryEntry, MemoryError> {
+    let store = MemoryStore::open_in_workspace_or_config(workspace_dir)?;
     store.get(key)
 }
 
@@ -222,99 +248,72 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    fn tag_list(list: &[&str]) -> Vec<String> {
-        list.iter().map(|s| s.to_string()).collect()
-    }
-
     #[test]
     fn add_creates_file_and_round_trips() {
         let dir = temp_workspace();
         let store = MemoryStore::open(&dir).unwrap();
 
-        let entry = store
-            .add("greeting", "hello world", &tag_list(&["test", "工作"]))
-            .unwrap();
+        let entry = store.add("greeting", "hello world").unwrap();
         assert_eq!(entry.key, "greeting");
         assert_eq!(entry.text, "hello world");
-        assert_eq!(entry.tags, tag_list(&["test", "工作"]));
+        assert!(entry.tags.is_empty());
         assert!(memory_file_path(&dir).exists());
 
         drop(store);
 
         let reopened = MemoryStore::open(&dir).unwrap();
-        let entries = reopened.list().unwrap();
+        let entries = reopened.list(None).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].key, "greeting");
         assert_eq!(entries[0].text, "hello world");
-        assert_eq!(entries[0].tags, tag_list(&["test", "工作"]));
+        assert!(entries[0].tags.is_empty());
 
         cleanup(&dir);
     }
 
     #[test]
-    fn add_duplicate_key_returns_conflict_error() {
+    fn add_duplicate_key_overwrites_existing_entry() {
         let dir = temp_workspace();
         let store = MemoryStore::open(&dir).unwrap();
 
-        store.add("key", "first", &tag_list(&["one"])).unwrap();
-        let err = store
-            .add("key", "second", &tag_list(&["two"]))
-            .unwrap_err();
-        assert!(matches!(err, MemoryError::Conflict(_)));
+        store.add("key", "first").unwrap();
+        let entry = store.add("key", "second").unwrap();
+        assert_eq!(entry.text, "second");
 
-        let entries = store.list().unwrap();
+        let entries = store.list(None).unwrap();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].text, "first");
-        assert_eq!(entries[0].tags, tag_list(&["one"]));
+        assert_eq!(entries[0].key, "key");
+        assert_eq!(entries[0].text, "second");
 
         cleanup(&dir);
     }
 
     #[test]
-    fn remove_deletes_entry_and_persists() {
+    fn list_filter_matches_key_substring() {
         let dir = temp_workspace();
         let store = MemoryStore::open(&dir).unwrap();
 
-        store.add("alpha", "one", &[]).unwrap();
-        store.add("beta", "two", &[]).unwrap();
+        store.add("apple", "red").unwrap();
+        store.add("apricot", "orange").unwrap();
+        store.add("banana", "yellow").unwrap();
 
-        let removed = store.remove("alpha").unwrap();
-        assert_eq!(removed.key, "alpha");
-        assert!(matches!(store.get("alpha"), Err(MemoryError::NotFound(_))));
-        assert!(matches!(store.remove("missing"), Err(MemoryError::NotFound(_))));
+        let filtered = store.list(Some("ap")).unwrap();
+        let keys: Vec<_> = filtered.iter().map(|entry| entry.key.as_str()).collect();
+        assert_eq!(keys, vec!["apple", "apricot"]);
 
-        drop(store);
-        let reopened = MemoryStore::open(&dir).unwrap();
-        let entries = reopened.list().unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].key, "beta");
+        assert_eq!(store.list(Some("zzz")).unwrap().len(), 0);
+        assert_eq!(store.list(None).unwrap().len(), 3);
 
         cleanup(&dir);
     }
 
     #[test]
-    fn list_returns_entries_in_file_order() {
+    fn get_returns_entry_by_key_or_not_found() {
         let dir = temp_workspace();
         let store = MemoryStore::open(&dir).unwrap();
 
-        store.add("first", "1", &[]).unwrap();
-        store.add("second", "2", &[]).unwrap();
-        store.add("third", "3", &[]).unwrap();
-
-        let entries = store.list().unwrap();
-        let keys: Vec<_> = entries.iter().map(|entry| entry.key.as_str()).collect();
-        assert_eq!(keys, vec!["first", "second", "third"]);
-
-        cleanup(&dir);
-    }
-
-    #[test]
-    fn get_returns_entry_by_key() {
-        let dir = temp_workspace();
-        let store = MemoryStore::open(&dir).unwrap();
-
-        store.add("alpha", "one", &[]).unwrap();
-        store.add("beta", "two", &[]).unwrap();
+        store.add("alpha", "one").unwrap();
+        store.add("beta", "two").unwrap();
 
         assert_eq!(store.get("alpha").unwrap().text, "one");
         assert_eq!(store.get("beta").unwrap().text, "two");
@@ -324,20 +323,20 @@ mod tests {
     }
 
     #[test]
-    fn empty_key_or_text_is_rejected_without_writing() {
+    fn empty_key_or_value_is_rejected_without_writing() {
         let dir = temp_workspace();
         let store = MemoryStore::open(&dir).unwrap();
 
         assert!(matches!(
-            store.add("   ", "value", &[]),
+            store.add("   ", "value"),
             Err(MemoryError::Invalid(_))
         ));
         assert!(matches!(
-            store.add("key", "   ", &[]),
+            store.add("key", "   "),
             Err(MemoryError::Invalid(_))
         ));
 
-        let entries = store.list().unwrap();
+        let entries = store.list(None).unwrap();
         assert!(entries.is_empty());
 
         cleanup(&dir);
@@ -352,7 +351,7 @@ mod tests {
         fs::write(&path, original).unwrap();
 
         let store = MemoryStore::open(&dir).unwrap();
-        let err = store.list().unwrap_err();
+        let err = store.list(None).unwrap_err();
         assert!(matches!(err, MemoryError::Parse(_)));
         assert_eq!(fs::read_to_string(&path).unwrap(), original);
 
@@ -367,7 +366,7 @@ mod tests {
         fs::write(&path, "{\"key\":\"value\"}").unwrap();
 
         let store = MemoryStore::open(&dir).unwrap();
-        let err = store.list().unwrap_err();
+        let err = store.list(None).unwrap_err();
         assert!(matches!(err, MemoryError::Parse(_)));
 
         cleanup(&dir);
