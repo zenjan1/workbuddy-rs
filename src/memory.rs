@@ -3,9 +3,9 @@ use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use serde::{Deserialize, Serialize};
+
+use crate::workspace::Workspace;
 
 #[derive(Debug)]
 pub enum MemoryError {
@@ -37,23 +37,15 @@ impl Error for MemoryError {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryEntry {
-    pub id: u64,
-    #[serde(default)]
-    pub key: Option<String>,
+    pub key: String,
     pub text: String,
-    pub created_at: u64,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug)]
 pub struct MemoryStore {
     path: PathBuf,
-}
-
-fn unix_timestamp() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
 }
 
 impl MemoryStore {
@@ -76,33 +68,45 @@ impl MemoryStore {
     }
 
     pub fn open(workspace_dir: impl AsRef<Path>) -> Result<Self, MemoryError> {
-        Self::new(memory_file_path(workspace_dir.as_ref()))
+        let workspace = Workspace {
+            dir: workspace_dir.as_ref().to_path_buf(),
+        };
+        Self::new(memory_file_path(&workspace.dir))
     }
 
-    pub fn add(&self, text: &str) -> Result<MemoryEntry, MemoryError> {
+    pub fn add(&self, key: &str, text: &str, tags: &[String]) -> Result<MemoryEntry, MemoryError> {
+        let key = key.trim();
         let text = text.trim();
+        if key.is_empty() {
+            return Err(MemoryError::Invalid("memory key must not be empty".to_owned()));
+        }
         if text.is_empty() {
             return Err(MemoryError::Invalid("memory text must not be empty".to_owned()));
         }
 
-        let entries = self.read_entries()?;
-        let next_id = entries.len() as u64;
+        let tags = tags
+            .iter()
+            .map(|tag| tag.trim().to_owned())
+            .filter(|tag| !tag.is_empty())
+            .collect::<Vec<_>>();
+
+        let mut entries = self.read_entries()?;
+
+        if let Some(existing) = entries.iter_mut().find(|entry| entry.key.as_str() == key) {
+            existing.text = text.to_owned();
+            existing.tags = tags;
+            let saved = existing.clone();
+            self.write_entries(&entries)?;
+            return Ok(saved);
+        }
+
         let entry = MemoryEntry {
-            id: next_id,
-            key: None,
-            text: text.to_string(),
-            created_at: unix_timestamp(),
+            key: key.to_owned(),
+            text: text.to_owned(),
+            tags,
         };
-
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-            .map_err(MemoryError::Io)?;
-        let line = serde_json::to_string(&entry)
-            .map_err(|err| MemoryError::Parse(format!("failed to serialize memory entry: {err}")))?;
-        writeln!(file, "{line}").map_err(MemoryError::Io)?;
-
+        entries.push(entry.clone());
+        self.write_entries(&entries)?;
         Ok(entry)
     }
 
@@ -110,70 +114,16 @@ impl MemoryStore {
         self.read_entries()
     }
 
-    pub fn get(&self, id: u64) -> Result<MemoryEntry, MemoryError> {
-        let entries = self.read_entries()?;
-        entries
-            .into_iter()
-            .find(|entry| entry.id == id)
-            .ok_or_else(|| MemoryError::NotFound(id.to_string()))
-    }
-
-    pub fn get_by_key(&self, key: &str) -> Result<MemoryEntry, MemoryError> {
+    pub fn get(&self, key: &str) -> Result<MemoryEntry, MemoryError> {
         let key = key.trim();
         if key.is_empty() {
-            return Err(MemoryError::NotFound(key.to_string()));
+            return Err(MemoryError::NotFound(key.to_owned()));
         }
         let entries = self.read_entries()?;
         entries
             .into_iter()
-            .find(|entry| entry.key.as_deref() == Some(key))
-            .ok_or_else(|| MemoryError::NotFound(key.to_string()))
-    }
-
-    pub fn set(&self, key: &str, value: &str) -> Result<MemoryEntry, MemoryError> {
-        let key = key.trim();
-        let value = value.trim();
-        if key.is_empty() {
-            return Err(MemoryError::Invalid("memory key must not be empty".to_owned()));
-        }
-        if value.is_empty() {
-            return Err(MemoryError::Invalid("memory value must not be empty".to_owned()));
-        }
-        let mut entries = self.read_entries()?;
-        if let Some(existing) = entries.iter_mut().find(|entry| entry.key.as_deref() == Some(key)) {
-            existing.text = value.to_string();
-            existing.created_at = unix_timestamp();
-            let saved = existing.clone();
-            self.write_entries(&entries)?;
-            Ok(saved)
-        } else {
-            let next_id = entries.len() as u64;
-            let entry = MemoryEntry {
-                id: next_id,
-                key: Some(key.to_string()),
-                text: value.to_string(),
-                created_at: unix_timestamp(),
-            };
-            entries.push(entry.clone());
-            self.write_entries(&entries)?;
-            Ok(entry)
-        }
-    }
-
-    pub fn delete(&self, id: u64) -> Result<MemoryEntry, MemoryError> {
-        let mut entries = self.read_entries()?;
-        let position = entries
-            .iter()
-            .position(|entry| entry.id == id)
-            .ok_or_else(|| MemoryError::NotFound(id.to_string()))?;
-        let removed = entries.remove(position);
-
-        for (index, entry) in entries.iter_mut().enumerate() {
-            entry.id = index as u64;
-        }
-        self.write_entries(&entries)?;
-
-        Ok(removed)
+            .find(|entry| entry.key.as_str() == key)
+            .ok_or_else(|| MemoryError::NotFound(key.to_owned()))
     }
 
     fn read_entries(&self) -> Result<Vec<MemoryEntry>, MemoryError> {
@@ -186,22 +136,16 @@ impl MemoryStore {
             return Ok(Vec::new());
         }
 
-        let mut entries = Vec::new();
-        for (index, line) in content.lines().enumerate() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            let entry: MemoryEntry = serde_json::from_str(line).map_err(|err| {
-                MemoryError::Parse(format!("invalid JSON at line {}: {err}", index + 1))
-            })?;
-            entries.push(entry);
-        }
-        Ok(entries)
+        serde_json::from_str::<Vec<MemoryEntry>>(&content)
+            .map_err(|err| MemoryError::Parse(format!("invalid memory file: {err}")))
     }
 
     fn write_entries(&self, entries: &[MemoryEntry]) -> Result<(), MemoryError> {
-        let tmp_path = self.path.with_extension("jsonl.tmp");
+        let tmp_path = self.path.with_extension("json.tmp");
+        let data = serde_json::to_vec_pretty(entries).map_err(|err| {
+            MemoryError::Parse(format!("failed to serialize memory entries: {err}"))
+        })?;
+
         {
             let mut tmp = OpenOptions::new()
                 .write(true)
@@ -209,51 +153,76 @@ impl MemoryStore {
                 .truncate(true)
                 .open(&tmp_path)
                 .map_err(MemoryError::Io)?;
-            for entry in entries {
-                let line = serde_json::to_string(entry)
-                    .map_err(|err| MemoryError::Parse(format!("failed to serialize memory entry: {err}")))?;
-                writeln!(tmp, "{line}").map_err(MemoryError::Io)?;
-            }
+            tmp.write_all(&data).map_err(MemoryError::Io)?;
             tmp.sync_all().map_err(MemoryError::Io)?;
         }
+
         fs::rename(&tmp_path, &self.path).map_err(MemoryError::Io)?;
         Ok(())
     }
 }
 
 pub fn memory_file_path(workspace_dir: &Path) -> PathBuf {
-    workspace_dir.join(".workbuddy").join("memory.jsonl")
+    workspace_dir.join(".workbuddy").join("memory.json")
+}
+
+pub fn add(
+    workspace_dir: &Path,
+    key: &str,
+    text: &str,
+    tags: &[String],
+) -> Result<MemoryEntry, MemoryError> {
+    let store = MemoryStore::open(workspace_dir)?;
+    store.add(key, text, tags)
+}
+
+pub fn list(workspace_dir: &Path) -> Result<Vec<MemoryEntry>, MemoryError> {
+    let store = MemoryStore::open(workspace_dir)?;
+    store.list()
+}
+
+pub fn get(workspace_dir: &Path, key: &str) -> Result<MemoryEntry, MemoryError> {
+    let store = MemoryStore::open(workspace_dir)?;
+    store.get(key)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static NEXT_DIR_ID: AtomicUsize = AtomicUsize::new(0);
 
-    fn temp_workspace() -> std::path::PathBuf {
+    fn temp_workspace() -> PathBuf {
         let id = NEXT_DIR_ID.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!(
-            "workbuddy-memory-test-{}-{}",
+            "workbuddy-memory-crud-test-{}-{}",
             std::process::id(),
             id
         ))
     }
 
-    fn cleanup(dir: &std::path::Path) {
+    fn cleanup(dir: &Path) {
         let _ = fs::remove_dir_all(dir);
     }
 
+    fn tag_list(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
     #[test]
-    fn add_creates_file_and_persists() {
+    fn add_creates_file_and_round_trips() {
         let dir = temp_workspace();
         let store = MemoryStore::open(&dir).unwrap();
 
-        let entry = store.add("hello world").unwrap();
-        assert_eq!(entry.id, 0);
+        let entry = store
+            .add("greeting", "hello world", &tag_list(&["test", "工作"]))
+            .unwrap();
+        assert_eq!(entry.key, "greeting");
         assert_eq!(entry.text, "hello world");
+        assert_eq!(entry.tags, tag_list(&["test", "工作"]));
         assert!(memory_file_path(&dir).exists());
 
         drop(store);
@@ -261,88 +230,106 @@ mod tests {
         let reopened = MemoryStore::open(&dir).unwrap();
         let entries = reopened.list().unwrap();
         assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key, "greeting");
         assert_eq!(entries[0].text, "hello world");
-        assert_eq!(reopened.get(0).unwrap().text, "hello world");
+        assert_eq!(entries[0].tags, tag_list(&["test", "工作"]));
 
         cleanup(&dir);
     }
 
     #[test]
-    fn list_returns_all_entries_in_insertion_order() {
+    fn add_updates_existing_key_instead_of_duplicating() {
         let dir = temp_workspace();
         let store = MemoryStore::open(&dir).unwrap();
 
-        store.add("first").unwrap();
-        store.add("second").unwrap();
-        store.add("third").unwrap();
+        store.add("key", "first", &tag_list(&["one"])).unwrap();
+        store.add("key", "second", &tag_list(&["two"])).unwrap();
 
         let entries = store.list().unwrap();
-        assert_eq!(entries.len(), 3);
-        assert_eq!(entries[0].id, 0);
-        assert_eq!(entries[0].text, "first");
-        assert_eq!(entries[1].id, 1);
-        assert_eq!(entries[1].text, "second");
-        assert_eq!(entries[2].id, 2);
-        assert_eq!(entries[2].text, "third");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].text, "second");
+        assert_eq!(entries[0].tags, tag_list(&["two"]));
 
         cleanup(&dir);
     }
 
     #[test]
-    fn get_returns_entry_by_id() {
+    fn list_returns_entries_in_file_order() {
         let dir = temp_workspace();
         let store = MemoryStore::open(&dir).unwrap();
 
-        store.add("alpha").unwrap();
-        store.add("beta").unwrap();
-
-        assert_eq!(store.get(0).unwrap().text, "alpha");
-        assert_eq!(store.get(1).unwrap().text, "beta");
-        assert!(matches!(store.get(2), Err(MemoryError::NotFound(_))));
-
-        cleanup(&dir);
-    }
-
-    #[test]
-    fn delete_removes_entry_and_reindexes() {
-        let dir = temp_workspace();
-        let store = MemoryStore::open(&dir).unwrap();
-
-        store.add("first").unwrap();
-        store.add("second").unwrap();
-        store.add("third").unwrap();
-
-        let removed = store.delete(1).unwrap();
-        assert_eq!(removed.text, "second");
+        store.add("first", "1", &[]).unwrap();
+        store.add("second", "2", &[]).unwrap();
+        store.add("third", "3", &[]).unwrap();
 
         let entries = store.list().unwrap();
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].text, "first");
-        assert_eq!(entries[1].text, "third");
-        assert_eq!(store.get(0).unwrap().text, "first");
-        assert_eq!(store.get(1).unwrap().text, "third");
+        let keys: Vec<_> = entries.iter().map(|entry| entry.key.as_str()).collect();
+        assert_eq!(keys, vec!["first", "second", "third"]);
 
         cleanup(&dir);
     }
 
     #[test]
-    fn empty_add_is_rejected() {
+    fn get_returns_entry_by_key() {
         let dir = temp_workspace();
         let store = MemoryStore::open(&dir).unwrap();
 
-        assert!(matches!(store.add("   "), Err(MemoryError::Invalid(_))));
+        store.add("alpha", "one", &[]).unwrap();
+        store.add("beta", "two", &[]).unwrap();
+
+        assert_eq!(store.get("alpha").unwrap().text, "one");
+        assert_eq!(store.get("beta").unwrap().text, "two");
+        assert!(matches!(store.get("missing"), Err(MemoryError::NotFound(_))));
 
         cleanup(&dir);
     }
 
     #[test]
-    fn utf8_content_round_trips() {
+    fn empty_key_or_text_is_rejected_without_writing() {
         let dir = temp_workspace();
         let store = MemoryStore::open(&dir).unwrap();
 
-        store.add("你好，WorkBuddy 🧠").unwrap();
+        assert!(matches!(
+            store.add("   ", "value", &[]),
+            Err(MemoryError::Invalid(_))
+        ));
+        assert!(matches!(
+            store.add("key", "   ", &[]),
+            Err(MemoryError::Invalid(_))
+        ));
+
         let entries = store.list().unwrap();
-        assert_eq!(entries[0].text, "你好，WorkBuddy 🧠");
+        assert!(entries.is_empty());
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn corrupt_json_returns_parse_error_and_preserves_file() {
+        let dir = temp_workspace();
+        let path = memory_file_path(&dir);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = "{ definitely not valid json";
+        fs::write(&path, original).unwrap();
+
+        let store = MemoryStore::open(&dir).unwrap();
+        let err = store.list().unwrap_err();
+        assert!(matches!(err, MemoryError::Parse(_)));
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn non_array_json_returns_parse_error() {
+        let dir = temp_workspace();
+        let path = memory_file_path(&dir);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "{\"key\":\"value\"}").unwrap();
+
+        let store = MemoryStore::open(&dir).unwrap();
+        let err = store.list().unwrap_err();
+        assert!(matches!(err, MemoryError::Parse(_)));
 
         cleanup(&dir);
     }

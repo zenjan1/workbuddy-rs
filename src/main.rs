@@ -103,8 +103,11 @@ enum MemoryAction {
     Add {
         /// 键
         key: String,
-        /// 值
-        value: String,
+        /// 文本内容
+        text: String,
+        /// 标签列表（逗号分隔）
+        #[arg(long, short)]
+        tags: Option<String>,
     },
     /// 列出所有键值对
     List,
@@ -473,26 +476,31 @@ async fn main() -> Result<()> {
 }
 
 fn run_memory_command(action: MemoryAction, cfg: &Config) -> Result<()> {
-    let mut store = memory::MemoryStore::open(&cfg.workspace_dir)?;
     match action {
-        MemoryAction::Add { key, value } => {
+        MemoryAction::Add { key, text, tags } => {
             if key.trim().is_empty() {
                 anyhow::bail!("记忆键不能为空");
             }
-            store
-                .set(&key, &value)
+            let tags_vec: Vec<String> = tags
+                .map(|s| {
+                    s.split(',')
+                        .map(|t| t.trim().to_string())
+                        .filter(|t| !t.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            memory::add(&cfg.workspace_dir, &key, &text, &tags_vec)
                 .map_err(|e| anyhow::anyhow!("添加记忆失败: {e}"))?;
-            println!("已保存记忆：{} = {}", key, value);
+            println!("已保存记忆：{} = {}", key, text);
         }
         MemoryAction::List => {
-            let entries = store.list();
-            let entries = entries?;
+            let entries = memory::list(&cfg.workspace_dir)
+                .map_err(|e| anyhow::anyhow!("列出记忆失败: {e}"))?;
             if entries.is_empty() {
                 println!("(暂无记忆)");
             } else {
                 for entry in entries {
-                    let display_key = entry.key.clone().unwrap_or_else(|| entry.id.to_string());
-                    println!("{} = {}", display_key, entry.text);
+                    println!("{} = {}", entry.key, entry.text);
                 }
             }
         }
@@ -500,8 +508,8 @@ fn run_memory_command(action: MemoryAction, cfg: &Config) -> Result<()> {
             if key.trim().is_empty() {
                 anyhow::bail!("记忆键不能为空");
             }
-            match store.get_by_key(&key) {
-                Ok(value) => println!("{} = {}", key, value.text),
+            match memory::get(&cfg.workspace_dir, &key) {
+                Ok(entry) => println!("{} = {}", key, entry.text),
                 Err(memory::MemoryError::NotFound(_)) => anyhow::bail!("未找到记忆键: {}", key),
                 Err(e) => anyhow::bail!("获取记忆失败: {e}"),
             }
@@ -577,9 +585,10 @@ mod memory_cmd_tests {
             .expect("parse memory add");
         match cli.cmd {
             Cmd::Memory { action } => match action {
-                MemoryAction::Add { key, value } => {
+                MemoryAction::Add { key, text, tags } => {
                     assert_eq!(key, "greeting");
-                    assert_eq!(value, "hello");
+                    assert_eq!(text, "hello");
+                    assert!(tags.is_none());
                 }
                 _ => panic!("expected add"),
             },
