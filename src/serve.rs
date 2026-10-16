@@ -132,18 +132,18 @@ struct AppState {
     workspace_dir: Arc<PathBuf>,
 }
 
-async fn health() -> impl axum::response::IntoResponse {
-    (StatusCode::OK, Json(json!({ "status": "ok" })))
+async fn health(State(state): State<AppState>) -> impl axum::response::IntoResponse {
+    (StatusCode::OK, Json(json!({ "status": "ok", "workspace": state.workspace_dir.to_string_lossy() })))
 }
 
 async fn list_runs(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
-) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let all_runs = combined_runs_json(&state.workspace_dir);
     let (limit, offset) = parse_pagination(query.as_deref());
-    let runs = all_runs.into_iter().skip(offset).take(limit).collect();
-    Ok(Json(runs))
+    let runs: Vec<serde_json::Value> = all_runs.into_iter().skip(offset).take(limit).collect();
+    Ok(Json(json!({ "runs": runs })))
 }
 
 async fn get_run(
@@ -188,8 +188,8 @@ async fn get_run(
     ))
 }
 
-fn build_health() -> serde_json::Value {
-    json!({ "status": "ok" })
+fn build_health(workspace_dir: &Path) -> serde_json::Value {
+    json!({ "status": "ok", "workspace": workspace_dir.to_string_lossy() })
 }
 
 fn build_runs(workspace_dir: &Path, query: Option<&str>) -> Vec<serde_json::Value> {
@@ -256,21 +256,13 @@ fn readonly_route(workspace_dir: &Path, target: &str) -> (u16, &'static str, Str
     let path = raw_path.trim_start_matches('/');
 
     if path == "health" {
-        return (200, "OK", build_health().to_string());
+        return (200, "OK", build_health(workspace_dir).to_string());
     }
 
     if path == "runs" {
         let runs = build_runs(workspace_dir, Some(query));
-        return match serde_json::to_string(&runs) {
-            Ok(body) => (200, "OK", body),
-            Err(e) => {
-                (
-                    500,
-                    "Internal Server Error",
-                    json!({ "error": format!("failed to serialize runs: {e}") }).to_string(),
-                )
-            }
-        };
+        let body = json!(runs).to_string();
+        return (200, "OK", body);
     }
 
     if let Some(rest) = path.strip_prefix("runs/") {
@@ -291,16 +283,22 @@ fn readonly_route(workspace_dir: &Path, target: &str) -> (u16, &'static str, Str
 }
 
 fn handle_readonly_connection(stream: &mut TcpStream, workspace_dir: &Path) -> std::io::Result<()> {
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
     let mut buffer = Vec::new();
     let mut tmp = [0u8; 1024];
     loop {
-        let n = stream.read(&mut tmp)?;
-        if n == 0 {
-            break;
-        }
-        buffer.extend_from_slice(&tmp[..n]);
-        if buffer.windows(4).any(|w| w == b"\r\n\r\n") {
-            break;
+        match stream.read(&mut tmp) {
+            Ok(0) => break,
+            Ok(n) => {
+                buffer.extend_from_slice(&tmp[..n]);
+                if buffer.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
+                return Ok(());
+            }
+            Err(e) => return Err(e),
         }
     }
 
@@ -516,8 +514,8 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let json: Value = serde_json::from_slice(&body).unwrap();
-        assert!(json.is_array());
-        let runs = json.as_array().unwrap();
+        assert!(json.is_object());
+        let runs = json["runs"].as_array().unwrap();
         assert_eq!(runs.len(), 1);
 
         // runs with pagination query: offset=1 should skip the only run
@@ -534,8 +532,8 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let json: Value = serde_json::from_slice(&body).unwrap();
-        assert!(json.is_array());
-        assert_eq!(json.as_array().unwrap().len(), 0);
+        assert!(json.is_object());
+        assert_eq!(json["runs"].as_array().unwrap().len(), 0);
 
         // runs/{id}
         let response = app
@@ -646,8 +644,8 @@ mod tests {
         let response = client.get(format!("{base_url}/runs")).send().await.unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         let json: Value = response.json().await.unwrap();
-        assert!(json.is_array());
-        let runs = json.as_array().unwrap();
+        assert!(json.is_object());
+        let runs = json["runs"].as_array().unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0]["id"], run_id);
         assert!(runs[0].get("steps").is_none());

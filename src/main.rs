@@ -468,10 +468,10 @@ async fn main() -> Result<()> {
         Cmd::Serve { data_dir, port } => {
             let workspace_dir = data_dir.unwrap_or_else(|| cfg.workspace_dir.clone());
             let bind_addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-            println!("只读 HTTP 服务已启动: http://{bind_addr}");
+            println!("正在启动只读 HTTP 服务: http://{bind_addr}");
             serve::run(&workspace_dir, bind_addr)
                 .await
-                .map_err(|e| anyhow::anyhow!("启动只读 HTTP 服务失败: {e:#}"))?;
+                .map_err(|e| anyhow::anyhow!("启动只读 HTTP 服务失败（地址 {bind_addr}）: {e:#}"))?;
             Ok(())
         }
         Cmd::Undo { id } => {

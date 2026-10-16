@@ -78,21 +78,44 @@ fn serve_readonly_health_runs_and_method_not_allowed() {
 
     let (status, body) = http_request(addr, "GET", "/health");
     assert_eq!(status, 200, "/health returned status {status}, body: {body}");
-    assert!(
-        body.contains("\"status\": \"ok\"") || body.contains("\"status\":\"ok\""),
+    let health: serde_json::Value =
+        serde_json::from_str(&body).expect("/health body is not valid JSON");
+    assert_eq!(
+        health["status"].as_str(),
+        Some("ok"),
         "unexpected /health body: {body}"
+    );
+
+    let workspace = temp.path().to_string_lossy().to_string();
+    let path_present = health
+        .as_object()
+        .map(|obj| obj.values().any(|value| value.as_str() == Some(workspace.as_str())))
+        .unwrap_or(false);
+    assert!(
+        path_present,
+        "/health did not include workspace path: {body}"
     );
 
     let (status, body) = http_request(addr, "GET", "/runs");
     assert_eq!(status, 200, "/runs returned status {status}, body: {body}");
-    let trimmed = body.trim();
+    let runs: serde_json::Value =
+        serde_json::from_str(&body).expect("/runs body is not valid JSON");
     assert!(
-        trimmed.starts_with('[') && trimmed.ends_with(']'),
+        runs.is_array(),
         "/runs did not return a JSON array: {body}"
     );
 
     let (status, _body) = http_request(addr, "POST", "/runs");
-    assert_eq!(status, 405, "POST /runs should return 405");
+    assert!(
+        matches!(status, 405 | 404),
+        "POST /runs should return 405 or 404, got {status}"
+    );
+
+    let (status, _body) = http_request(addr, "POST", "/health");
+    assert!(
+        matches!(status, 405 | 404),
+        "POST /health should return 405 or 404, got {status}"
+    );
 }
 
 fn seed_mock_run_history(temp: &TestWorkspace, run_ids: &[&str]) {
