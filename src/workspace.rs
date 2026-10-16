@@ -317,9 +317,14 @@ impl Workspace {
     }
 }
 
+/// 兼容旧调用顺序:根据任务列表与标识符解析任务索引。
+pub fn resolve_task_ref(runs: &[RunRecord], input: &str) -> Result<usize, String> {
+    resolve_task_id(input, runs)
+}
+
 /// 纯函数:根据标识符与任务列表解析任务索引。
-/// 数字输入保持原有数字索引语义(0-based);其他输入按任务标题进行
-/// 不区分大小写的子串匹配,唯一匹配时返回索引,多个匹配时返回错误。
+/// 数字输入保持原有数字索引语义(0-based);其他输入先按 slug 精确匹配,
+/// 再按标题不区分大小写子串匹配。唯一匹配返回索引,多个匹配返回错误。
 pub fn resolve_task_id(input: &str, runs: &[RunRecord]) -> Result<usize, String> {
     if let Ok(idx) = input.parse::<usize>() {
         if idx >= runs.len() {
@@ -330,6 +335,31 @@ pub fn resolve_task_id(input: &str, runs: &[RunRecord]) -> Result<usize, String>
             ));
         }
         return Ok(idx);
+    }
+
+    let input_slug = slugify(input);
+    if input == input_slug {
+        let slug_matches: Vec<usize> = runs
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.id == input_slug)
+            .map(|(i, _)| i)
+            .collect();
+        match slug_matches.len() {
+            1 => return Ok(slug_matches[0]),
+            0 => {}
+            _ => {
+                let titles: Vec<String> = slug_matches
+                    .iter()
+                    .map(|&i| runs[i].goal.clone())
+                    .collect();
+                return Err(format!(
+                    "任务 slug '{}' 匹配到多个任务: {}。请使用数字索引",
+                    input,
+                    titles.join(", ")
+                ));
+            }
+        }
     }
 
     let needle = normalize_title(input);
@@ -521,6 +551,53 @@ fn new_run_id() -> String {
 mod tests {
     use super::*;
     use crate::config::Config;
+
+    #[test]
+    fn resolve_task_id_respects_numeric_slug_and_title_matching() {
+        let run = |id: &str, goal: &str| RunRecord {
+            token_usage: None,
+            char_usage: None,
+            id: id.to_string(),
+            goal: goal.to_string(),
+            created: "now".into(),
+            model: "mock".into(),
+            mock: true,
+            steps: vec![],
+        };
+
+        let runs = vec![
+            run("buy-milk", "Buy milk"),
+            run("write-report", "Write report"),
+            run("call-mom", "Call mom"),
+        ];
+
+        // 数字索引兼容(0-based)
+        assert_eq!(resolve_task_id("0", &runs), Ok(0));
+        assert_eq!(resolve_task_id("2", &runs), Ok(2));
+        let err = resolve_task_id("9", &runs).unwrap_err();
+        assert!(err.contains("任务索引 9 超出范围"));
+
+        // slug 精确匹配优先
+        assert_eq!(resolve_task_id("write-report", &runs), Ok(1));
+
+        // 标题子串匹配大小写不敏感且唯一
+        assert_eq!(resolve_task_id("milk", &runs), Ok(0));
+        assert_eq!(resolve_task_id("REPORT", &runs), Ok(1));
+
+        // 未找到任务
+        let err = resolve_task_id("missing", &runs).unwrap_err();
+        assert!(err.contains("未找到任务: missing"));
+
+        // 多个标题匹配
+        let runs_dup = vec![
+            run("buy-milk", "Buy milk"),
+            run("buy-milk-2", "Buy milk and cookies"),
+        ];
+        assert_eq!(resolve_task_id("buy-milk", &runs_dup), Ok(0));
+        let err = resolve_task_id("milk", &runs_dup).unwrap_err();
+        assert!(err.contains("匹配到多个任务"));
+        assert!(err.contains("Buy milk"));
+    }
 
     #[test]
     fn run_id_is_unique_and_formatted() {

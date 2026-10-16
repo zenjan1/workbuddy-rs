@@ -225,7 +225,19 @@ async fn main() -> Result<()> {
             model,
             parallel,
         } => {
-            let goal = goal.join(" ");
+            let goal = if goal.len() == 1 {
+                let runs = Workspace::root(&cfg.workspace_dir);
+                let ref_input = goal[0].clone();
+                match crate::workspace::resolve_task_ref(&runs, &ref_input) {
+                    Ok(idx) => runs
+                        .get(idx)
+                        .map(|r| r.goal.clone())
+                        .unwrap_or_else(|| goal.join(" ")),
+                    Err(_) => goal.join(" "),
+                }
+            } else {
+                goal.join(" ")
+            };
             if goal.trim().is_empty() {
                 anyhow::bail!("任务目标不能为空");
             }
@@ -241,9 +253,12 @@ async fn main() -> Result<()> {
         Cmd::List { since } => cmd_list_with_slug(cfg, since.as_deref()),
         Cmd::Show { id } => {
             let runs = Workspace::root(&cfg.workspace_dir);
-            let resolved_id = crate::task_id::resolve_task_id(&id, runs.iter().map(|r: &RunRecord| r.goal.as_str()))
-                .map_err(|e| anyhow::anyhow!("无法解析任务 ID '{}': {}", id, e))?;
-            cmd_show(cfg, &resolved_id.to_string())
+            let idx = crate::workspace::resolve_task_ref(&runs, &id)
+                .map_err(|e| anyhow::anyhow!("无法解析任务引用 '{}': {}", id, e))?;
+            let run = runs
+                .get(idx)
+                .ok_or_else(|| anyhow::anyhow!("任务索引 {} 超出范围", idx))?;
+            cmd_show(cfg, &run.id)
         }
         Cmd::Agents => cmd_agents(),
         Cmd::Review => review::review(cfg).await,

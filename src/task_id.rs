@@ -167,6 +167,7 @@ where
         });
     }
 
+    let slug_query = TaskId::slugify(raw);
     let mut matches = Vec::new();
     for (index, title) in title_list.iter().enumerate() {
         let normalized_title = normalize_title(title);
@@ -175,7 +176,7 @@ where
             (0..words.len()).any(|i| words[i..].join(" ").starts_with(&query))
         };
         let slug = TaskId::slugify(title.as_str());
-        let slug_match = slug.starts_with(&query);
+        let slug_match = !slug_query.is_empty() && slug.starts_with(&slug_query);
         if title_match || slug_match {
             matches.push((index, title.clone()));
         }
@@ -304,5 +305,11 @@ mod tests {
             resolve_task_id("Write docs", &titles),
             Err(TaskIdError::DuplicateTitle { .. })
         ));
+    }
+
+    #[test]
+    fn resolve_slug_prefix_match_uses_slugified_query() {
+        let titles = ["Write docs", "Fix login bug"];
+        assert_eq!(resolve_task_id("fix-login", titles), Ok(TaskId::Numeric(1)));
     }
 }
