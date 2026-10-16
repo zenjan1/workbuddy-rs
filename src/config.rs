@@ -382,9 +382,22 @@ pub fn set_config_value_file(path: &Path, key: &str, value: &str) -> Result<()> 
     }
     drop(table);
 
+    let backup_path = if path.exists() {
+        let bak = PathBuf::from(format!("{}.bak", path.display()));
+        std::fs::copy(path, &bak)
+            .with_context(|| format!("备份配置文件失败: {}", path.display()))?;
+        Some(bak)
+    } else {
+        None
+    };
+
     let contents = doc.to_string();
-    atomic_write(path, &contents)
-        .with_context(|| format!("写入配置文件失败: {}", path.display()))?;
+    if let Err(e) = atomic_write(path, &contents) {
+        if let Some(bak) = &backup_path {
+            let _ = std::fs::copy(bak, path);
+        }
+        return Err(e).with_context(|| format!("写入配置文件失败: {}", path.display()));
+    }
     Ok(())
 }
 
@@ -479,6 +492,7 @@ fn normalize_config_key(key: &str) -> Result<&str> {
         "llm.api_base" => Ok("base_url"),
         "llm.base_url" => Ok("base_url"),
         "llm.model" => Ok("model"),
+        "llm.price_per_1k_tokens" => Ok("cost_per_1k_tokens"),
         "llm.timeout" => Ok("request_timeout_secs"),
         "llm.api_key" => Ok("api_key"),
         "llm.max_parallel" => Ok("max_parallel"),
@@ -488,7 +502,7 @@ fn normalize_config_key(key: &str) -> Result<&str> {
         "webhook.timeout_secs" => Ok("webhook_timeout_secs"),
         _ if CONFIG_KEYS.contains(&key) => Ok(key),
         _ => anyhow::bail!(
-            "未知配置键: {key}; 可用键: {} 或别名: llm.api_base, llm.model, llm.timeout",
+            "未知配置键: {key}; 可用键: {} 或别名: llm.api_base, llm.base_url, llm.model, llm.price_per_1k_tokens, llm.timeout",
             CONFIG_KEYS.join(", ")
         ),
     }
