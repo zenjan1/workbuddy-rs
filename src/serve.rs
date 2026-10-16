@@ -369,8 +369,10 @@ pub async fn serve(addr: SocketAddr) -> anyhow::Result<SocketAddr> {
     serve_with_dir(&workspace_dir, addr).await
 }
 
-pub async fn start(workspace_dir: &Path, bind_addr: SocketAddr) -> anyhow::Result<SocketAddr> {
-    serve_with_dir(workspace_dir, bind_addr).await
+pub async fn start(workspace_dir: &Path, port: u16) -> anyhow::Result<u16> {
+    let addr = SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
+    let bound = serve_with_dir(workspace_dir, addr).await?;
+    Ok(bound.port())
 }
 
 pub async fn run(workspace_dir: &Path, bind_addr: SocketAddr) -> anyhow::Result<()> {

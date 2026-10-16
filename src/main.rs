@@ -453,6 +453,38 @@ mod status_cmd_tests {
 }
 
 #[cfg(test)]
+mod serve_cmd_tests {
+    use super::*;
+
+    #[test]
+    fn cli_parses_serve_defaults() {
+        let cli = Cli::try_parse_from(["workbuddy", "serve"]).expect("parse serve");
+        match cli.cmd {
+            Cmd::Serve {
+                data_dir: None,
+                addr,
+                port,
+                readonly: false,
+            } => {
+                assert_eq!(addr, "127.0.0.1".parse::<std::net::IpAddr>().unwrap());
+                assert_eq!(port, 8080);
+            }
+            _ => panic!("expected serve command with defaults"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_serve_custom_port() {
+        let cli = Cli::try_parse_from(["workbuddy", "serve", "--port", "9090"])
+            .expect("parse serve custom port");
+        match cli.cmd {
+            Cmd::Serve { port, .. } => assert_eq!(port, 9090),
+            _ => panic!("expected serve command"),
+        }
+    }
+}
+
+#[cfg(test)]
 mod memory_cmd_tests {
     use super::*;
     use clap::error::ErrorKind;
