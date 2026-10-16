@@ -34,6 +34,52 @@ pub struct StatusSummary {
     pub completed_runs: usize,
     pub failed_runs: usize,
     pub recent_logs: Vec<String>,
+    pub running: bool,
+    pub completed: usize,
+    pub failed: usize,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct Status {
+    pub running: bool,
+    pub completed: usize,
+    pub failed: usize,
+    pub recent_logs: Vec<String>,
+}
+
+impl Status {
+    pub fn from_history(history: &[HistoryEntry]) -> Status {
+        Self::from_history_with_limit(history, 5)
+    }
+
+    fn from_history_with_limit(history: &[HistoryEntry], limit: usize) -> Status {
+        let completed = history.iter().filter(|entry| entry.success).count();
+        let failed = history.len() - completed;
+        let recent_logs = history
+            .iter()
+            .rev()
+            .take(limit)
+            .map(|entry| entry.log.clone())
+            .collect();
+
+        Status {
+            running: false,
+            completed,
+            failed,
+            recent_logs,
+        }
+    }
+}
+
+impl From<&StatusSummary> for Status {
+    fn from(summary: &StatusSummary) -> Self {
+        Status {
+            running: summary.running,
+            completed: summary.completed,
+            failed: summary.failed,
+            recent_logs: summary.recent_logs.clone(),
+        }
+    }
 }
 
 impl StatusSummary {
@@ -57,6 +103,9 @@ impl StatusSummary {
             completed_runs,
             failed_runs,
             recent_logs,
+            running: false,
+            completed: completed_runs,
+            failed: failed_runs,
         }
     }
 }
@@ -99,6 +148,7 @@ fn parse_status_inner(
     };
     let mut summary = StatusSummary::from_history_with_limit(&history, 5);
     summary.supervisor_running = supervisor_running;
+    summary.running = supervisor_running;
     summary.pid = pid;
 
     // 如果本地状态文件存在，则优先采用其中显式给出的完成/失败计数；
@@ -114,9 +164,11 @@ fn parse_status_inner(
 
         if raw.get("completed").is_some() {
             summary.completed_runs = supervisor_status.completed;
+            summary.completed = supervisor_status.completed;
         }
         if raw.get("failed").is_some() {
             summary.failed_runs = supervisor_status.failed;
+            summary.failed = supervisor_status.failed;
         }
         if summary.recent_logs.is_empty() {
             if let Some(last_log) = supervisor_status.last_log {
@@ -266,9 +318,14 @@ fn read_supervisor_running(workspace_dir: &Path) -> anyhow::Result<bool> {
 
     let lock_path = workspace_dir.join("supervisor.lock");
     let marker_path = workspace_dir.join("RUNNING");
+    let pid_path = workspace_dir.join("supervisor.pid");
 
     let process_running = if cfg!(test) { false } else { check_supervisor_process() };
-    Ok(status_running || lock_path.exists() || marker_path.exists() || process_running)
+    Ok(status_running
+        || lock_path.exists()
+        || marker_path.exists()
+        || pid_path.exists()
+        || process_running)
 }
 
 #[cfg(unix)]
@@ -536,6 +593,57 @@ mod tests {
         assert_eq!(summary.recent_logs, vec!["log-10", "log-9", "log-8"]);
         assert!(!summary.supervisor_running);
         assert_eq!(summary.pid, None);
+    }
+
+    #[test]
+    fn status_counts_mixed_completed_and_failed_runs() {
+        let workspace = test_workspace("mixed");
+        write_run_record(
+            &workspace.join("runs"),
+            "run-1.json",
+            &run_record(
+                "run-1",
+                vec![step(1, "plan", true, None, "ok")],
+            ),
+        );
+        write_run_record(
+            &workspace.join("runs"),
+            "run-2.json",
+            &run_record(
+                "run-2",
+                vec![step(1, "build", false, Some("boom"), "bad")],
+            ),
+        );
+
+        let summary = parse_status(&workspace).unwrap();
+        assert_eq!(summary.completed_runs, 1);
+        assert_eq!(summary.failed_runs, 1);
+        assert_eq!(summary.recent_logs.len(), 2);
+
+        fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn status_detects_supervisor_lock_file() {
+        let workspace = test_workspace("lock-running");
+        fs::write(workspace.join("supervisor.lock"), "").unwrap();
+
+        let summary = parse_status(&workspace).unwrap();
+        assert!(summary.supervisor_running);
+        assert!(summary.running);
+
+        fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn status_reports_stopped_without_lock_file() {
+        let workspace = test_workspace("no-lock-stopped");
+
+        let summary = parse_status(&workspace).unwrap();
+        assert!(!summary.supervisor_running);
+        assert!(!summary.running);
+
+        fs::remove_dir_all(&workspace).unwrap();
     }
 
     fn test_workspace(name: &str) -> PathBuf {
