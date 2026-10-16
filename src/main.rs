@@ -189,11 +189,14 @@ enum Cmd {
     Tui,
     /// 启动只读 HTTP 服务
     Serve {
+        /// 数据目录（默认使用配置的 workspace_dir）
+        #[arg(long)]
+        data_dir: Option<std::path::PathBuf>,
         /// 监听地址（默认 127.0.0.1）
         #[arg(long, default_value = "127.0.0.1")]
         addr: std::net::IpAddr,
-        /// 监听端口（默认 8080）
-        #[arg(short, long, default_value = "8080")]
+        /// 监听端口（默认 0，由系统分配可用端口）
+        #[arg(short, long, default_value = "0")]
         port: u16,
         /// 只读模式：使用随机端口 127.0.0.1:0，输出实际端口
         #[arg(long)]
@@ -350,16 +353,17 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Serve { addr, port, readonly } => {
-            if readonly {
-                let actual_addr = serve::serve_readonly(&cfg.workspace_dir)
+        Cmd::Serve { data_dir, addr, port, readonly } => {
+            let workspace_dir = data_dir.unwrap_or_else(|| cfg.workspace_dir.clone());
+            if readonly || port == 0 {
+                let actual_addr = serve::serve_readonly(&workspace_dir)
                     .map_err(|e| anyhow::anyhow!("启动只读 HTTP 服务失败: {e:#}"))?;
                 println!("只读 HTTP 服务已启动: http://{actual_addr}");
                 Ok(())
             } else {
                 let bind_addr = std::net::SocketAddr::new(addr, port);
                 println!("只读 HTTP 服务已启动: http://{bind_addr}");
-                serve::run(&cfg.workspace_dir, bind_addr)
+                serve::run(&workspace_dir, bind_addr)
                     .await
                     .map_err(|e| anyhow::anyhow!("启动只读 HTTP 服务失败: {e:#}"))
             }

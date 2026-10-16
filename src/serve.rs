@@ -139,19 +139,34 @@ async fn get_run(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<RunRecord>, (StatusCode, Json<serde_json::Value>)> {
-    let ws = Workspace::open(&state.workspace_dir, &id).map_err(|_| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": format!("run {id} not found") })),
-        )
-    })?;
-    let run = ws.load_record().map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": format!("failed to load run {id}: {e}") })),
-        )
-    })?;
-    Ok(Json(run))
+    if let Ok(ws) = Workspace::open(&state.workspace_dir, &id) {
+        match ws.load_record() {
+            Ok(run) => return Ok(Json(run)),
+            Err(e) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": format!("failed to load run {id}: {e}") })),
+                ));
+            }
+        }
+    }
+
+    if let Some(body) = find_run_in_history_files(&state.workspace_dir, &id) {
+        match serde_json::from_str::<RunRecord>(&body) {
+            Ok(run) => return Ok(Json(run)),
+            Err(e) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": format!("failed to parse run {id}: {e}") })),
+                ));
+            }
+        }
+    }
+
+    Err((
+        StatusCode::NOT_FOUND,
+        Json(json!({ "error": format!("run {id} not found") })),
+    ))
 }
 
 fn readonly_http_response(status_code: u16, reason: &str, body: &str) -> String {
@@ -189,14 +204,18 @@ fn find_run_in_history_files(workspace_dir: &Path, id: &str) -> Option<String> {
     None
 }
 
-fn readonly_route(workspace_dir: &Path, path: &str) -> (u16, &'static str, String) {
+fn readonly_route(workspace_dir: &Path, target: &str) -> (u16, &'static str, String) {
+    let (raw_path, query) = target.split_once('?').unwrap_or((target, ""));
+    let path = raw_path.trim_start_matches('/');
     if path == "health" {
         return (200, "OK", json!({ "status": "ok" }).to_string());
     }
 
     if path == "runs" {
         let all_runs = combined_runs_json(workspace_dir);
-        match serde_json::to_string(&all_runs) {
+        let (limit, offset) = parse_pagination(Some(query));
+        let runs: Vec<_> = all_runs.into_iter().skip(offset).take(limit).collect();
+        match serde_json::to_string(&runs) {
             Ok(body) => return (200, "OK", body),
             Err(e) => {
                 return (
@@ -280,9 +299,7 @@ fn handle_readonly_connection(stream: &mut TcpStream, workspace_dir: &Path) -> s
         return Ok(());
     }
 
-    let path = target.split('?').next().unwrap_or(target);
-    let path = path.trim_start_matches('/');
-    let (status_code, reason, body) = readonly_route(workspace_dir, path);
+    let (status_code, reason, body) = readonly_route(workspace_dir, target);
     let response = readonly_http_response(status_code, reason, &body);
     stream.write_all(response.as_bytes())?;
     Ok(())

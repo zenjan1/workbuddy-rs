@@ -95,27 +95,31 @@ fn serve_readonly_health_runs_and_method_not_allowed() {
     assert_eq!(status, 405, "POST /runs should return 405");
 }
 
-fn seed_mock_run_history(temp: &TestWorkspace, run_id: &str) {
+fn seed_mock_run_history(temp: &TestWorkspace, run_ids: &[&str]) {
     let cwd = temp.path().to_string_lossy().to_string();
-    let run = serde_json::json!({
-        "id": run_id,
-        "command": "echo hello",
-        "cwd": cwd,
-        "started_at": "2024-01-01T00:00:00Z",
-        "start_time": "2024-01-01T00:00:00Z",
-        "started": "2024-01-01T00:00:00Z",
-        "finished_at": "2024-01-01T00:00:01Z",
-        "finish_time": "2024-01-01T00:00:01Z",
-        "ended_at": "2024-01-01T00:00:01Z",
-        "finished": "2024-01-01T00:00:01Z",
-        "ended": "2024-01-01T00:00:01Z",
-        "exit_code": 0,
-        "exit_status": 0,
-        "created_at": "2024-01-01T00:00:00Z",
-        "updated_at": "2024-01-01T00:00:01Z",
-        "output_files": []
-    });
-    let runs = serde_json::json!([run.clone()]);
+    let runs: Vec<serde_json::Value> = run_ids
+        .iter()
+        .map(|run_id| {
+            serde_json::json!({
+                "id": run_id,
+                "command": "echo hello",
+                "cwd": cwd,
+                "started_at": "2024-01-01T00:00:00Z",
+                "start_time": "2024-01-01T00:00:00Z",
+                "started": "2024-01-01T00:00:00Z",
+                "finished_at": "2024-01-01T00:00:01Z",
+                "finish_time": "2024-01-01T00:00:01Z",
+                "ended_at": "2024-01-01T00:00:01Z",
+                "finished": "2024-01-01T00:00:01Z",
+                "ended": "2024-01-01T00:00:01Z",
+                "exit_code": 0,
+                "exit_status": 0,
+                "created_at": "2024-01-01T00:00:00Z",
+                "updated_at": "2024-01-01T00:00:01Z",
+                "output_files": []
+            })
+        })
+        .collect();
 
     for root in [temp.path().join(".workbuddy"), temp.path().to_path_buf()] {
         fs::create_dir_all(&root).expect("failed to create run storage directory");
@@ -126,14 +130,12 @@ fn seed_mock_run_history(temp: &TestWorkspace, run_id: &str) {
         )
         .expect("failed to write mock runs.json");
 
-        fs::write(
-            root.join("runs.jsonl"),
-            format!(
-                "{}\n",
-                serde_json::to_string(&run).expect("failed to serialize mock run")
-            ),
-        )
-        .expect("failed to write mock runs.jsonl");
+        let mut jsonl = String::new();
+        for run in &runs {
+            jsonl.push_str(&serde_json::to_string(run).expect("failed to serialize mock run"));
+            jsonl.push('\n');
+        }
+        fs::write(root.join("runs.jsonl"), jsonl.as_bytes()).expect("failed to write mock runs.jsonl");
     }
 }
 
@@ -141,18 +143,23 @@ fn seed_mock_run_history(temp: &TestWorkspace, run_id: &str) {
 fn serve_readonly_run_lookup_uses_mock_history_and_returns_404_for_unknown_id() {
     let temp = TestWorkspace::new();
 
-    let run_id = "mock-run-id";
-    seed_mock_run_history(&temp, run_id);
+    let run_ids = ["mock-run-id", "run-2", "run-3", "run-4", "run-5"];
+    seed_mock_run_history(&temp, &run_ids);
+
+    let runs_json_path = temp.path().join(".workbuddy").join("runs.json");
+    let runs_jsonl_path = temp.path().join(".workbuddy").join("runs.jsonl");
+    let original_runs_json = fs::read(&runs_json_path).expect("failed to read runs.json");
+    let original_runs_jsonl = fs::read(&runs_jsonl_path).expect("failed to read runs.jsonl");
 
     let addr = serve_readonly(temp.path()).expect("failed to start read-only server");
 
-    let (status, body) = http_request(addr, "GET", &format!("/runs/{run_id}"));
-    assert_eq!(status, 200, "/runs/{run_id} returned status {status}, body: {body}");
+    let (status, body) = http_request(addr, "GET", "/runs/mock-run-id");
+    assert_eq!(status, 200, "/runs/mock-run-id returned status {status}, body: {body}");
     let parsed: serde_json::Value =
         serde_json::from_str(&body).expect("response body is not valid JSON");
     assert_eq!(
         parsed["id"].as_str(),
-        Some(run_id),
+        Some("mock-run-id"),
         "unexpected run JSON: {body}"
     );
 
@@ -167,11 +174,36 @@ fn serve_readonly_run_lookup_uses_mock_history_and_returns_404_for_unknown_id() 
     assert_eq!(status, 200, "/runs returned status {status}, body: {body}");
     let runs: serde_json::Value =
         serde_json::from_str(&body).expect("response body is not valid JSON");
+    let arr = runs.as_array().expect("/runs should be a JSON array");
+    assert_eq!(arr.len(), 5, "expected 5 runs, got: {body}");
     assert!(
-        runs.as_array()
-            .expect("/runs should be a JSON array")
-            .iter()
-            .any(|run| run["id"].as_str() == Some(run_id)),
+        arr.iter().any(|run| run["id"].as_str() == Some("mock-run-id")),
         "/runs did not include mock run: {body}"
+    );
+
+    let (status, body) = http_request(addr, "GET", "/runs?limit=2");
+    assert_eq!(status, 200, "GET /runs?limit=2 returned {status}, body: {body}");
+    let page: serde_json::Value = serde_json::from_str(&body).expect("invalid JSON");
+    assert_eq!(page.as_array().expect("expected array").len(), 2);
+
+    let (status, body) = http_request(addr, "GET", "/runs?limit=2&offset=2");
+    assert_eq!(status, 200, "GET /runs?limit=2&offset=2 returned {status}, body: {body}");
+    let page: serde_json::Value = serde_json::from_str(&body).expect("invalid JSON");
+    assert_eq!(page.as_array().expect("expected array").len(), 2);
+
+    let (status, body) = http_request(addr, "GET", "/runs?offset=4");
+    assert_eq!(status, 200, "GET /runs?offset=4 returned {status}, body: {body}");
+    let page: serde_json::Value = serde_json::from_str(&body).expect("invalid JSON");
+    assert_eq!(page.as_array().expect("expected array").len(), 1);
+
+    assert_eq!(
+        fs::read(&runs_json_path).expect("failed to read runs.json"),
+        original_runs_json,
+        "runs.json was modified by read-only server"
+    );
+    assert_eq!(
+        fs::read(&runs_jsonl_path).expect("failed to read runs.jsonl"),
+        original_runs_jsonl,
+        "runs.jsonl was modified by read-only server"
     );
 }
