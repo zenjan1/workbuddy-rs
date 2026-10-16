@@ -439,6 +439,24 @@ mod tests {
         fs::remove_dir_all(&workspace).unwrap();
     }
 
+    #[test]
+    fn status_empty_workspace_outputs_empty_state() {
+        let workspace = test_workspace("empty");
+
+        let summary = parse_status(&workspace).unwrap();
+        assert!(!summary.supervisor_running);
+        assert_eq!(summary.completed_runs, 0);
+        assert_eq!(summary.failed_runs, 0);
+        assert!(summary.recent_logs.is_empty());
+
+        let rendered = format_status(&summary);
+        assert!(rendered.contains("Last run: 0 completed, 0 failed"));
+        assert!(rendered.contains("No run history."));
+        assert!(rendered.contains("Recent logs: (none)"));
+
+        fs::remove_dir_all(&workspace).unwrap();
+    }
+
     fn test_workspace(name: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
         let unique = format!(
