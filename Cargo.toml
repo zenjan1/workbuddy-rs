@@ -32,7 +32,7 @@ strip = true
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json"] }
-tower = "0.5"
+tower = { version = "0.5", features = ["util"] }
 hyper = "1.12.0"
 http-body-util = "0.1"
 tempfile = "3"

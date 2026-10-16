@@ -587,11 +587,45 @@ mod tests {
         let mut response = String::new();
         stream.read_to_string(&mut response).unwrap();
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response.contains("Content-Type: application/json"));
         let body = response.split("\r\n\r\n").nth(1).unwrap();
         let json: Value = serde_json::from_str(body).unwrap();
-        assert!(json.is_array());
-        assert_eq!(json.as_array().unwrap().len(), 1);
-        assert_eq!(json[0]["id"].as_str(), Some(run_id.as_str()));
+        let runs = json.as_array().unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0]["id"].as_str(), Some(run_id.as_str()));
+
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .write_all(
+                format!("GET /runs/{run_id} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response.contains("Content-Type: application/json"));
+        let body = response.split("\r\n\r\n").nth(1).unwrap();
+        let json: Value = serde_json::from_str(body).unwrap();
+        assert_eq!(json["id"].as_str(), Some(run_id.as_str()));
+
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .write_all(b"GET /runs/nonexistent HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 404 Not Found\r\n"));
+        assert!(response.contains("Content-Type: application/json"));
+        let body = response.split("\r\n\r\n").nth(1).unwrap();
+        let json: Value = serde_json::from_str(body).unwrap();
+        assert!(json["error"].as_str().unwrap().contains("not found"));
     }
 
     #[tokio::test]
