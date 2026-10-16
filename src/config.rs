@@ -331,7 +331,6 @@ impl Config {
     }
 
     fn update_config_file(path: &Path, key: &str, value: &str) -> Result<()> {
-        Self::validate_config_key(key)?;
         set_config_value_file(path, key, value)
     }
 
@@ -372,6 +371,141 @@ impl Config {
         updated.apply_value(canonical_key, value)?;
         Ok(updated)
     }
+}
+
+/// 使用文本行内替换修改单个顶层 TOML 配置键，保留注释和其他格式。
+pub fn set_config_value_inline(path: &Path, key: &str, value: &str) -> Result<()> {
+    validate_key_syntax(key)?;
+    if !CONFIG_KEYS.contains(&key) {
+        anyhow::bail!(
+            "未知配置键: {key}; 可用键: {}",
+            CONFIG_KEYS.join(", ")
+        );
+    }
+    if key.contains('.') {
+        anyhow::bail!("仅支持修改 TOML 顶层配置键: {key}");
+    }
+
+    let item = parse_config_set_value(key, value)?;
+    let replacement = match item {
+        toml_edit::Item::Value(v) => v.to_string(),
+        _ => anyhow::bail!("配置键 {key} 不是简单值类型"),
+    };
+
+    let updated_text = if path.exists() {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("读取配置文件失败: {}", path.display()))?;
+
+        let idx = find_top_level_key_line_index(&text, key)
+            .ok_or_else(|| anyhow::anyhow!("配置文件未找到顶层键: {key}"))?;
+
+        let lines: Vec<&str> = text.split_inclusive('\n').collect();
+        let line_with_nl = lines[idx];
+        let line_core = line_with_nl.trim_end_matches(&['\r', '\n'][..]);
+        let line_ending = &line_with_nl[line_core.len()..];
+        let eq_pos = line_core
+            .find('=')
+            .ok_or_else(|| anyhow::anyhow!("配置行缺少 '=': {}", line_core))?;
+        let value_start = eq_pos + 1;
+        let after_eq = &line_core[value_start..];
+        let tail = match find_toml_comment_outside_quotes(after_eq) {
+            Some(pos) => &after_eq[pos..],
+            None => "",
+        };
+
+        let new_line_core = format!("{}{}{}", &line_core[..value_start], replacement, tail);
+        let new_line_with_nl = format!("{}{}", new_line_core, line_ending);
+
+        let mut updated_text = String::with_capacity(text.len() + replacement.len() + 16);
+        updated_text.push_str(&lines[..idx].join(""));
+        updated_text.push_str(&new_line_with_nl);
+        updated_text.push_str(&lines[idx + 1..].join(""));
+        updated_text
+    } else {
+        // 文件不存在时创建一个最小配置文件；文件存在但缺少目标键时仍返回错误。
+        format!("{} = {}\n", key, replacement)
+    };
+
+    // 写入前确保新内容能被现有配置加载逻辑正常解析。
+    toml::from_str::<toml::Value>(&updated_text)
+        .with_context(|| "替换后的配置不是有效 TOML，放弃写入")?;
+
+    if path.exists() {
+        let backup_path = PathBuf::from(format!("{}.bak", path.display()));
+        std::fs::copy(path, &backup_path)
+            .with_context(|| format!("备份配置文件失败: {}", path.display()))?;
+
+        if let Err(e) = atomic_write(path, &updated_text) {
+            let _ = std::fs::copy(&backup_path, path);
+            return Err(e).with_context(|| format!("写入配置文件失败: {}", path.display()));
+        }
+    } else {
+        atomic_write(path, &updated_text)
+            .with_context(|| format!("写入配置文件失败: {}", path.display()))?;
+    }
+
+    Ok(())
+}
+
+fn find_top_level_key_line_index(text: &str, key: &str) -> Option<usize> {
+    for (idx, line_with_nl) in text.split_inclusive('\n').enumerate() {
+        let line_core = line_with_nl.trim_end_matches(&['\r', '\n'][..]);
+        let trimmed = line_core.trim_start();
+        if trimmed.starts_with('[') {
+            return None;
+        }
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some(eq_pos) = line_core.find('=') {
+            let lhs = line_core[..eq_pos].trim();
+            if lhs == key {
+                return Some(idx);
+            }
+        }
+    }
+    None
+}
+
+fn find_toml_comment_outside_quotes(s: &str) -> Option<usize> {
+    let mut in_basic_string = false;
+    let mut in_literal_string = false;
+    let mut escaped = false;
+
+    for (i, ch) in s.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+
+        if in_basic_string {
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_basic_string = false;
+            }
+            continue;
+        }
+
+        if in_literal_string {
+            if ch == '\'' {
+                in_literal_string = false;
+            }
+            continue;
+        }
+
+        if ch == '#' {
+            return Some(i);
+        }
+
+        if ch == '"' {
+            in_basic_string = true;
+        } else if ch == '\'' {
+            in_literal_string = true;
+        }
+    }
+
+    None
 }
 
 /// 使用 toml_edit 更新配置文件，保留注释和未知键。
@@ -567,7 +701,7 @@ fn validate_url_value(key: &str, raw: &str) -> Result<()> {
 
 /// 公开的配置更新入口，保留旧名称以兼容已有调用方。
 pub fn update_config_value(path: &Path, key: &str, value: &str) -> Result<()> {
-    set_config_value_file(path, key, value)
+    set_config_value_inline(path, key, value)
 }
 
 /// 配置 set 的公共入口：加载当前配置，校验并写回配置文件。
