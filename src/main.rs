@@ -371,15 +371,18 @@ async fn main() -> Result<()> {
                 },
                 Some(ConfigAction::Set { key, value }) => {
                     if key.trim().is_empty() {
-                        return Err(anyhow::anyhow!("配置键不能为空"));
+                        anyhow::bail!("配置键不能为空");
                     }
 
                     let config_path = config::find_config_path()?;
-                    if let Err(e) = config::set_config(&config_path, &key, &value) {
-                        eprintln!("设置配置 {} 失败：{}", key, e);
-                        eprintln!("提示：配置键可能不存在或值类型无效，现有配置未修改。");
-                        return Ok(());
-                    }
+                    config::set_config_value_file(&config_path, &key, &value).map_err(|e| {
+                        anyhow::anyhow!(
+                            "设置配置 {} = {} 失败：{}（提示：配置键可能不存在或值类型无效，现有配置未修改）",
+                            key,
+                            value,
+                            e
+                        )
+                    })?;
 
                     let cfg = Config::load()?;
                     println!("已更新配置：{} = {}", key, value);
@@ -546,6 +549,48 @@ fn run_memory_command(action: MemoryAction, cfg: &Config) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod config_cmd_tests {
+    use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn cli_parses_config_set() {
+        let cli = Cli::try_parse_from(["workbuddy", "config", "set", "llm.model", "gpt-4o"])
+            .expect("parse config set");
+        match cli.cmd {
+            Cmd::Config { action, get } => {
+                assert!(get.is_none());
+                match action {
+                    Some(ConfigAction::Set { key, value }) => {
+                        assert_eq!(key, "llm.model");
+                        assert_eq!(value, "gpt-4o");
+                    }
+                    _ => panic!("expected config set action"),
+                }
+            }
+            _ => panic!("expected config command"),
+        }
+    }
+
+    #[test]
+    fn config_set_rejects_unknown_key() {
+        let mut path = std::env::temp_dir();
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        path.push(format!("workbuddy-test-{}.toml", unique));
+        let content = format!("workspace_dir = {:?}", "/tmp/workbuddy-test");
+        fs::write(&path, content).unwrap();
+
+        let result = config::set_config(&path, "definitely.not.a.real.key", "x");
+        assert!(result.is_err(), "unknown key should fail");
+        let _ = fs::remove_file(&path);
+    }
 }
 
 #[cfg(test)]

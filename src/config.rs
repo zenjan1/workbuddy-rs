@@ -431,6 +431,15 @@ impl Config {
     }
 }
 
+/// 支持通过 `config set` 修改的额外嵌套配置键（例如历史/别名配置）。
+const NESTED_CONFIG_KEYS: &[&str] = &[
+    "llm.model",
+    "llm.temperature",
+    "cost.input_price_per_mtok",
+];
+
+
+
 /// 使用文本行内替换修改单个顶层 TOML 配置键，保留注释和其他格式。
 pub fn set_config_value_inline(path: &Path, key: &str, value: &str) -> Result<()> {
     validate_key_syntax(key)?;

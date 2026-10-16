@@ -432,3 +432,144 @@ temperature = 0.7
     assert!(raw.contains("temperature = 0.9"), "float not persisted: {}", raw);
     assert!(raw.contains("model = \"gpt-4o\""), "string not persisted: {}", raw);
 }
+
+
+fn workbuddy_bin() -> &'static str {
+    if let Some(bin) = option_env!("CARGO_BIN_EXE_workbuddy") {
+        bin
+    } else if let Some(bin) = option_env!("CARGO_BIN_EXE_workbuddy-rs") {
+        bin
+    } else if let Some(bin) = option_env!("CARGO_BIN_EXE_workbuddy_rs") {
+        bin
+    } else {
+        panic!("neither CARGO_BIN_EXE_workbuddy, CARGO_BIN_EXE_workbuddy-rs, nor CARGO_BIN_EXE_workbuddy_rs is set")
+    }
+}
+
+fn run_config_set(ws: &TestWorkspace, key: &str, value: &str) -> std::process::Output {
+    std::process::Command::new(workbuddy_bin())
+        .arg("config")
+        .arg("set")
+        .arg(key)
+        .arg(value)
+        .current_dir(&ws.path)
+        .env("WORKBUDDY_CONFIG", ws.config_path())
+        .env("WORKBUDDY_CONFIG_PATH", ws.config_path())
+        .env("WORKBUDDY_CONFIG_FILE", ws.config_path())
+        .output()
+        .expect("failed to execute workbuddy config set")
+}
+
+#[test]
+fn cli_config_set_valid_nested_key_persists_and_reads_back() {
+    let ws = TestWorkspace::new();
+    fs::write(
+        ws.config_path(),
+        r#"model = "default-model"
+max_budget = 5000
+stream = true
+
+[llm]
+model = "default-llm"
+temperature = 0.7
+"#,
+    )
+    .expect("failed to write initial config");
+
+    let output = run_config_set(&ws, "llm.temperature", "0.9");
+    assert!(
+        output.status.success(),
+        "config set llm.temperature failed; stdout: {}, stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let raw = read_config(&ws);
+    assert!(
+        raw.contains("temperature = 0.9"),
+        "temperature was not persisted: {}",
+        raw
+    );
+
+    let read_back = get_config_value(&ws.config_path(), "llm.temperature").expect("get llm.temperature");
+    assert_eq!(read_back, "0.9", "config value read back did not match");
+}
+
+#[test]
+fn cli_config_set_unknown_key_exits_nonzero_and_preserves_config() {
+    let ws = TestWorkspace::new();
+    ws.write_initial_config();
+
+    let original = read_config(&ws);
+
+    let output = run_config_set(&ws, "llm.unknown_key", "value");
+    assert!(
+        !output.status.success(),
+        "config set llm.unknown_key should fail; status: {:?}, stdout: {}, stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.to_lowercase().contains("unknown") || stderr.to_lowercase().contains("invalid"),
+        "expected unknown-key error on stderr, got: {}",
+        stderr
+    );
+
+    let raw = read_config(&ws);
+    assert_eq!(
+        raw, original,
+        "config file changed after rejected unknown-key set: {}",
+        raw
+    );
+}
+
+#[test]
+fn cli_config_set_preserves_existing_unknown_fields() {
+    let ws = TestWorkspace::new();
+    fs::write(
+        ws.config_path(),
+        r#"# WorkBuddy configuration
+model = "default-model"
+future_setting = "keep-me"
+
+[llm]
+model = "default-llm"
+temperature = 0.7
+future_llm_setting = true
+"#,
+    )
+    .expect("failed to write initial config");
+
+    let output = run_config_set(&ws, "llm.temperature", "0.9");
+    assert!(
+        output.status.success(),
+        "config set llm.temperature failed with unknown fields present; stdout: {}, stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let raw = read_config(&ws);
+    assert!(
+        raw.contains("future_setting = \"keep-me\""),
+        "top-level unknown field was not preserved: {}",
+        raw
+    );
+    assert!(
+        raw.contains("future_llm_setting = true"),
+        "nested unknown field was not preserved: {}",
+        raw
+    );
+    assert!(
+        raw.contains("temperature = 0.9"),
+        "temperature was not updated: {}",
+        raw
+    );
+    assert!(
+        raw.contains("# WorkBuddy configuration"),
+        "comment was not preserved: {}",
+        raw
+    );
+}
