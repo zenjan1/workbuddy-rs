@@ -152,6 +152,9 @@ enum Cmd {
     Config {
         #[command(subcommand)]
         action: Option<ConfigAction>,
+        /// 获取配置项（--get <key>，与子命令互斥）
+        #[arg(long)]
+        get: Option<String>,
     },
     /// 校验配置(读取 config.toml 或默认配置)
     Validate,
@@ -332,12 +335,11 @@ async fn main() -> Result<()> {
         }
         Cmd::Agents => cmd_agents(),
         Cmd::Review => review::review(cfg).await,
-        Cmd::Config { action } => match action {
-            None => {
-                println!("{}", cfg.summary());
-                Ok(())
+        Cmd::Config { action, get } => {
+            if get.is_some() && action.is_some() {
+                anyhow::bail!("--get 不能与子命令同时使用");
             }
-            Some(ConfigAction::Get { key }) => {
+            if let Some(key) = get {
                 if key.trim().is_empty() {
                     return Err(anyhow::anyhow!("配置键不能为空"));
                 }
@@ -347,33 +349,51 @@ async fn main() -> Result<()> {
                     .map_err(|e| anyhow::anyhow!("获取配置 {} 失败: {}", key, e))?;
 
                 println!("{} = {}", key, value);
-                Ok(())
-            },
-            Some(ConfigAction::Set { key, value }) => {
-                if key.trim().is_empty() {
-                    return Err(anyhow::anyhow!("配置键不能为空"));
+                return Ok(());
+            }
+            match action {
+                None => {
+                    println!("{}", cfg.summary());
+                    Ok(())
                 }
-                if value.trim().is_empty() {
-                    return Err(anyhow::anyhow!("配置值不能为空"));
+                Some(ConfigAction::Get { key }) => {
+                    if key.trim().is_empty() {
+                        return Err(anyhow::anyhow!("配置键不能为空"));
+                    }
+
+                    let config_path = find_config_path()?;
+                    let value = config::get_config_value(&config_path, &key)
+                        .map_err(|e| anyhow::anyhow!("获取配置 {} 失败: {}", key, e))?;
+
+                    println!("{} = {}", key, value);
+                    Ok(())
+                },
+                Some(ConfigAction::Set { key, value }) => {
+                    if key.trim().is_empty() {
+                        return Err(anyhow::anyhow!("配置键不能为空"));
+                    }
+                    if value.trim().is_empty() {
+                        return Err(anyhow::anyhow!("配置值不能为空"));
+                    }
+
+                    let config_path = find_config_path()?;
+                    config::set_config(&config_path, &key, &value)
+                        .map_err(|e| anyhow::anyhow!("设置配置 {} 失败: {}", key, e))?;
+
+                    let cfg = Config::load()?;
+                    println!("已更新配置：{} = {}", key, value);
+                    println!("{}", cfg.summary());
+
+                    // 提示哪些配置需要重启生效
+                    let needs_restart = matches!(
+                        key.as_str(),
+                        "model" | "base_url" | "api_key" | "temperature" | "timeout"
+                    );
+                    if needs_restart {
+                        println!("提示：修改 {} 需要重启 WorkBuddy 才能生效。", key);
+                    }
+                    Ok(())
                 }
-
-                let config_path = find_config_path()?;
-                config::set_config(&config_path, &key, &value)
-                    .map_err(|e| anyhow::anyhow!("设置配置 {} 失败: {}", key, e))?;
-
-                let cfg = Config::load()?;
-                println!("已更新配置：{} = {}", key, value);
-                println!("{}", cfg.summary());
-
-                // 提示哪些配置需要重启生效
-                let needs_restart = matches!(
-                    key.as_str(),
-                    "model" | "base_url" | "api_key" | "temperature" | "timeout"
-                );
-                if needs_restart {
-                    println!("提示：修改 {} 需要重启 WorkBuddy 才能生效。", key);
-                }
-                Ok(())
             }
         },
         Cmd::Validate => unreachable!("Validate 已在 main 入口处理"),
@@ -690,7 +710,7 @@ mod config_set_tests {
         let cli = Cli::try_parse_from(["workbuddy", "config", "set", "timeout", "45"])
             .expect("parse config set");
         match cli.cmd {
-            Cmd::Config { action } => match action {
+            Cmd::Config { action, .. } => match action {
                 Some(ConfigAction::Set { key, value }) => {
                     assert_eq!(key, "timeout");
                     assert_eq!(value, "45");

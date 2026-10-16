@@ -193,12 +193,35 @@ impl Config {
         Ok(FileConfig::default())
     }
 
+    pub fn get_value(&self, key: &str) -> Result<String> {
+        let canonical_key = normalize_config_key(key)?;
+        let value = match canonical_key {
+            "api_key" => self.api_key.clone().unwrap_or_default(),
+            "base_url" => self.base_url.clone(),
+            "model" => self.model.clone(),
+            "max_parallel" => self.max_parallel.to_string(),
+            "workspace_dir" => self.workspace_dir.display().to_string(),
+            "repo_dir" => self.repo_dir.display().to_string(),
+            "request_timeout_secs" | "timeout" => self.request_timeout_secs.to_string(),
+            "price" => self.price.to_string(),
+            "max_budget" => self.max_budget.to_string(),
+            "cost_per_1k_tokens" => self.cost_per_1k_tokens.to_string(),
+            "webhook_enabled" => self.webhook_enabled.to_string(),
+            "webhook_url" => self.webhook_url.clone().unwrap_or_default(),
+            "webhook_retry" => self.webhook_retry.to_string(),
+            "webhook_timeout_secs" => self.webhook_timeout_secs.to_string(),
+            _ => anyhow::bail!("配置键 {} 未实现读取", canonical_key),
+        };
+        Ok(value)
+    }
+
     pub fn set_value(&mut self, key: &str, value: &str) -> Result<()> {
         Self::validate_config_key(key)?;
+        let normalized_key = normalize_config_key(key)?;
         let path = Self::config_file_path();
         // 先持久化，成功后再更新内存配置，避免部分更新。
-        Self::update_config_file(&path, key, value)?;
-        self.apply_value(key, value)?;
+        Self::update_config_file(&path, normalized_key, value)?;
+        self.apply_value(normalized_key, value)?;
         Ok(())
     }
 

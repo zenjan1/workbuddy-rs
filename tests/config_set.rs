@@ -2,7 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use workbuddy_rs::config::set_config_value;
+use workbuddy_rs::config::{get_config_value, set_config_value};
 
 struct TestWorkspace {
     path: PathBuf,
@@ -142,5 +142,19 @@ fn config_set_rejects_invalid_types() {
         raw.contains("model = \"default-model\""),
         "unmodified model changed after rejected type update: {}",
         raw
+    );
+}
+
+#[test]
+fn config_set_value_can_be_read_back_with_get() {
+    let ws = TestWorkspace::new();
+    ws.write_initial_config();
+
+    set_config_value(&ws.config_path(), "model", "gpt-4o").expect("set model");
+
+    let read_back = get_config_value(&ws.config_path(), "model").expect("get model");
+    assert_eq!(
+        read_back, "gpt-4o",
+        "config --get returned unexpected value after config set"
     );
 }
