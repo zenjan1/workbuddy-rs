@@ -41,8 +41,8 @@ impl Error for MemoryError {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryEntry {
-    pub key: String,
-    pub value: String,
+    pub id: String,
+    pub content: String,
     pub created_at: u64,
 }
 
@@ -110,27 +110,31 @@ impl MemoryStore {
         Self::new(memory_file_path(workspace_dir.as_ref()))
     }
 
-    /// Adds or updates a memory entry keyed by `key` with `value`, then persists atomically.
+    /// Adds or overwrites the memory entry for `key` with `value`, then persists atomically.
+    /// Returns the created/updated entry.
     pub fn add(&self, key: &str, value: &str) -> Result<MemoryEntry, MemoryError> {
-        if key.trim().is_empty() {
+        let key = key.trim();
+        let value = value.trim();
+        if key.is_empty() {
             return Err(MemoryError::Invalid("memory key must not be empty".to_owned()));
         }
-        if value.trim().is_empty() {
+        if value.is_empty() {
             return Err(MemoryError::Invalid("memory value must not be empty".to_owned()));
         }
 
         let entry = {
             let mut data = self.data.write().unwrap();
-            if let Some(existing) = data.iter_mut().find(|entry| entry.key == key) {
-                existing.value = value.to_string();
-                existing.created_at = unix_timestamp();
+            let now = unix_timestamp();
+            let entry = MemoryEntry {
+                id: key.to_string(),
+                content: value.to_string(),
+                created_at: now,
+            };
+            if let Some(existing) = data.iter_mut().find(|e| e.id.as_str() == key) {
+                existing.content = value.to_string();
+                existing.created_at = now;
                 existing.clone()
             } else {
-                let entry = MemoryEntry {
-                    key: key.to_string(),
-                    value: value.to_string(),
-                    created_at: unix_timestamp(),
-                };
                 data.push(entry.clone());
                 entry
             }
@@ -140,13 +144,13 @@ impl MemoryStore {
         Ok(entry)
     }
 
-    /// Retrieves the value for `key`, returning a friendly error if missing.
-    pub fn get(&self, key: &str) -> Result<String, MemoryError> {
+    /// Retrieves the content for `id`, returning a friendly error if missing.
+    pub fn get(&self, id: &str) -> Result<String, MemoryError> {
         let data = self.data.read().unwrap();
         data.iter()
-            .find(|entry| entry.key == key)
-            .map(|entry| entry.value.clone())
-            .ok_or_else(|| MemoryError::NotFound(key.to_string()))
+            .find(|entry| entry.id == id)
+            .map(|entry| entry.content.clone())
+            .ok_or_else(|| MemoryError::NotFound(id.to_string()))
     }
 
     /// Lists all entries in insertion order.
@@ -155,11 +159,11 @@ impl MemoryStore {
         data.clone()
     }
 
-    /// Removes an entry by key and returns it, if present.
-    pub fn remove(&self, key: &str) -> Result<MemoryEntry, MemoryError> {
+    /// Removes an entry by id and returns it, if present.
+    pub fn remove(&self, id: &str) -> Result<MemoryEntry, MemoryError> {
         let removed = {
             let mut data = self.data.write().unwrap();
-            let position = data.iter().position(|entry| entry.key == key);
+            let position = data.iter().position(|entry| entry.id == id);
             position.map(|position| data.remove(position))
         };
 
@@ -168,7 +172,7 @@ impl MemoryStore {
                 self.save()?;
                 Ok(entry)
             }
-            None => Err(MemoryError::NotFound(key.to_string())),
+            None => Err(MemoryError::NotFound(id.to_string())),
         }
     }
 
@@ -286,15 +290,15 @@ pub fn list_memory(workspace_dir: &Path) -> Result<Vec<MemoryEntry>, MemoryError
     Ok(store.list())
 }
 
-pub fn get_memory(workspace_dir: &Path, key: &str) -> Result<String, MemoryError> {
+pub fn get_memory(workspace_dir: &Path, id: &str) -> Result<String, MemoryError> {
     let store = MemoryStore::open(workspace_dir)?;
-    store.get(key)
+    store.get(id)
 }
 
 pub enum MemoryCommand {
     Add { key: String, value: String },
     List,
-    Get { key: String },
+    Get { id: String },
 }
 
 pub fn run_memory_command(
@@ -304,7 +308,7 @@ pub fn run_memory_command(
     match command {
         MemoryCommand::Add { key, value } => {
             let entry = store.add(&key, &value)?;
-            Ok(format!("memory saved: {} = {}", entry.key, entry.value))
+            Ok(format!("memory saved: {} = {}", entry.id, entry.content))
         }
         MemoryCommand::List => {
             let entries = store.list();
@@ -313,18 +317,18 @@ pub fn run_memory_command(
             }
             let mut out = String::new();
             for entry in entries {
-                out.push_str(&format!("{}\t{}\n", entry.key, entry.value));
+                out.push_str(&format!("{}\t{}\n", entry.id, entry.content));
             }
             Ok(out)
         }
-        MemoryCommand::Get { key } => store.get(&key),
+        MemoryCommand::Get { id } => store.get(&id),
     }
 }
 
 impl MemoryCommand {
     pub fn parse(args: &[String]) -> Result<Self, String> {
         if args.is_empty() {
-            return Err("用法: memory add <key> <value> | list | get <key>".to_string());
+            return Err("用法: memory add <key> <value> | list | get <id>".to_string());
         }
         match args[0].as_str() {
             "add" => {
@@ -349,10 +353,10 @@ impl MemoryCommand {
             }
             "get" => {
                 if args.len() != 2 {
-                    return Err("用法: memory get <key>".to_string());
+                    return Err("用法: memory get <id>".to_string());
                 }
-                let key = args[1].clone();
-                Ok(MemoryCommand::Get { key })
+                let id = args[1].clone();
+                Ok(MemoryCommand::Get { id })
             }
             other => Err(format!("未知记忆子命令: {other}")),
         }

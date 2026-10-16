@@ -547,7 +547,7 @@ fn run_memory_command(action: MemoryAction, cfg: &Config) -> Result<()> {
                 println!("(暂无记忆)");
             } else {
                 for entry in entries {
-                    println!("{:?}", entry);
+                    println!("{} = {}", entry.id, entry.content);
                 }
             }
         }
@@ -556,7 +556,7 @@ fn run_memory_command(action: MemoryAction, cfg: &Config) -> Result<()> {
                 anyhow::bail!("记忆键不能为空");
             }
             match store.get(&key) {
-                Ok(value) => println!("{} = {:?}", key, value),
+                Ok(value) => println!("{} = {}", key, value),
                 Err(memory::MemoryError::NotFound(_)) => anyhow::bail!("未找到记忆键: {}", key),
                 Err(e) => anyhow::bail!("获取记忆失败: {e}"),
             }
