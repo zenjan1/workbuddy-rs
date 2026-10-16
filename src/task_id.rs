@@ -144,7 +144,8 @@ fn duplicate_or_ambiguous(query: &str, matches: Vec<(usize, String)>) -> TaskIdE
 /// 解析原始 task_id 参数。
 ///
 /// * 若参数可解析为纯数字索引，则直接返回 `TaskId::Numeric(index)`，保持旧行为。
-/// * 否则将参数与每个标题做不区分大小写、去除首尾空格后的唯一前缀匹配。
+/// * 否则先按标题进行不区分大小写、去除首尾空格后的精确匹配。
+/// * 精确匹配未命中时回退到模糊匹配：标题包含查询字符串，或标题 slug 以查询 slug 前缀匹配。
 ///   零匹配返回 `NotFound`，多个匹配返回 `Ambiguous`，重复标题返回 `DuplicateTitle`。
 pub fn resolve_task_id<I, S>(raw: &str, titles: I) -> Result<TaskId, TaskIdError>
 where
@@ -167,27 +168,40 @@ where
         });
     }
 
-    let slug_query = TaskId::slugify(raw);
-    let mut matches = Vec::new();
+    // 1) 精确匹配标题。
+    let mut exact_matches = Vec::new();
     for (index, title) in title_list.iter().enumerate() {
-        let normalized_title = normalize_title(title);
-        let title_match = {
-            let words: Vec<&str> = normalized_title.split_whitespace().collect();
-            (0..words.len()).any(|i| words[i..].join(" ").starts_with(&query))
-        };
-        let slug = TaskId::slugify(title.as_str());
-        let slug_match = !slug_query.is_empty() && slug.starts_with(&slug_query);
-        if title_match || slug_match {
-            matches.push((index, title.clone()));
+        if normalize_title(title) == query {
+            exact_matches.push((index, title.clone()));
         }
     }
 
-    match matches.len() {
+    if !exact_matches.is_empty() {
+        return match exact_matches.len() {
+            1 => Ok(TaskId::Numeric(exact_matches[0].0)),
+            _ => Err(duplicate_or_ambiguous(raw, exact_matches)),
+        };
+    }
+
+    // 2) 未精确命中后回退到模糊匹配。
+    let slug_query = TaskId::slugify(raw);
+    let mut fuzzy_matches = Vec::new();
+    for (index, title) in title_list.iter().enumerate() {
+        let normalized_title = normalize_title(title);
+        let title_match = normalized_title.contains(&query);
+        let slug = TaskId::slugify(title.as_str());
+        let slug_match = !slug_query.is_empty() && slug.starts_with(&slug_query);
+        if title_match || slug_match {
+            fuzzy_matches.push((index, title.clone()));
+        }
+    }
+
+    match fuzzy_matches.len() {
         0 => Err(TaskIdError::NotFound {
             query: raw.to_string(),
         }),
-        1 => Ok(TaskId::Numeric(matches[0].0)),
-        _ => Err(duplicate_or_ambiguous(raw, matches)),
+        1 => Ok(TaskId::Numeric(fuzzy_matches[0].0)),
+        _ => Err(duplicate_or_ambiguous(raw, fuzzy_matches)),
     }
 }
 
