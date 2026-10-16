@@ -446,7 +446,8 @@ pub fn format_status(summary: &StatusSummary) -> String {
         "stopped".to_string()
     };
     let mut output = format!(
-        "Supervisor: {state}\nLast run: {} completed, {} failed",
+        "Supervisor: {state}\nRunning: {}\nLast run: {} completed, {} failed\nCompleted: {}\nFailed: {}",
+        summary.supervisor_running, summary.completed_runs, summary.failed_runs,
         summary.completed_runs, summary.failed_runs
     );
     if summary.completed_runs == 0 && summary.failed_runs == 0 && summary.recent_logs.is_empty() {
@@ -549,7 +550,9 @@ mod tests {
         assert!(!summary.recent_logs.iter().any(|log| log.starts_with("[run-6]")));
 
         let rendered = format_status(&summary);
-        assert!(rendered.contains("Last run: 11 completed, 0 failed"));
+        assert!(rendered.contains("Running: false"));
+        assert!(rendered.contains("Completed: 11"));
+        assert!(rendered.contains("Failed: 0"));
         assert!(rendered.contains("Recent logs:"));
         let log_lines = rendered.lines().filter(|line| line.starts_with("  - ")).count();
         assert_eq!(log_lines, 5);
@@ -568,10 +571,32 @@ mod tests {
         assert!(summary.recent_logs.is_empty());
 
         let rendered = format_status(&summary);
-        assert!(rendered.contains("Last run: 0 completed, 0 failed"));
+        assert!(rendered.contains("Running: false"));
+        assert!(rendered.contains("Completed: 0"));
+        assert!(rendered.contains("Failed: 0"));
         assert!(rendered.contains("No run history."));
         assert!(rendered.contains("Recent logs: (none)"));
 
+        fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    #[test]
+    fn status_output_contains_required_fields() {
+        let workspace = test_workspace("fields");
+        write_run_record(
+            &workspace.join("runs"),
+            "run-1.json",
+            &run_record(
+                "run-1",
+                vec![step(1, "plan", true, None, "preview")],
+            ),
+        );
+
+        let summary = parse_status(&workspace).unwrap();
+        let rendered = format_status(&summary);
+        for field in ["Running:", "Completed:", "Failed:", "Recent logs:"] {
+            assert!(rendered.contains(field), "missing field {}", field);
+        }
         fs::remove_dir_all(&workspace).unwrap();
     }
 
