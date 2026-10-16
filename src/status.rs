@@ -128,7 +128,10 @@ pub fn show(workspace_dir: &Path, task_ref: &str) -> anyhow::Result<()> {
     let titles: Vec<String> = tasks.iter().map(|t| t.title.clone()).collect();
     match crate::task_id::resolve_task_id(task_ref, &titles) {
         Ok(task_id) => {
-            println!("{}", task_id);
+            match find_run_record(workspace_dir, &task_id.to_string()) {
+                Some(record) => println!("{}", format_run_summary(&record)),
+                None => println!("{}", task_id),
+            }
             Ok(())
         }
         Err(err) => {
@@ -136,6 +139,65 @@ pub fn show(workspace_dir: &Path, task_ref: &str) -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+fn find_run_record(workspace_dir: &Path, task_id: &str) -> Option<RunRecord> {
+    let mut run_files = collect_run_files(workspace_dir).ok()?;
+    run_files.sort_by_key(|path| {
+        let modified = fs::metadata(path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis());
+        let numeric = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.rsplit_once('-').map(|(_, n)| n))
+            .and_then(|n| n.parse::<u64>().ok())
+            .unwrap_or(u64::MAX);
+        (modified, numeric)
+    });
+
+    let mut best: Option<RunRecord> = None;
+    for path in run_files {
+        let Ok(data) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(record) = serde_json::from_str::<RunRecord>(&data) else {
+            continue;
+        };
+        let record_id = format_task_id(record.id.as_str());
+        if record_id == task_id {
+            best = Some(record);
+        }
+    }
+    best
+}
+
+fn format_run_summary(record: &RunRecord) -> String {
+    let success = record.steps.iter().all(|step| step.ok);
+    let state = if success { "completed" } else { "failed" };
+    let prompt_tokens = record
+        .token_usage
+        .as_ref()
+        .map(|usage| usage.input_tokens)
+        .unwrap_or(0);
+    let completion_tokens = record
+        .token_usage
+        .as_ref()
+        .map(|usage| usage.output_tokens)
+        .unwrap_or(0);
+    let chars = record.char_usage.unwrap_or(0);
+    format!(
+        "Task: {}\nGoal: {}\nStatus: {}\nSteps: {}\nUsage: prompt_tokens: {}, completion_tokens: {}, chars: {}",
+        format_task_id(record.id.as_str()),
+        record.goal,
+        state,
+        record.steps.len(),
+        prompt_tokens,
+        completion_tokens,
+        chars
+    )
 }
 
 pub fn parse_status(workspace_dir: &Path) -> anyhow::Result<StatusSummary> {
