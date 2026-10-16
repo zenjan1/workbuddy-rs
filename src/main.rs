@@ -480,17 +480,19 @@ fn run_memory_command(action: MemoryAction, cfg: &Config) -> Result<()> {
                 anyhow::bail!("记忆键不能为空");
             }
             store
-                .add(&key, &value)
+                .set(&key, &value)
                 .map_err(|e| anyhow::anyhow!("添加记忆失败: {e}"))?;
             println!("已保存记忆：{} = {}", key, value);
         }
         MemoryAction::List => {
             let entries = store.list();
+            let entries = entries?;
             if entries.is_empty() {
                 println!("(暂无记忆)");
             } else {
                 for entry in entries {
-                    println!("{} = {}", entry.id, entry.content);
+                    let display_key = entry.key.clone().unwrap_or_else(|| entry.id.to_string());
+                    println!("{} = {}", display_key, entry.text);
                 }
             }
         }
@@ -498,8 +500,8 @@ fn run_memory_command(action: MemoryAction, cfg: &Config) -> Result<()> {
             if key.trim().is_empty() {
                 anyhow::bail!("记忆键不能为空");
             }
-            match store.get(&key) {
-                Ok(value) => println!("{} = {}", key, value),
+            match store.get_by_key(&key) {
+                Ok(value) => println!("{} = {}", key, value.text),
                 Err(memory::MemoryError::NotFound(_)) => anyhow::bail!("未找到记忆键: {}", key),
                 Err(e) => anyhow::bail!("获取记忆失败: {e}"),
             }
