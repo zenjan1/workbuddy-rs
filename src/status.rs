@@ -297,7 +297,7 @@ fn history_entries_from_run(
     };
     let content = truncate_chars(&content, 80);
     let state = if success { "completed" } else { "failed" };
-    let task_id_display = TaskId::from_slug(record.id.as_str()).to_string();
+    let task_id_display = format_task_id(record.id.as_str());
     let log = format!(
         "[{}] {} ({} steps): {} {}",
         task_id_display,
@@ -308,6 +308,14 @@ fn history_entries_from_run(
     );
 
     vec![HistoryEntry { success, log }]
+}
+
+fn format_task_id(record_id: &str) -> String {
+    if record_id.chars().all(|c| c.is_ascii_digit()) {
+        record_id.to_string()
+    } else {
+        TaskId::from_slug(record_id).to_string()
+    }
 }
 
 fn read_supervisor_running(workspace_dir: &Path) -> anyhow::Result<bool> {
@@ -493,6 +501,12 @@ mod tests {
     use crate::workspace::{RunRecord, StepRecord};
     use std::fs;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn format_task_id_keeps_numeric_indices_and_slugs() {
+        assert_eq!(format_task_id("1"), "1");
+        assert_eq!(format_task_id("add-status-command"), "add-status-command");
+    }
 
     #[test]
     fn parse_status_limits_recent_logs_to_five() {

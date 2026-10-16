@@ -44,19 +44,36 @@ impl TaskId {
         out
     }
 
-    /// 根据已有 slug 集合解决冲突：若 base 已存在，则追加 -2、-3 ...
+    /// 根据已有 slug 集合解决冲突：若 base 已存在，则追加短哈希。
+    /// 短哈希基于 base 及尝试次数计算，确保确定性且冲突时可继续变化。
     pub fn unique_slug(base: &str, existing_slugs: &HashSet<&str>) -> String {
         if !existing_slugs.contains(base) {
             return base.to_string();
         }
 
-        let mut n = 2;
+        let mut attempt = 1;
         loop {
-            let candidate = format!("{}-{}", base, n);
+            let candidate = format!(
+                "{}-{}",
+                base,
+                Self::short_hash(&format!("{}{}", base, attempt))
+            );
             if !existing_slugs.contains(candidate.as_str()) {
                 return candidate;
             }
-            n += 1;
+            attempt += 1;
+        }
+    }
+
+    fn short_hash(s: &str) -> String {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        s.hash(&mut hasher);
+        let hex = format!("{:x}", hasher.finish());
+        if hex.len() >= 6 {
+            hex[..6].to_string()
+        } else {
+            format!("{:0>6}", hex)
         }
     }
 
@@ -69,6 +86,19 @@ impl TaskId {
         }
         TaskId::Slug(Self::unique_slug(&base, existing_slugs))
     }
+}
+
+/// 供 dev 循环使用的便捷函数：标题 → slug，并保证在已有集合中唯一。
+/// 签名兼容 `HashSet<String>`，内部转换为 `HashSet<&str>` 后复用 `TaskId::unique_slug`。
+pub fn unique_slug(title: &str, existing_slugs: &HashSet<String>) -> String {
+    let base = TaskId::slugify(title);
+    let base = if base.is_empty() {
+        "task".to_string()
+    } else {
+        base
+    };
+    let borrowed: HashSet<&str> = existing_slugs.iter().map(|s| s.as_str()).collect();
+    TaskId::unique_slug(&base, &borrowed)
 }
 
 impl fmt::Display for TaskId {
@@ -188,7 +218,13 @@ where
     }
 
     match exact_matches.len() {
-        1 => return Ok(TaskId::Numeric(exact_matches[0].0)),
+        1 => {
+            let slug = TaskId::slugify(&exact_matches[0].1);
+            if slug.is_empty() {
+                return Ok(TaskId::Numeric(exact_matches[0].0));
+            }
+            return Ok(TaskId::Slug(slug));
+        }
         0 => {}
         _ => return Err(duplicate_or_ambiguous(raw, exact_matches)),
     }
@@ -212,7 +248,13 @@ where
         0 => Err(TaskIdError::NotFound {
             query: raw.to_string(),
         }),
-        1 => Ok(TaskId::Numeric(fuzzy_matches[0].0)),
+        1 => {
+            let slug = TaskId::slugify(&fuzzy_matches[0].1);
+            if slug.is_empty() {
+                return Ok(TaskId::Numeric(fuzzy_matches[0].0));
+            }
+            Ok(TaskId::Slug(slug))
+        }
         _ => Err(duplicate_or_ambiguous(raw, fuzzy_matches)),
     }
 }
@@ -257,20 +299,29 @@ mod tests {
     }
 
     #[test]
-    fn from_title_resolves_conflicts() {
+    fn from_title_resolves_conflicts_with_short_hash() {
         let mut existing = HashSet::new();
         existing.insert("hello");
-        existing.insert("hello-2");
         let id = TaskId::from_title("Hello", 1, &existing);
-        assert_eq!(id, TaskId::Slug("hello-3".to_string()));
+        match id {
+            TaskId::Slug(slug) => {
+                assert!(slug.starts_with("hello-"));
+                assert_ne!(slug, "hello");
+                assert!(!existing.contains(slug.as_str()));
+            }
+            _ => panic!("expected slug"),
+        }
     }
 
     #[test]
-    fn unique_slug_appends_suffix() {
+    fn unique_slug_appends_short_hash() {
         let mut existing = HashSet::new();
         existing.insert("task");
-        existing.insert("task-2");
-        assert_eq!(TaskId::unique_slug("task", &existing), "task-3");
+        let result = TaskId::unique_slug("task", &existing);
+        assert!(result.starts_with("task-"));
+        assert_ne!(result, "task");
+        assert!(!existing.contains(result.as_str()));
+
         assert_eq!(TaskId::unique_slug("brand-new", &existing), "brand-new");
     }
 
@@ -284,17 +335,35 @@ mod tests {
     #[test]
     fn resolve_unique_title_exact_match() {
         let titles = ["Write docs", "Fix login bug"];
-        assert_eq!(resolve_task_id("fix login bug", titles), Ok(TaskId::Numeric(1)));
-        assert_eq!(resolve_task_id("Write docs", titles), Ok(TaskId::Numeric(0)));
-        assert_eq!(resolve_task_id("  fix login bug  ", titles), Ok(TaskId::Numeric(1)));
-        assert_eq!(resolve_task_id("FIX LOGIN BUG", titles), Ok(TaskId::Numeric(1)));
+        assert_eq!(
+            resolve_task_id("fix login bug", titles),
+            Ok(TaskId::Slug("fix-login-bug".to_string()))
+        );
+        assert_eq!(
+            resolve_task_id("Write docs", titles),
+            Ok(TaskId::Slug("write-docs".to_string()))
+        );
+        assert_eq!(
+            resolve_task_id("  fix login bug  ", titles),
+            Ok(TaskId::Slug("fix-login-bug".to_string()))
+        );
+        assert_eq!(
+            resolve_task_id("FIX LOGIN BUG", titles),
+            Ok(TaskId::Slug("fix-login-bug".to_string()))
+        );
     }
 
     #[test]
     fn resolve_title_match_ignores_case_and_spaces() {
         let titles = ["Write docs", "  Hello   World  "];
-        assert_eq!(resolve_task_id("  HELLO   ", titles), Ok(TaskId::Numeric(1)));
-        assert_eq!(resolve_task_id("hELLo", titles), Ok(TaskId::Numeric(1)));
+        assert_eq!(
+            resolve_task_id("  HELLO   ", titles),
+            Ok(TaskId::Slug("hello-world".to_string()))
+        );
+        assert_eq!(
+            resolve_task_id("hELLo", titles),
+            Ok(TaskId::Slug("hello-world".to_string()))
+        );
         // 纯数字参数仍然优先，不受标题影响
         assert_eq!(resolve_task_id("0", titles), Ok(TaskId::Numeric(0)));
     }
@@ -319,8 +388,6 @@ mod tests {
         ));
     }
 
-
-
     #[test]
     fn resolve_duplicate_title_returns_error() {
         let titles = vec!["Write docs".to_string(), " write docs ".to_string()];
@@ -333,16 +400,31 @@ mod tests {
     #[test]
     fn resolve_title_ignores_internal_spaces() {
         let titles = ["Write docs", "Hello   World"];
-        assert_eq!(resolve_task_id("Hello World", titles), Ok(TaskId::Numeric(1)));
-        assert_eq!(resolve_task_id("hello   world", titles), Ok(TaskId::Numeric(1)));
-        assert_eq!(resolve_task_id("HELLO WORLD", titles), Ok(TaskId::Numeric(1)));
+        assert_eq!(
+            resolve_task_id("Hello World", titles),
+            Ok(TaskId::Slug("hello-world".to_string()))
+        );
+        assert_eq!(
+            resolve_task_id("hello   world", titles),
+            Ok(TaskId::Slug("hello-world".to_string()))
+        );
+        assert_eq!(
+            resolve_task_id("HELLO WORLD", titles),
+            Ok(TaskId::Slug("hello-world".to_string()))
+        );
     }
 
     #[test]
     fn resolve_slug_form_matches_title() {
         let titles = ["Write docs", "Fix login bug", "Hello, World!"];
-        assert_eq!(resolve_task_id("hello-world", titles), Ok(TaskId::Numeric(2)));
-        assert_eq!(resolve_task_id("fix-login-bug", titles), Ok(TaskId::Numeric(1)));
+        assert_eq!(
+            resolve_task_id("hello-world", titles),
+            Ok(TaskId::Slug("hello-world".to_string()))
+        );
+        assert_eq!(
+            resolve_task_id("fix-login-bug", titles),
+            Ok(TaskId::Slug("fix-login-bug".to_string()))
+        );
     }
 
     #[test]
@@ -351,6 +433,4 @@ mod tests {
         let err = resolve_task_id("setup", titles).unwrap_err();
         assert!(err.to_string().contains("numeric index"));
     }
-
-
 }

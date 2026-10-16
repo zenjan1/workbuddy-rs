@@ -462,13 +462,39 @@ pub async fn run_dev_loop(
     let mut failed = Vec::new();
     let mut extend_rounds = 0usize;
     let mut extend_fail_streak = 0usize;
+    // 为每个任务生成稳定的 slug id(冲突时由 task_id 模块追加短哈希)。
+    let mut used_slugs: HashSet<String> = HashSet::new();
+    let mut task_ids: Vec<String> = backlog
+        .iter()
+        .map(|task| {
+            let id = crate::task_id::unique_slug(&task.title, &mut used_slugs);
+            used_slugs.insert(id.clone());
+            id
+        })
+        .collect();
+
     // done_set 同时含 done 与 failed:重启后不重复跑已失败任务(省 token);
     // 确需重试时用 --retry-failed 从 failed 移回待办。
+    // 兼容旧版本 state.json 中纯数字 backlog[0] 记录:统一解析为 slug id。
     let mut done_set: HashSet<String> = state
         .done
         .iter()
         .chain(state.failed.iter())
-        .cloned()
+        .map(|id| {
+            let raw = id.as_str();
+            if let Some(idx) = raw
+                .strip_prefix("backlog[")
+                .and_then(|s| s.strip_suffix(']'))
+                .and_then(|s| s.parse::<usize>().ok())
+            {
+                task_ids
+                    .get(idx)
+                    .cloned()
+                    .unwrap_or_else(|| id.clone())
+            } else {
+                id.clone()
+            }
+        })
         .collect();
 
     loop {
@@ -507,7 +533,7 @@ pub async fn run_dev_loop(
         let next = backlog
             .iter()
             .enumerate()
-            .filter(|(i, _)| !done_set.contains(&format!("backlog[{}]", i)))
+            .filter(|(i, _)| !done_set.contains(task_ids[*i].as_str()))
             .max_by_key(|(i, t)| (t.priority, -(*i as i32)))
             .map(|(i, t)| (i, t));
         let Some((i, task)) = next else {
@@ -526,7 +552,12 @@ pub async fn run_dev_loop(
             );
             match generate_tasks(&llm, &cfg.repo_dir, per_round).await {
                 Ok(new_tasks) if !new_tasks.is_empty() => {
-                    backlog.extend(new_tasks);
+                    for task in new_tasks {
+                        let id = crate::task_id::unique_slug(&task.title, &mut used_slugs);
+                        used_slugs.insert(id.clone());
+                        task_ids.push(id);
+                        backlog.push(task);
+                    }
                     if let Err(e) = save_backlog(&opts.backlog_path, &backlog) {
                         eprintln!(
                             "[dev] 警告:新任务写回 backlog 失败: {}",
@@ -565,7 +596,7 @@ pub async fn run_dev_loop(
                 }
             }
         };
-        let task_id = format!("backlog[{}]", i);
+        let task_id = task_ids[i].clone();
         let goal = format!("{}\n{}", task.title, task.description).trim().to_string();
         eprintln!("[dev] === 任务 {}/{}: {} ===", state.done.len() + 1, backlog.len(), task.title);
 

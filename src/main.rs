@@ -222,6 +222,30 @@ enum Cmd {
     RoadmapAdvance,
 }
 
+fn resolve_task_run<'a>(
+    runs: &'a [RunRecord],
+    id: &str,
+) -> anyhow::Result<Option<&'a RunRecord>> {
+    match crate::task_id::resolve_task_id(id, runs.iter().map(|r| r.goal.as_str())) {
+        Ok(crate::task_id::TaskId::Numeric(idx)) => runs
+            .get(idx)
+            .map(Some)
+            .ok_or_else(|| anyhow::anyhow!("任务索引 {} 超出范围", idx)),
+        Ok(crate::task_id::TaskId::Slug(slug)) => {
+            Ok(runs.iter().find(|r| r.id == slug))
+        }
+        Err(crate::task_id::TaskIdError::NotFound { .. }) => Ok(None),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("冲突") || msg.contains("多个匹配") {
+                anyhow::bail!("任务标识 '{}' 存在多个匹配，请使用数字索引指定任务", id)
+            } else {
+                anyhow::bail!("无法解析任务标识 '{}': {}", id, e)
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -241,27 +265,10 @@ async fn main() -> Result<()> {
                 anyhow::bail!("任务目标不能为空");
             }
 
-            // 解析输入：数字索引、标题/slug 或新任务目标
             let runs = Workspace::root(&cfg.workspace_dir);
-            let goal = match crate::task_id::resolve_task_id(
-                &input,
-                runs.iter().map(|r: &RunRecord| r.goal.as_str()),
-            ) {
-                Ok(crate::task_id::TaskId::Numeric(idx)) => {
-                    runs.get(idx)
-                        .ok_or_else(|| anyhow::anyhow!("任务索引 {} 超出范围", idx))?
-                        .goal
-                        .clone()
-                }
-                Ok(crate::task_id::TaskId::Slug(slug)) => {
-                    runs.iter()
-                        .find(|r| r.id == slug)
-                        .ok_or_else(|| anyhow::anyhow!("未找到 slug 为 '{}' 的任务", slug))?
-                        .goal
-                        .clone()
-                }
-                Err(crate::task_id::TaskIdError::NotFound { .. }) => input,
-                Err(e) => anyhow::bail!("无法解析任务引用 '{}': {}", input, e),
+            let goal = match resolve_task_run(&runs, &input)? {
+                Some(run) => run.goal.clone(),
+                None => input,
             };
 
             if let Some(m) = model {
@@ -276,62 +283,20 @@ async fn main() -> Result<()> {
         Cmd::List { since, id } => {
             if let Some(id) = id {
                 let runs = Workspace::root(&cfg.workspace_dir);
-                let run_id = match crate::task_id::resolve_task_id(
-                    &id,
-                    runs.iter().map(|r: &RunRecord| r.goal.as_str()),
-                ) {
-                    Ok(crate::task_id::TaskId::Numeric(idx)) => {
-                        runs.get(idx)
-                            .map(|r| r.id.clone())
-                            .ok_or_else(|| anyhow::anyhow!("任务索引 {} 超出范围", idx))?
-                    }
-                    Ok(crate::task_id::TaskId::Slug(slug)) => {
-                        runs.iter()
-                            .find(|r| r.id == slug)
-                            .map(|r| r.id.clone())
-                            .ok_or_else(|| anyhow::anyhow!("未找到 slug 为 '{}' 的任务", slug))?
-                    }
-                    Err(e) => {
-                        let msg = e.to_string();
-                        if msg.contains("冲突") || msg.contains("多个匹配") {
-                            anyhow::bail!("任务标题 '{}' 存在多个匹配，请使用数字索引指定任务", id)
-                        } else {
-                            anyhow::bail!("无法解析任务引用 '{}': {}", id, e)
-                        }
-                    }
-                };
-                cmd_show(cfg, &run_id)
+                let run = resolve_task_run(&runs, &id)?.ok_or_else(|| {
+                    anyhow::anyhow!("未找到任务 '{}'。请使用 `workbuddy list` 查看任务列表。", id)
+                })?;
+                cmd_show(cfg, &run.id)
             } else {
                 cmd_list_with_slug(cfg, since.as_deref())
             }
         }
         Cmd::Show { id } => {
             let runs = Workspace::root(&cfg.workspace_dir);
-            let run_id = match crate::task_id::resolve_task_id(
-                &id,
-                runs.iter().map(|r: &RunRecord| r.goal.as_str()),
-            ) {
-                Ok(crate::task_id::TaskId::Numeric(idx)) => {
-                    runs.get(idx)
-                        .map(|r| r.id.clone())
-                        .ok_or_else(|| anyhow::anyhow!("任务索引 {} 超出范围", idx))?
-                }
-                Ok(crate::task_id::TaskId::Slug(slug)) => {
-                    runs.iter()
-                        .find(|r| r.id == slug)
-                        .map(|r| r.id.clone())
-                        .ok_or_else(|| anyhow::anyhow!("未找到 slug 为 '{}' 的任务", slug))?
-                }
-                Err(e) => {
-                    let msg = e.to_string();
-                    if msg.contains("冲突") || msg.contains("多个匹配") {
-                        anyhow::bail!("任务标题 '{}' 存在多个匹配，请使用数字索引指定任务", id)
-                    } else {
-                        anyhow::bail!("无法解析任务引用 '{}': {}", id, e)
-                    }
-                }
-            };
-            cmd_show(cfg, &run_id)
+            let run = resolve_task_run(&runs, &id)?.ok_or_else(|| {
+                anyhow::anyhow!("未找到任务 '{}'。请使用 `workbuddy list` 查看任务列表。", id)
+            })?;
+            cmd_show(cfg, &run.id)
         }
         Cmd::Agents => cmd_agents(),
         Cmd::Review => review::review(cfg).await,
@@ -452,20 +417,9 @@ async fn main() -> Result<()> {
         Cmd::Status { id } => {
             if let Some(id) = id {
                 let runs = Workspace::root(&cfg.workspace_dir);
-                match crate::task_id::resolve_task_id(
-                    &id,
-                    runs.iter().map(|r: &RunRecord| r.goal.as_str()),
-                ) {
-                    Ok(_) => {}
-                    Err(e) => {
-                        let msg = e.to_string();
-                        if msg.contains("冲突") || msg.contains("多个匹配") {
-                            anyhow::bail!("任务标题 '{}' 存在多个匹配，请使用数字索引指定任务", id)
-                        } else {
-                            anyhow::bail!("无法解析任务引用 '{}': {}", id, e)
-                        }
-                    }
-                }
+                let _ = resolve_task_run(&runs, &id)?.ok_or_else(|| {
+                    anyhow::anyhow!("未找到任务 '{}'。请使用 `workbuddy list` 查看任务列表。", id)
+                })?;
             }
             status::run(&cfg.workspace_dir)
                 .map_err(|e| anyhow::anyhow!("查看 workspace 运行状态失败: {e:#}"))
@@ -495,20 +449,9 @@ async fn main() -> Result<()> {
         Cmd::Undo { id } => {
             if let Some(id) = id {
                 let runs = Workspace::root(&cfg.workspace_dir);
-                match crate::task_id::resolve_task_id(
-                    &id,
-                    runs.iter().map(|r: &RunRecord| r.goal.as_str()),
-                ) {
-                    Ok(_) => {}
-                    Err(e) => {
-                        let msg = e.to_string();
-                        if msg.contains("冲突") || msg.contains("多个匹配") {
-                            anyhow::bail!("任务标题 '{}' 存在多个匹配，请使用数字索引指定任务", id)
-                        } else {
-                            anyhow::bail!("无法解析任务引用 '{}': {}", id, e)
-                        }
-                    }
-                }
+                let _ = resolve_task_run(&runs, &id)?.ok_or_else(|| {
+                    anyhow::anyhow!("未找到任务 '{}'。请使用 `workbuddy list` 查看任务列表。", id)
+                })?;
             }
             match run_undo(None) {
                 Ok(short_sha) => {

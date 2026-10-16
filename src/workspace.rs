@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::plan::Plan;
 use crate::config::TokenPrices;
-use crate::utils::{parse_task_id, slugify, unique_slug};
+use crate::task_id::TaskId;
 
 /// 任务工作区:每次 run 在 workspace_dir 下生成独立目录,
 /// 持久化计划、各步骤产出与执行结果,供 list/show 查询。
@@ -134,7 +134,7 @@ impl Workspace {
     /// 创建新的任务工作区目录(含 outputs 子目录)。
     /// 任务 id 基于标题 slug 生成,并通过 unique_slug 保证同根目录下唯一。
     pub fn create_new(root: &Path, title: &str) -> Result<Self> {
-        let base = slugify(title);
+        let base = TaskId::slugify(title);
         let existing: Vec<String> = std::fs::read_dir(root)
             .map(|entries| {
                 entries
@@ -143,7 +143,10 @@ impl Workspace {
                     .collect()
             })
             .unwrap_or_default();
-        let id = unique_slug(&base, &existing);
+        let existing_set: std::collections::HashSet<&str> =
+            existing.iter().map(|s| s.as_str()).collect();
+        let base = if base.is_empty() { "task".to_string() } else { base };
+        let id = TaskId::unique_slug(&base, &existing_set);
         let dir = root.join(&id);
         std::fs::create_dir_all(dir.join("outputs"))
             .with_context(|| format!("创建工作区失败: {}", dir.display()))?;
@@ -151,10 +154,9 @@ impl Workspace {
     }
 
     /// 打开已存在的任务工作区。
-    /// 支持 slug 与旧数字 id:通过 utils::parse_task_id 解析实际目录名。
+    /// 支持 slug 与旧数字 id:通过 task_id::parse_task_id 解析实际目录名。
     pub fn open(root: &Path, id: &str) -> Result<Self> {
-        let actual_id = parse_task_id(id);
-        let dir = root.join(actual_id);
+        let dir = root.join(id);
         if !dir.is_dir() {
             anyhow::bail!("找不到任务 {}: {}", id, dir.display());
         }
@@ -337,7 +339,7 @@ pub fn resolve_task_id(input: &str, runs: &[RunRecord]) -> Result<usize, String>
         return Ok(idx);
     }
 
-    let input_slug = slugify(input);
+    let input_slug = TaskId::slugify(input);
     if input == input_slug {
         let slug_matches: Vec<usize> = runs
             .iter()
