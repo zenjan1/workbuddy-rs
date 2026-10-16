@@ -242,24 +242,15 @@ async fn main() -> Result<()> {
         }
         Cmd::List { since, id } => {
             if let Some(id) = id {
-                cmd_show(cfg, &id)
+                let run_id = resolve_run_id(&cfg, &id)?;
+                cmd_show(cfg, &run_id)
             } else {
                 cmd_list_with_slug(cfg, since.as_deref())
             }
         }
         Cmd::Show { id } => {
-            let runs = Workspace::root(&cfg.workspace_dir);
-            let run = match crate::task_id::resolve_task_id(&id, runs.iter().map(|r: &RunRecord| r.goal.as_str())) {
-                Ok(crate::task_id::TaskId::Numeric(idx)) => runs
-                    .get(idx)
-                    .ok_or_else(|| anyhow::anyhow!("任务索引 {} 超出范围", idx))?,
-                Ok(crate::task_id::TaskId::Slug(slug)) => runs
-                    .iter()
-                    .find(|r| r.id == slug)
-                    .ok_or_else(|| anyhow::anyhow!("未找到 slug 为 '{}' 的任务", slug))?,
-                Err(e) => anyhow::bail!("无法解析任务引用 '{}': {}", id, e),
-            };
-            cmd_show(cfg, &run.id)
+            let run_id = resolve_run_id(&cfg, &id)?;
+            cmd_show(cfg, &run_id)
         }
         Cmd::Agents => cmd_agents(),
         Cmd::Review => review::review(cfg).await,
@@ -663,6 +654,24 @@ timeout = 30
         assert_eq!(before, after, "config file must not change after error");
         let _ = std::fs::remove_file(&path);
     }
+}
+
+fn resolve_run_id(cfg: &Config, id: &str) -> Result<String> {
+    let runs = Workspace::root(&cfg.workspace_dir);
+    let run = match crate::task_id::resolve_task_id(
+        id,
+        runs.iter().map(|r: &RunRecord| r.goal.as_str()),
+    ) {
+        Ok(crate::task_id::TaskId::Numeric(idx)) => runs
+            .get(idx)
+            .ok_or_else(|| anyhow::anyhow!("任务索引 {} 超出范围", idx))?,
+        Ok(crate::task_id::TaskId::Slug(slug)) => runs
+            .iter()
+            .find(|r| r.id == slug)
+            .ok_or_else(|| anyhow::anyhow!("未找到 slug 为 '{}' 的任务", slug))?,
+        Err(e) => anyhow::bail!("无法解析任务引用 '{}': {}", id, e),
+    };
+    Ok(run.id.to_string())
 }
 
 fn find_config_path() -> Result<std::path::PathBuf> {

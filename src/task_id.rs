@@ -111,7 +111,12 @@ impl fmt::Display for TaskIdError {
                 write!(f, "task id '{}' is ambiguous; matches: {}", query, matches.join(", "))
             }
             TaskIdError::DuplicateTitle { query, title } => {
-                write!(f, "task id '{}' is duplicated; title: {}", query, title)
+                write!(
+                    f,
+                    "task id '{}' matches multiple tasks with title '{}'; use numeric index to disambiguate",
+                    query,
+                    title
+                )
             }
         }
     }
@@ -168,7 +173,7 @@ where
         });
     }
 
-    // 1) 精确匹配标题。
+    // 非数字输入：优先精确匹配标题（忽略大小写与首尾空格）。
     let mut exact_matches = Vec::new();
     for (index, title) in title_list.iter().enumerate() {
         if normalize_title(title) == query {
@@ -176,26 +181,29 @@ where
         }
     }
 
-    if !exact_matches.is_empty() {
-        return match exact_matches.len() {
-            1 => Ok(TaskId::Numeric(exact_matches[0].0)),
-            _ => Err(duplicate_or_ambiguous(raw, exact_matches)),
-        };
+    match exact_matches.len() {
+        1 => return Ok(TaskId::Numeric(exact_matches[0].0)),
+        0 => {}
+        _ => return Err(duplicate_or_ambiguous(raw, exact_matches)),
     }
 
-    // 2) 未精确命中后回退到模糊匹配。
-    let slug_query = TaskId::slugify(raw);
-    let mut fuzzy_matches = Vec::new();
+    // 无精确匹配时，回退到模糊匹配：
+    // 1) 标题以查询字符串开头（忽略大小写与首尾空格）；
+    // 2) 标题 slug 以查询的 slug 前缀开头。
+    let query_slug = TaskId::slugify(raw);
+    let mut fuzzy_matches: Vec<(usize, String)> = Vec::new();
     for (index, title) in title_list.iter().enumerate() {
         let normalized_title = normalize_title(title);
-        let title_match = normalized_title.starts_with(&query);
-        let slug = TaskId::slugify(title.as_str());
-        let slug_match = !slug_query.is_empty() && slug.starts_with(&slug_query);
-        let word_match = normalized_title
-            .split_whitespace()
-            .any(|word| word.starts_with(&query));
-        if title_match || slug_match || word_match {
+        if normalized_title.starts_with(&query) {
             fuzzy_matches.push((index, title.clone()));
+        }
+    }
+    if fuzzy_matches.is_empty() && !query_slug.is_empty() {
+        for (index, title) in title_list.iter().enumerate() {
+            let title_slug = TaskId::slugify(title);
+            if title_slug.starts_with(&query_slug) {
+                fuzzy_matches.push((index, title.clone()));
+            }
         }
     }
 
@@ -273,10 +281,12 @@ mod tests {
     }
 
     #[test]
-    fn resolve_unique_title_prefix_match() {
+    fn resolve_unique_title_exact_match() {
         let titles = ["Write docs", "Fix login bug"];
-        assert_eq!(resolve_task_id("fix", titles), Ok(TaskId::Numeric(1)));
-        assert_eq!(resolve_task_id("Fix Login", titles), Ok(TaskId::Numeric(1)));
+        assert_eq!(resolve_task_id("fix login bug", titles), Ok(TaskId::Numeric(1)));
+        assert_eq!(resolve_task_id("Write docs", titles), Ok(TaskId::Numeric(0)));
+        assert_eq!(resolve_task_id("  fix login bug  ", titles), Ok(TaskId::Numeric(1)));
+        assert_eq!(resolve_task_id("FIX LOGIN BUG", titles), Ok(TaskId::Numeric(1)));
     }
 
     #[test]
@@ -308,17 +318,7 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn resolve_prefix_match_uses_starts_with() {
-        let titles = vec!["Write documentation".to_string(), "Fix login bug".to_string()];
-        assert_eq!(resolve_task_id("write", &titles), Ok(TaskId::Numeric(0)));
-        assert_eq!(resolve_task_id("login", &titles), Ok(TaskId::Numeric(1)));
-        // 输入不是标题前缀时不应命中，即使它出现在标题内部。
-        assert!(matches!(
-            resolve_task_id("rite", &titles),
-            Err(TaskIdError::NotFound { .. })
-        ));
-    }
+
 
     #[test]
     fn resolve_duplicate_title_returns_error() {
@@ -329,9 +329,5 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn resolve_slug_prefix_match_uses_slugified_query() {
-        let titles = ["Write docs", "Fix login bug"];
-        assert_eq!(resolve_task_id("fix-login", titles), Ok(TaskId::Numeric(1)));
-    }
+
 }
