@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,6 +16,7 @@ use crate::workspace::Workspace;
 
 const DEPS_CONTEXT_MAX: usize = 800;
 const SHELL_TIMEOUT_SECS: u64 = 60;
+const MAX_READ_BYTES: usize = 4096;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StepResult {
@@ -489,8 +491,8 @@ async fn run_llm_step(
 
 /// 解析模型给出的文件路径:优先原路径;否则按 basename 在仓库里查找唯一匹配
 /// (容忍模型漏掉 src/ 等目录前缀)。
-fn resolve_repo_path(cfg: &Config, path: &str) -> Result<std::path::PathBuf> {
-    let exact = cfg.repo_dir.join(path);
+fn resolve_repo_path(repo_dir: &std::path::Path, path: &str) -> Result<std::path::PathBuf> {
+    let exact = repo_dir.join(path);
     if exact.is_file() {
         return Ok(exact);
     }
@@ -501,7 +503,7 @@ fn resolve_repo_path(cfg: &Config, path: &str) -> Result<std::path::PathBuf> {
         anyhow::bail!("文件不存在: {}", path);
     };
     let mut matches = Vec::new();
-    let mut stack = vec![cfg.repo_dir.clone()];
+    let mut stack = vec![repo_dir.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let entries = match std::fs::read_dir(&dir) {
             Ok(e) => e,
@@ -531,29 +533,56 @@ fn resolve_repo_path(cfg: &Config, path: &str) -> Result<std::path::PathBuf> {
     }
 }
 
-/// read 步骤:读取仓库内文件内容(限制 20KB),供下游作为上下文。
-fn run_read_step(step: &Step, cfg: &Config) -> Result<String> {
-    let path = step.path.as_deref().context("read 步骤缺少 path")?;
-    let p = match resolve_repo_path(cfg, path) {
-        Ok(p) => p,
-        Err(e) => {
-            // fail-soft:找不到文件时不级联跳过依赖步骤,回传真实文件清单供模型自纠
-            let filelist = crate::dev::list_repo_files(&cfg.repo_dir);
-            return Ok(format!(
-                "⚠️ read 未找到 `{}`({})。请用下面真实存在的文件路径继续,不要臆造路径:\n{}",
-                path,
-                clip(&e.to_string(), 160),
-                clip(&filelist, 6000)
-            ));
-        }
-    };
-    let content = std::fs::read_to_string(&p).with_context(|| format!("读取失败: {}", p.display()))?;
-    let rel = p
-        .strip_prefix(&cfg.repo_dir)
-        .unwrap_or(&p)
+/// 在 workspace/repo_dir 内安全读取文本文件。
+/// 拒绝绝对路径、`..` 组件与符号链接逃逸;超过 MAX_READ_BYTES 截断。
+fn read_workspace_file(repo_dir: &std::path::Path, path: &str) -> Result<String> {
+    let raw = std::path::Path::new(path);
+    if raw.is_absolute() {
+        anyhow::bail!("路径越界/不允许: 绝对路径: {}", path);
+    }
+    if raw
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        anyhow::bail!("路径越界/不允许: 包含 ..: {}", path);
+    }
+
+    let p = resolve_repo_path(repo_dir, path)?;
+    let root = repo_dir
+        .canonicalize()
+        .context("workspace 根目录 canonicalize 失败")?;
+    let cand = p
+        .canonicalize()
+        .with_context(|| format!("读取文件 canonicalize 失败: {}", p.display()))?;
+    if !cand.starts_with(&root) {
+        anyhow::bail!("路径越界/不允许: 符号链接逃逸: {}", path);
+    }
+
+    let metadata = std::fs::metadata(&cand)
+        .with_context(|| format!("读取元数据失败: {}", cand.display()))?;
+    let mut file = std::fs::File::open(&cand)
+        .with_context(|| format!("读取失败: {}", cand.display()))?;
+    let mut buf = Vec::new();
+    file.take(MAX_READ_BYTES as u64)
+        .read_to_end(&mut buf)
+        .with_context(|| format!("读取失败: {}", cand.display()))?;
+
+    let mut content = String::from_utf8_lossy(&buf).to_string();
+    if metadata.len() > MAX_READ_BYTES as u64 {
+        content.push_str("\n...[truncated]");
+    }
+    let rel = cand
+        .strip_prefix(&root)
+        .unwrap_or(&cand)
         .to_string_lossy()
         .to_string();
-    Ok(format!("# 文件: {rel}\n\n{}", clip(&content, 20_000)))
+    Ok(format!("# 文件: {rel}\n\n{}", content))
+}
+
+/// read 步骤:读取 workspace 内文件内容(限制 MAX_READ_BYTES),供下游作为上下文。
+fn run_read_step(step: &Step, cfg: &Config) -> Result<String> {
+    let path = step.path.as_deref().context("read 步骤缺少 path")?;
+    read_workspace_file(&cfg.repo_dir, path)
 }
 
 /// edit 步骤:LLM 产出 edits JSON(文件操作协议),解析并应用到仓库,
@@ -897,5 +926,124 @@ mod tests {
         assert_eq!(outcome.prompt_tokens, None);
         assert_eq!(outcome.completion_tokens, None);
         assert_eq!(outcome.char_usage, Some(3));
+    }
+}
+
+#[cfg(test)]
+mod executor_read_tests {
+    use super::*;
+    use std::fs;
+    use std::io::Write;
+    use std::path::PathBuf;
+
+    fn create_temp_dir(test: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "workbuddy-executor-{}-{}-{}",
+            test,
+            std::process::id(),
+            nanos
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_text(dir: &std::path::Path, rel: &str, text: &str) {
+        let path = dir.join(rel);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        let mut f = fs::File::create(&path).unwrap();
+        f.write_all(text.as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn executor_read_plain_file_success() {
+        let dir = create_temp_dir("plain");
+        write_text(&dir, "hello.txt", "hello world");
+        let got = read_workspace_file(&dir, "hello.txt").unwrap();
+        assert_eq!(got, "# 文件: hello.txt\n\nhello world");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn executor_read_missing_file_errors() {
+        let dir = create_temp_dir("missing");
+        let err = read_workspace_file(&dir, "nope.txt").unwrap_err();
+        assert!(
+            err.to_string().contains("文件不存在"),
+            "unexpected error: {}",
+            err
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn executor_read_path_escape_rejected() {
+        let dir = create_temp_dir("escape");
+        let abs = if cfg!(windows) {
+            r"C:\Windows\win.ini"
+        } else {
+            "/etc/passwd"
+        };
+        let err = read_workspace_file(&dir, abs).unwrap_err();
+        assert!(
+            err.to_string().contains("路径越界/不允许"),
+            "absolute path error: {}",
+            err
+        );
+
+        let err = read_workspace_file(&dir, "../outside.txt").unwrap_err();
+        assert!(
+            err.to_string().contains("路径越界/不允许"),
+            "parent path error: {}",
+            err
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let outside = std::env::temp_dir().join(format!(
+                "workbuddy-read-outside-{}.txt",
+                std::process::id()
+            ));
+            fs::write(&outside, "outside").unwrap();
+            let link = dir.join("linked.txt");
+            symlink(&outside, &link).unwrap();
+            let err = read_workspace_file(&dir, "linked.txt").unwrap_err();
+            assert!(
+                err.to_string().contains("路径越界/不允许"),
+                "symlink escape error: {}",
+                err
+            );
+            fs::remove_file(&outside).unwrap();
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn executor_read_large_file_truncated() {
+        let dir = create_temp_dir("large");
+        let body: String = "a".repeat(MAX_READ_BYTES + 100);
+        write_text(&dir, "large.txt", &body);
+        let got = read_workspace_file(&dir, "large.txt").unwrap();
+        let prefix = "# 文件: large.txt\n\n".to_string();
+        let content = got.strip_prefix(&prefix).expect("file header missing");
+        assert!(
+            content.ends_with("\n...[truncated]"),
+            "missing truncation marker: {}",
+            content.len()
+        );
+        let expected_prefix_len = MAX_READ_BYTES;
+        assert_eq!(
+            content.len(),
+            expected_prefix_len + "\n...[truncated]".len(),
+            "truncated body length mismatch"
+        );
+        assert!(content.starts_with(&"a".repeat(MAX_READ_BYTES)));
+        fs::remove_dir_all(&dir).unwrap();
     }
 }
