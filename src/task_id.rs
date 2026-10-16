@@ -125,8 +125,8 @@ impl FromStr for TaskId {
 /// 表示标题解析失败。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskIdError {
-    /// 未找到匹配任务
-    NotFound { query: String },
+    /// 未找到匹配任务，附带可用任务列表。
+    NotFound { query: String, available: Vec<String> },
     /// 找到多个匹配任务，返回候选标题。
     Ambiguous { query: String, matches: Vec<String> },
     /// 找到多个匹配任务，但它们的标题完全相同。
@@ -137,7 +137,13 @@ pub enum TaskIdError {
 impl fmt::Display for TaskIdError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TaskIdError::NotFound { query } => write!(f, "task id '{}' not found", query),
+            TaskIdError::NotFound { query, available } => {
+                write!(f, "task id '{}' not found; available tasks:\n", query)?;
+                for (idx, title) in available.iter().enumerate() {
+                    write!(f, "  [{}] {}\n", idx, title)?;
+                }
+                Ok(())
+            },
             TaskIdError::Ambiguous { query, matches } => {
                 write!(f, "task id '{}' is ambiguous; matches: {}; use numeric index to disambiguate", query, matches.join(", "))
             }
@@ -196,58 +202,59 @@ fn duplicate_or_ambiguous(query: &str, matches: Vec<(usize, String)>) -> TaskIdE
 
 /// 解析原始 task_id 参数。
 ///
-/// * 若参数可解析为纯数字索引，则直接返回 `TaskId::Numeric(index)`，保持旧行为。
-/// * 否则先按标题进行不区分大小写、去除首尾空格后的精确匹配。
-/// * 精确匹配未命中时回退到模糊匹配：标题以查询字符串开头（唯一前缀），或标题 slug 以查询 slug 前缀匹配。
-///   零匹配返回 `NotFound`，多个匹配返回 `Ambiguous`，重复标题返回 `DuplicateTitle`。
+/// 解析顺序：
+/// 1. 将输入转换为 slug，与任务标题生成的 slug 精确匹配；
+/// 2. 如果没有 slug 匹配，且输入可解析为数字索引，则回退到 `TaskId::Numeric`；
+/// 3. 仍然没有匹配时，回退到旧模糊匹配（标题前缀或 slug 前缀）；
+/// 4. 所有匹配失败返回 `NotFound`，错误中包含可用任务列表。
 pub fn resolve_task_id<I, S>(raw: &str, titles: I) -> Result<TaskId, TaskIdError>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    if let Ok(index) = raw.parse::<usize>() {
-        return Ok(TaskId::Numeric(index));
-    }
-
     let title_list: Vec<String> = titles
         .into_iter()
         .map(|s| s.as_ref().to_string())
         .collect();
 
+    let query_slug = TaskId::slugify(raw);
+    if !query_slug.is_empty() {
+        let mut slug_matches = Vec::new();
+        for (index, title) in title_list.iter().enumerate() {
+            let title_slug = TaskId::slugify(title);
+            if title_slug == query_slug {
+                slug_matches.push((index, title.clone()));
+            }
+        }
+
+        match slug_matches.len() {
+            1 => {
+                let slug = TaskId::slugify(&slug_matches[0].1);
+                if slug.is_empty() {
+                    return Ok(TaskId::Numeric(slug_matches[0].0));
+                }
+                return Ok(TaskId::Slug(slug));
+            }
+            0 => {}
+            _ => return Err(duplicate_or_ambiguous(raw, slug_matches)),
+        }
+    }
+
+    // 数字索引回退：保持旧行为，不检查索引是否存在。
+    if let Ok(index) = raw.parse::<usize>() {
+        return Ok(TaskId::Numeric(index));
+    }
+
+    // 旧模糊匹配作为最终回退。
     let query = normalize_title(raw);
     let query_slug = TaskId::slugify(raw);
-    if query.is_empty() {
+    if query.is_empty() && query_slug.is_empty() {
         return Err(TaskIdError::NotFound {
             query: raw.to_string(),
+            available: title_list,
         });
     }
 
-    // 非数字输入：优先精确匹配标题（忽略大小写与首尾空格）。
-    let mut exact_matches = Vec::new();
-    for (index, title) in title_list.iter().enumerate() {
-        let normalized_title = normalize_title(title);
-        let title_slug = TaskId::slugify(title);
-        if normalized_title == query || (!query_slug.is_empty() && title_slug == query_slug) {
-            exact_matches.push((index, title.clone()));
-        }
-    }
-
-    match exact_matches.len() {
-        1 => {
-            let slug = TaskId::slugify(&exact_matches[0].1);
-            if slug.is_empty() {
-                return Ok(TaskId::Numeric(exact_matches[0].0));
-            }
-            return Ok(TaskId::Slug(slug));
-        }
-        0 => {}
-        _ => return Err(duplicate_or_ambiguous(raw, exact_matches)),
-    }
-
-    // 无精确匹配时，回退到模糊匹配：
-    // 1) 标题以查询字符串开头（忽略大小写与首尾空格）；
-    // 2) 标题 slug 以查询的 slug 前缀开头。
-    let query_slug = TaskId::slugify(raw);
     let mut fuzzy_matches: Vec<(usize, String)> = Vec::new();
     for (index, title) in title_list.iter().enumerate() {
         let normalized_title = normalize_title(title);
@@ -262,6 +269,7 @@ where
     match fuzzy_matches.len() {
         0 => Err(TaskIdError::NotFound {
             query: raw.to_string(),
+            available: title_list,
         }),
         1 => {
             let slug = TaskId::slugify(&fuzzy_matches[0].1);
@@ -455,5 +463,43 @@ mod tests {
         let err = resolve_task_id("hello-world", titles).unwrap_err();
         assert!(matches!(err, TaskIdError::Ambiguous { .. }));
         assert!(err.to_string().contains("numeric index"));
+    }
+
+    #[test]
+    fn resolve_slug_alias_has_priority_over_numeric_index() {
+        let titles = ["Fix bug", "123"];
+        // 输入 "123" 与标题 slug "123" 匹配，应返回 Slug，而不是数字索引 123
+        assert_eq!(
+            resolve_task_id("123", titles),
+            Ok(TaskId::Slug("123".to_string()))
+        );
+    }
+
+    #[test]
+    fn resolve_numeric_fallback_when_no_slug_match() {
+        let titles = ["Write docs", "Fix login bug"];
+        assert_eq!(resolve_task_id("1", titles), Ok(TaskId::Numeric(1)));
+        assert_eq!(resolve_task_id("0", titles), Ok(TaskId::Numeric(0)));
+    }
+
+    #[test]
+    fn resolve_duplicate_slug_returns_ambiguous_error() {
+        let titles = ["Hello World!", "Hello World?"];
+        let err = resolve_task_id("hello-world", titles).unwrap_err();
+        assert!(matches!(err, TaskIdError::Ambiguous { .. }));
+        assert!(err.to_string().contains("numeric index"));
+    }
+
+    #[test]
+    fn resolve_not_found_returns_available_tasks() {
+        let titles = ["Write docs", "Fix bug"];
+        let err = resolve_task_id("deploy", titles).unwrap_err();
+        match &err {
+            TaskIdError::NotFound { available, .. } => {
+                assert_eq!(available, &vec!["Write docs".to_string(), "Fix bug".to_string()]);
+            }
+            other => panic!("expected NotFound, got {:?}", other),
+        }
+        assert!(err.to_string().contains("available tasks"));
     }
 }

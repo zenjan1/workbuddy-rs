@@ -235,7 +235,7 @@ fn resolve_task_run<'a>(
             .map(Some)
             .ok_or_else(|| anyhow::anyhow!("任务索引 {} 超出范围", idx)),
         Ok(crate::task_id::TaskId::Slug(slug)) => {
-            Ok(runs.iter().find(|r| r.id == slug))
+            Ok(runs.iter().find(|r| crate::task_id::TaskId::slugify(&r.goal) == slug))
         }
         Err(crate::task_id::TaskIdError::NotFound { .. }) => Ok(None),
         Err(e) => {
