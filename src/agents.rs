@@ -1,5 +1,6 @@
 /// 内置专家智能体目录(对应 WorkBuddy 的"多专家协同"范式)。
 
+
 #[derive(Debug, Clone, Copy)]
 pub struct Skill {
     pub name: &'static str,

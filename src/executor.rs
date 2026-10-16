@@ -707,6 +707,7 @@ mod tests {
             repo_dir: Path::new("/tmp").to_path_buf(),
             request_timeout_secs: 5,
             webhook_enabled: false,
+            review_enabled: false,
             webhook_url: None,
             webhook_timeout_secs: 1,
             webhook_retry: 0,
