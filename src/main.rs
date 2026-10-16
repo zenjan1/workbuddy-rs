@@ -192,11 +192,11 @@ enum Cmd {
         /// 数据目录（默认使用配置的 workspace_dir）
         #[arg(long)]
         data_dir: Option<std::path::PathBuf>,
-        /// 监听地址（默认 127.0.0.1）
-        #[arg(long, default_value = "127.0.0.1")]
+        /// 监听地址（默认 127.0.0.1，可用 --bind 别名）
+        #[arg(long, visible_alias = "bind", default_value = "127.0.0.1")]
         addr: std::net::IpAddr,
-        /// 监听端口（默认 0，由系统分配可用端口）
-        #[arg(short, long, default_value = "0")]
+        /// 监听端口（默认 8080）
+        #[arg(short, long, default_value_t = 8080)]
         port: u16,
         /// 只读模式：使用随机端口 127.0.0.1:0，输出实际端口
         #[arg(long)]
