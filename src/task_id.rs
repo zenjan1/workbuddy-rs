@@ -223,23 +223,19 @@ where
         return Ok(TaskId::Numeric(index));
     }
 
-    let query = normalize_title(raw);
     let query_slug = TaskId::slugify(raw);
-    if query.is_empty() && query_slug.is_empty() {
+    if query_slug.is_empty() {
         return Err(TaskIdError::NotFound {
             query: raw.to_string(),
             available: title_list,
         });
     }
 
-    // 精确匹配：标题全称（忽略大小写与空白）或 slug 全称。
+    // 精确匹配：标题 slug 全称。
     let mut exact_matches: Vec<(usize, String)> = Vec::new();
     for (index, title) in title_list.iter().enumerate() {
-        let normalized_title = normalize_title(title);
         let title_slug = TaskId::slugify(title);
-        if normalized_title == query
-            || (!query_slug.is_empty() && title_slug == query_slug)
-        {
+        if title_slug == query_slug {
             exact_matches.push((index, title.clone()));
         }
     }
@@ -250,14 +246,11 @@ where
         _ => return Err(duplicate_or_ambiguous(raw, exact_matches)),
     }
 
-    // 前缀匹配：标题前缀（忽略大小写与空白）或 slug 前缀。
+    // 前缀匹配：标题 slug 前缀。
     let mut prefix_matches: Vec<(usize, String)> = Vec::new();
     for (index, title) in title_list.iter().enumerate() {
-        let normalized_title = normalize_title(title);
         let title_slug = TaskId::slugify(title);
-        if normalized_title.starts_with(&query)
-            || (!query_slug.is_empty() && title_slug.starts_with(&query_slug))
-        {
+        if title_slug.starts_with(&query_slug) {
             prefix_matches.push((index, title.clone()));
         }
     }
@@ -500,5 +493,19 @@ mod tests {
             other => panic!("expected NotFound, got {:?}", other),
         }
         assert!(err.to_string().contains("available tasks"));
+    }
+
+    #[test]
+    fn resolve_slug_normalizes_whitespace_as_hyphen_not_removal() {
+        let titles = ["Hello World"];
+        // 输入若只是去掉空白，不应匹配标题 slug 中的连字符；只有规范化为 slug 后才能唯一定位。
+        assert!(matches!(
+            resolve_task_id("helloworld", titles),
+            Err(TaskIdError::NotFound { .. })
+        ));
+        assert_eq!(
+            resolve_task_id("hello-world", titles),
+            Ok(TaskId::Slug("hello-world".to_string()))
+        );
     }
 }
