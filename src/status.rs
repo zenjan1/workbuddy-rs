@@ -101,6 +101,30 @@ fn parse_status_inner(
     summary.supervisor_running = supervisor_running;
     summary.pid = pid;
 
+    // 如果本地状态文件存在，则优先采用其中显式给出的完成/失败计数；
+    // 若历史日志为空，则使用状态文件中的最近日志尾部。
+    let status_path = workspace_dir.join(STATUS_FILE_NAME);
+    if status_path.exists() {
+        let data = fs::read_to_string(&status_path)
+            .with_context(|| format!("读取状态文件失败 {}", status_path.display()))?;
+        let supervisor_status: SupervisorStatus = serde_json::from_str(&data)
+            .with_context(|| format!("解析状态文件失败 {}", status_path.display()))?;
+        let raw: serde_json::Value = serde_json::from_str(&data)
+            .with_context(|| format!("解析状态文件失败 {}", status_path.display()))?;
+
+        if raw.get("completed").is_some() {
+            summary.completed_runs = supervisor_status.completed;
+        }
+        if raw.get("failed").is_some() {
+            summary.failed_runs = supervisor_status.failed;
+        }
+        if summary.recent_logs.is_empty() {
+            if let Some(last_log) = supervisor_status.last_log {
+                summary.recent_logs.push(last_log);
+            }
+        }
+    }
+
     Ok(summary)
 }
 
