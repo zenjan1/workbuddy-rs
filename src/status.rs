@@ -1151,3 +1151,86 @@ mod status_presentation_tests {
         fs::remove_dir_all(&ws).unwrap();
     }
 }
+
+#[cfg(test)]
+mod edge_case_tests {
+    use super::*;
+    use crate::workspace::{RunRecord, StepRecord};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_workspace(name: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        let unique = format!(
+            "workbuddy_status_edge_{}_{}_{}",
+            name,
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        path.push(unique);
+        fs::create_dir_all(path.join("runs")).unwrap();
+        path
+    }
+
+    fn write_run(ws: &Path, file_name: &str, record: &RunRecord) {
+        let data = serde_json::to_string_pretty(record).unwrap();
+        fs::write(ws.join("runs").join(file_name), data).unwrap();
+    }
+
+    fn sample_record(id: &str, ok: bool) -> RunRecord {
+        RunRecord {
+            id: id.to_string(),
+            goal: "test goal".to_string(),
+            created: "2024-01-01T00:00:00Z".to_string(),
+            model: "test".to_string(),
+            mock: false,
+            steps: vec![StepRecord {
+                id: 1,
+                name: "plan".to_string(),
+                agent: "agent".to_string(),
+                skill: "skill".to_string(),
+                kind: "kind".to_string(),
+                ok,
+                error: if ok { None } else { Some("boom".to_string()) },
+                seconds: 0.1,
+                output_preview: "preview".to_string(),
+            }],
+            token_usage: None,
+            char_usage: None,
+        }
+    }
+
+    #[test]
+    fn parse_status_with_fewer_than_five_logs_does_not_panic() {
+        let ws = temp_workspace("fewer");
+        write_run(&ws, "run-1.json", &sample_record("run-1", true));
+        write_run(&ws, "run-2.json", &sample_record("run-2", false));
+
+        let summary = super::parse_status(&ws).expect("parse should succeed");
+        assert_eq!(summary.recent_logs.len(), 2);
+        assert_eq!(summary.completed_runs, 1);
+        assert_eq!(summary.failed_runs, 1);
+        assert!(!summary.supervisor_running);
+
+        let rendered = super::format_status(&summary);
+        assert!(rendered.contains("Recent logs:"));
+        assert!(rendered.contains("run-1"));
+        assert!(rendered.contains("run-2"));
+
+        fs::remove_dir_all(&ws).unwrap();
+    }
+
+    #[test]
+    fn parse_status_with_malformed_run_log_returns_error_not_panic() {
+        let ws = temp_workspace("malformed");
+        fs::write(ws.join("runs").join("bad.json"), "{ invalid json").unwrap();
+        let result = super::parse_status(&ws);
+        assert!(result.is_err());
+
+        fs::remove_dir_all(&ws).unwrap();
+    }
+}
