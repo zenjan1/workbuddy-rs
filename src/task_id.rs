@@ -143,16 +143,16 @@ fn duplicate_or_ambiguous(query: &str, matches: Vec<(usize, String)>) -> TaskIdE
 
 /// 解析原始 task_id 参数。
 ///
-/// * 若参数可解析为纯数字索引，则直接返回该数字，保持旧行为。
-/// * 否则将参数和每个 backlog 标题做 slug 化后比较。
-///   唯一匹配返回其在 `titles` 中的内部索引（从 0 开始）。
-pub fn resolve_task_id<I, S>(raw: &str, titles: I) -> Result<usize, TaskIdError>
+/// * 若参数可解析为纯数字索引，则直接返回 `TaskId::Numeric(index)`，保持旧行为。
+/// * 否则将参数与每个标题做不区分大小写、去除首尾空格后的唯一前缀匹配。
+///   零匹配返回 `NotFound`，多个匹配返回 `Ambiguous`，重复标题返回 `DuplicateTitle`。
+pub fn resolve_task_id<I, S>(raw: &str, titles: I) -> Result<TaskId, TaskIdError>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
     if let Ok(index) = raw.parse::<usize>() {
-        return Ok(index);
+        return Ok(TaskId::Numeric(index));
     }
 
     let title_list: Vec<String> = titles
@@ -160,43 +160,32 @@ where
         .map(|s| s.as_ref().to_string())
         .collect();
 
-    let normalized = TaskId::slugify(raw);
-    if normalized.is_empty() {
+    let query = normalize_title(raw);
+    if query.is_empty() {
         return Err(TaskIdError::NotFound {
             query: raw.to_string(),
         });
     }
 
-    // 精确 slug 匹配：保持原有的 slugify 后比较逻辑。
     let mut matches = Vec::new();
     for (index, title) in title_list.iter().enumerate() {
-        if TaskId::slugify(title) == normalized {
+        let normalized_title = normalize_title(title);
+        let title_match = {
+            let words: Vec<&str> = normalized_title.split_whitespace().collect();
+            (0..words.len()).any(|i| words[i..].join(" ").starts_with(&query))
+        };
+        let slug = TaskId::slugify(title.as_str());
+        let slug_match = slug.starts_with(&query);
+        if title_match || slug_match {
             matches.push((index, title.clone()));
         }
     }
 
     match matches.len() {
-        0 => {
-            // 精确 slug 匹配未命中，进行模糊匹配：标题归一化或 slug 包含查询。
-            let query_normalized = normalize_title(raw);
-            let query_slug = normalized.as_str();
-            for (index, title) in title_list.iter().enumerate() {
-                let title_normalized = normalize_title(title);
-                let title_slug = TaskId::slugify(title);
-                if title_normalized.contains(query_normalized.as_str()) || title_slug.contains(query_slug) {
-                    matches.push((index, title.clone()));
-                }
-            }
-
-            match matches.len() {
-                0 => Err(TaskIdError::NotFound {
-                    query: raw.to_string(),
-                }),
-                1 => Ok(matches[0].0),
-                _ => Err(duplicate_or_ambiguous(raw, matches)),
-            }
-        }
-        1 => Ok(matches[0].0),
+        0 => Err(TaskIdError::NotFound {
+            query: raw.to_string(),
+        }),
+        1 => Ok(TaskId::Numeric(matches[0].0)),
         _ => Err(duplicate_or_ambiguous(raw, matches)),
     }
 }
@@ -261,33 +250,35 @@ mod tests {
     #[test]
     fn resolve_numeric_index_passthrough() {
         let titles = ["Write docs", "Fix bug"];
-        assert_eq!(resolve_task_id("1", titles), Ok(1));
-        assert_eq!(resolve_task_id("0", titles), Ok(0));
+        assert_eq!(resolve_task_id("1", titles), Ok(TaskId::Numeric(1)));
+        assert_eq!(resolve_task_id("0", titles), Ok(TaskId::Numeric(0)));
     }
 
     #[test]
-    fn resolve_unique_title_match() {
+    fn resolve_unique_title_prefix_match() {
         let titles = ["Write docs", "Fix login bug"];
-        assert_eq!(resolve_task_id("fix-login-bug", titles), Ok(1));
-        assert_eq!(resolve_task_id("Fix Login Bug", titles), Ok(1));
+        assert_eq!(resolve_task_id("fix", titles), Ok(TaskId::Numeric(1)));
+        assert_eq!(resolve_task_id("Fix Login", titles), Ok(TaskId::Numeric(1)));
     }
 
     #[test]
-    fn resolve_title_match_ignores_case_spaces_and_slug_variants() {
+    fn resolve_title_match_ignores_case_and_spaces() {
         let titles = ["Write docs", "  Hello   World  "];
-        assert_eq!(resolve_task_id("  HELLO   world  ", titles), Ok(1));
-        assert_eq!(resolve_task_id("hello-world", titles), Ok(1));
+        assert_eq!(resolve_task_id("  HELLO   ", titles), Ok(TaskId::Numeric(1)));
+        assert_eq!(resolve_task_id("hELLo", titles), Ok(TaskId::Numeric(1)));
         // 纯数字参数仍然优先，不受标题影响
-        assert_eq!(resolve_task_id("0", titles), Ok(0));
+        assert_eq!(resolve_task_id("0", titles), Ok(TaskId::Numeric(0)));
     }
 
     #[test]
-    fn resolve_ambiguous_title_returns_error() {
-        let titles = ["Setup server", "setup-server", "Setup Server!"];
-        assert!(matches!(
-            resolve_task_id("setup-server", titles),
-            Err(TaskIdError::Ambiguous { .. })
-        ));
+    fn resolve_ambiguous_title_prefix_returns_error() {
+        let titles = ["Setup server", "Setup client"];
+        let err = resolve_task_id("setup", titles).unwrap_err();
+        assert!(matches!(err, TaskIdError::Ambiguous { .. }));
+        if let TaskIdError::Ambiguous { matches, .. } = err {
+            assert!(matches.iter().any(|m| m == "Setup server"));
+            assert!(matches.iter().any(|m| m == "Setup client"));
+        }
     }
 
     #[test]
@@ -300,10 +291,10 @@ mod tests {
     }
 
     #[test]
-    fn resolve_fuzzy_title_match_uses_contains() {
+    fn resolve_prefix_match_uses_starts_with() {
         let titles = vec!["Write documentation".to_string(), "Fix login bug".to_string()];
-        assert_eq!(resolve_task_id("login", &titles), Ok(1));
-        assert_eq!(resolve_task_id("documentation", &titles), Ok(0));
+        assert_eq!(resolve_task_id("write", &titles), Ok(TaskId::Numeric(0)));
+        assert_eq!(resolve_task_id("login", &titles), Ok(TaskId::Numeric(1)));
     }
 
     #[test]

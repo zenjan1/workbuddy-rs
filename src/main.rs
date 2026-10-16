@@ -239,7 +239,7 @@ async fn main() -> Result<()> {
         Cmd::Show { id } => {
             let runs = Workspace::root(&cfg.workspace_dir);
             let resolved_id = crate::task_id::resolve_task_id(&id, runs.iter().map(|r: &RunRecord| r.goal.as_str()))
-                .map_err(|e| anyhow::anyhow!("{}", e))?;
+                .map_err(|e| anyhow::anyhow!("无法解析任务 ID '{}': {}", id, e))?;
             cmd_show(cfg, &resolved_id.to_string())
         }
         Cmd::Agents => cmd_agents(),
@@ -752,7 +752,8 @@ fn cmd_list(cfg: Config, since: Option<&str>) -> Result<()> {
 fn cmd_show(cfg: Config, id: &str) -> Result<()> {
     let runs = Workspace::root(&cfg.workspace_dir);
     let idx = match crate::task_id::resolve_task_id(id, runs.iter().map(|r: &RunRecord| r.goal.as_str())) {
-        Ok(idx) => idx,
+        Ok(crate::task_id::TaskId::Numeric(idx)) => idx,
+        Ok(crate::task_id::TaskId::Slug(_)) => anyhow::bail!("内部错误：标题别名解析应返回数字索引"),
         Err(crate::task_id::TaskIdError::Ambiguous { .. }) => {
             anyhow::bail!(
                 "任务标识 '{}' 不唯一，存在多个匹配任务。提示：若任务标题存在冲突，请使用任务索引（数字 id）引用任务。",
