@@ -42,6 +42,16 @@ pub fn run_to_json(run: &RunRecord) -> Result<String, serde_json::Error> {
     serde_json::to_string(run)
 }
 
+fn summarize_run_json(value: &serde_json::Value) -> serde_json::Value {
+    json!({
+        "id": value.get("id").cloned().unwrap_or(serde_json::Value::Null),
+        "goal": value.get("goal").cloned().unwrap_or(serde_json::Value::Null),
+        "created": value.get("created").cloned().unwrap_or(serde_json::Value::Null),
+        "model": value.get("model").cloned().unwrap_or(serde_json::Value::Null),
+        "mock": value.get("mock").cloned().unwrap_or(serde_json::Value::Bool(false)),
+    })
+}
+
 #[allow(dead_code)]
 fn parse_limit(query: &str) -> Option<usize> {
     query.split('&').find_map(|pair| {
@@ -106,11 +116,12 @@ fn combined_runs_json(workspace_dir: &Path) -> Vec<serde_json::Value> {
     let mut runs: Vec<serde_json::Value> = Workspace::root(workspace_dir)
         .iter()
         .filter_map(|run| serde_json::to_value(run).ok())
+        .map(|value| summarize_run_json(&value))
         .collect();
     for value in load_history_values(workspace_dir) {
         let id = run_id_of_value(&value).unwrap_or("");
         if id.is_empty() || !runs.iter().any(|existing| run_id_of_value(existing) == Some(id)) {
-            runs.push(value);
+            runs.push(summarize_run_json(&value));
         }
     }
     runs
@@ -581,6 +592,51 @@ mod tests {
         assert!(json.is_array());
         assert_eq!(json.as_array().unwrap().len(), 1);
         assert_eq!(json[0]["id"].as_str(), Some(run_id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn test_http_client_requests_endpoints() {
+        use reqwest::Client;
+
+        let (workspace_dir, run_id) = create_test_workspace();
+        let addr = serve_with_dir(
+            &workspace_dir,
+            SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0)),
+        )
+        .await
+        .unwrap();
+        let base_url = format!("http://{addr}");
+        let client = Client::new();
+
+        let response = client.get(format!("{base_url}/health")).send().await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let json: Value = response.json().await.unwrap();
+        assert_eq!(json["status"], "ok");
+
+        let response = client.get(format!("{base_url}/runs")).send().await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let json: Value = response.json().await.unwrap();
+        assert!(json.is_array());
+        let runs = json.as_array().unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0]["id"], run_id);
+        assert!(runs[0].get("steps").is_none());
+
+        let response = client
+            .get(format!("{base_url}/runs/{run_id}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let json: Value = response.json().await.unwrap();
+        assert_eq!(json["id"], run_id);
+
+        let response = client
+            .get(format!("{base_url}/runs/nonexistent"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
     }
 }
 
