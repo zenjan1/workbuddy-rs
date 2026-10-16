@@ -219,9 +219,11 @@ impl Config {
         Self::validate_config_key(key)?;
         let normalized_key = normalize_config_key(key)?;
         let path = Self::config_file_path();
-        // 先持久化，成功后再更新内存配置，避免部分更新。
+        // 先在副本上校验并应用，确认类型等检查全部通过后再持久化，
+        // 避免配置文件已写入但内存配置更新失败导致的不一致。
+        let updated = self.updated(normalized_key, value)?;
         Self::update_config_file(&path, normalized_key, value)?;
-        self.apply_value(normalized_key, value)?;
+        *self = updated;
         Ok(())
     }
 
@@ -374,7 +376,11 @@ impl Config {
 /// 使用 toml_edit 更新配置文件，保留注释和未知键。
 pub fn set_config_value_file(path: &Path, key: &str, value: &str) -> Result<()> {
     validate_key_syntax(key)?;
-    let normalized_key = normalize_config_key(key)?;
+    let normalized_key = if key == "stream" {
+        "stream"
+    } else {
+        normalize_config_key(key)?
+    };
 
     let mut doc = if path.exists() {
         let text = std::fs::read_to_string(path)
@@ -419,9 +425,64 @@ pub fn set_config_value_file(path: &Path, key: &str, value: &str) -> Result<()> 
     Ok(())
 }
 
+
+fn parse_generic_toml_edit(raw: &str) -> Result<toml_edit::Item> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        anyhow::bail!("配置值不能为空");
+    }
+    if raw == "true" || raw == "false" {
+        return Ok(toml_edit::value(raw.parse::<bool>().unwrap()));
+    }
+    if let Ok(i) = raw.parse::<i64>() {
+        return Ok(toml_edit::value(i));
+    }
+    if let Ok(f) = raw.parse::<f64>() {
+        if f.is_finite() {
+            return Ok(toml_edit::value(f));
+        }
+    }
+    Ok(toml_edit::value(raw.to_string()))
+}
+
+fn set_toml_edit_table(
+    table: &mut toml_edit::Table,
+    parts: &[&str],
+    item: toml_edit::Item,
+) -> Result<()> {
+    if parts.is_empty() {
+        anyhow::bail!("配置键不能为空");
+    }
+    let part = parts[0];
+    if parts.len() == 1 {
+        if let Some(existing) = table.get_mut(part) {
+            let decor = existing.as_value_mut().map(|v| v.decor().clone());
+            *existing = item;
+            if let Some(decor) = decor {
+                if let Some(v) = existing.as_value_mut() {
+                    *v.decor_mut() = decor;
+                }
+            }
+        } else {
+            table.insert(part, item);
+        }
+    } else {
+        if table.get(part).is_none() {
+            table.insert(part, toml_edit::Item::Table(toml_edit::Table::new()));
+        }
+        let child_item = table.get_mut(part).unwrap();
+        let child_table = match child_item {
+            toml_edit::Item::Table(t) => t,
+            _ => anyhow::bail!("配置路径段 {} 不是表", part),
+        };
+        set_toml_edit_table(child_table, &parts[1..], item)?;
+    }
+    Ok(())
+}
+
 fn parse_config_set_value(key: &str, raw: &str) -> Result<toml_edit::Item> {
     match key {
-        "max_budget" | "price" | "cost_per_1k_tokens" => {
+        "max_budget" | "budget.max_budget" | "price" | "cost_per_1k_tokens" | "cost.input_per_1k" => {
             let n: f64 = raw
                 .parse()
                 .with_context(|| format!("{key} 需要是数字"))?;
@@ -429,8 +490,8 @@ fn parse_config_set_value(key: &str, raw: &str) -> Result<toml_edit::Item> {
                 anyhow::bail!("{key} 必须是有限数字");
             }
             match key {
-                "max_budget" if n < 0.0 => anyhow::bail!("max_budget 必须为非负数"),
-                "price" | "cost_per_1k_tokens" if n < 0.0 => {
+                "max_budget" | "budget.max_budget" if n < 0.0 => anyhow::bail!("max_budget 必须为非负数"),
+                "price" | "cost_per_1k_tokens" | "cost.input_per_1k" if n < 0.0 => {
                     anyhow::bail!("{key} 不能为负数")
                 }
                 _ => {}
@@ -453,14 +514,14 @@ fn parse_config_set_value(key: &str, raw: &str) -> Result<toml_edit::Item> {
             validate_url_value(key, raw)?;
             Ok(toml_edit::value(raw.to_string()))
         }
-        "webhook_enabled" => {
+        "webhook_enabled" | "stream" => {
             let b: bool = raw
                 .parse()
                 .with_context(|| format!("{key} 需要是布尔值 true/false"))?;
             Ok(toml_edit::value(b))
         }
-        "api_key" | "model" | "workspace_dir" | "repo_dir" => {
-            if (key == "model" || key == "workspace_dir" || key == "repo_dir") && raw.trim().is_empty() {
+        "api_key" | "model" | "llm.model" | "workspace_dir" | "repo_dir" => {
+            if (key == "model" || key == "llm.model" || key == "workspace_dir" || key == "repo_dir") && raw.trim().is_empty() {
                 anyhow::bail!("{key} 不能为空");
             }
             Ok(toml_edit::value(raw.to_string()))

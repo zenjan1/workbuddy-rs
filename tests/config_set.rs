@@ -33,6 +33,7 @@ impl TestWorkspace {
             r#"# WorkBuddy configuration
 model = "default-model"
 max_budget = 5000
+stream = true
 
 [llm]
 base_url = "https://example.com/v1"
@@ -156,5 +157,60 @@ fn config_set_value_can_be_read_back_with_get() {
     assert_eq!(
         read_back, "gpt-4o",
         "config --get returned unexpected value after config set"
+    );
+}
+
+#[test]
+fn config_set_accepts_boolean_values() {
+    let ws = TestWorkspace::new();
+    ws.write_initial_config();
+
+    set_config_value(&ws.config_path(), "stream", "false").expect("set stream to false");
+
+    let raw = read_config(&ws);
+    assert!(
+        raw.contains("stream = false"),
+        "boolean value was not updated: {}",
+        raw
+    );
+
+    let read_back = get_config_value(&ws.config_path(), "stream").expect("get stream");
+    assert_eq!(
+        read_back, "false",
+        "config --get returned unexpected boolean value after config set"
+    );
+}
+
+#[test]
+fn config_set_persists_updates_to_expected_path() {
+    let ws = TestWorkspace::new();
+    ws.write_initial_config();
+
+    let config_path = ws.config_path();
+    set_config_value(&config_path, "model", "gpt-4o").expect("set model");
+
+    let persisted = fs::read_to_string(&config_path).expect("failed to read persisted config");
+    assert!(
+        persisted.contains("gpt-4o"),
+        "set value was not persisted to expected path: {}",
+        persisted
+    );
+}
+
+#[test]
+fn config_set_leaves_default_config_unchanged_without_updates() {
+    let ws = TestWorkspace::new();
+    ws.write_initial_config();
+
+    let before = read_config(&ws);
+
+    // Read-only config access should not modify the default configuration file.
+    let default_model = get_config_value(&ws.config_path(), "model").expect("get default model");
+    assert_eq!(default_model, "default-model");
+
+    let after = read_config(&ws);
+    assert_eq!(
+        before, after,
+        "default config changed after read-only access"
     );
 }
