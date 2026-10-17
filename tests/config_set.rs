@@ -454,6 +454,160 @@ temperature = 0.7
     assert!(raw.contains("model = \"gpt-4o\""), "string not persisted: {}", raw);
 }
 
+#[test]
+fn config_set_dot_path_parsing_updates_nested_value_only() {
+    let ws = TestWorkspace::new();
+    ws.write_initial_config();
+
+    set_config_value(&ws.config_path(), "llm.model", "gpt-4o").expect("set llm.model");
+
+    let raw = read_config(&ws);
+    let llm_section = raw
+        .split("[llm]")
+        .nth(1)
+        .expect("config should contain [llm] section");
+    assert!(
+        llm_section.contains("model = \"gpt-4o\""),
+        "llm.model was not updated in [llm]: {}",
+        raw
+    );
+    assert!(
+        raw.contains("model = \"default-model\""),
+        "top-level model should be unaffected by llm.model update: {}",
+        raw
+    );
+    assert_eq!(
+        get_config_value(&ws.config_path(), "llm.model").expect("get llm.model"),
+        "gpt-4o"
+    );
+    assert_eq!(
+        get_config_value(&ws.config_path(), "model").expect("get model"),
+        "default-model"
+    );
+}
+
+#[test]
+fn config_set_type_conversion_handles_string_and_integer_values() {
+    let ws = TestWorkspace::new();
+    ws.write_initial_config();
+
+    set_config_value(&ws.config_path(), "model", "gpt-4o").expect("set string");
+    set_config_value(&ws.config_path(), "max_budget", "12000").expect("set integer");
+
+    let raw = read_config(&ws);
+    assert!(
+        raw.contains("model = \"gpt-4o\""),
+        "string not written: {}",
+        raw
+    );
+    assert!(
+        raw.contains("max_budget = 12000"),
+        "integer not written: {}",
+        raw
+    );
+
+    assert_eq!(
+        get_config_value(&ws.config_path(), "model").expect("get model"),
+        "gpt-4o"
+    );
+    assert_eq!(
+        get_config_value(&ws.config_path(), "max_budget").expect("get max_budget"),
+        "12000"
+    );
+}
+
+#[test]
+fn config_set_preserves_existing_config_keys_on_successful_update() {
+    let ws = TestWorkspace::new();
+    ws.write_initial_config();
+
+    set_config_value(&ws.config_path(), "model", "gpt-4o").expect("set model");
+
+    let raw = read_config(&ws);
+    assert!(
+        raw.contains("model = \"gpt-4o\""),
+        "model not updated: {}",
+        raw
+    );
+    assert!(
+        raw.contains("max_budget = 5000"),
+        "max_budget changed: {}",
+        raw
+    );
+    assert!(
+        raw.contains("timeout = 30"),
+        "timeout changed: {}",
+        raw
+    );
+    assert!(
+        raw.contains("stream = true"),
+        "stream changed: {}",
+        raw
+    );
+    assert!(
+        raw.contains("base_url = \"https://example.com/v1\""),
+        "base_url changed: {}",
+        raw
+    );
+    assert!(
+        raw.contains("model = \"default-llm\""),
+        "llm.model changed: {}",
+        raw
+    );
+    assert!(
+        raw.contains("max_budget = 7000"),
+        "llm.max_budget changed: {}",
+        raw
+    );
+    assert!(
+        raw.contains("# WorkBuddy configuration"),
+        "comment not preserved: {}",
+        raw
+    );
+}
+
+#[test]
+fn config_set_rolls_back_on_failed_update_and_keeps_original_config() {
+    let ws = TestWorkspace::new();
+    ws.write_initial_config();
+
+    let original = read_config(&ws);
+
+    let invalid_key = set_config_value(&ws.config_path(), "llm.unknown_key", "value");
+    assert!(
+        invalid_key.is_err(),
+        "writing an unknown key should fail before updating the file"
+    );
+
+    let invalid_type = set_config_value(&ws.config_path(), "max_budget", "not-a-number");
+    assert!(
+        invalid_type.is_err(),
+        "writing an invalid type should fail before updating the file"
+    );
+
+    let raw = read_config(&ws);
+    assert_eq!(
+        raw, original,
+        "config file changed after failed writes: {}",
+        raw
+    );
+    assert!(
+        raw.contains("model = \"default-model\""),
+        "original model missing after failed writes: {}",
+        raw
+    );
+    assert!(
+        raw.contains("max_budget = 5000"),
+        "original max_budget missing after failed writes: {}",
+        raw
+    );
+    assert!(
+        raw.contains("base_url = \"https://example.com/v1\""),
+        "original base_url missing after failed writes: {}",
+        raw
+    );
+}
+
 
 fn workbuddy_bin() -> &'static str {
     if let Some(bin) = option_env!("CARGO_BIN_EXE_workbuddy") {

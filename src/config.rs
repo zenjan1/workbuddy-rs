@@ -87,6 +87,8 @@ struct FileConfig {
     webhook_timeout_secs: Option<u64>,
     #[serde(default)]
     webhooks: Vec<WebhookConfig>,
+    #[serde(flatten)]
+    extra: std::collections::BTreeMap<String, toml::Value>,
 }
 
 /// 可通过 `config set` 修改的配置键。键名与 FileConfig/Config 字段保持一致。
@@ -280,6 +282,9 @@ impl Config {
 
         match segments.as_slice() {
             ["llm", "model"] => {
+                if value.trim().is_empty() {
+                    anyhow::bail!("model 不能为空");
+                }
                 let old_value = self.model.clone();
                 Self::update_config_file(&Self::config_file_path(), "llm.model", value)?;
                 self.model = value.to_string();
@@ -306,16 +311,56 @@ impl Config {
                 })
             }
             ["cost", "input_price_per_mtok"] => {
-                let mut summary = self.set_value_with_summary("cost_per_1k_tokens", value)?;
-                summary.key = "cost.input_price_per_mtok".to_string();
-                Ok(summary)
+                let canonical_key = "cost_per_1k_tokens";
+                let path = Self::config_file_path();
+                let old_value = self.get_value(canonical_key)
+                    .with_context(|| format!("读取旧值失败: {canonical_key}"))?;
+                let updated = self.updated(canonical_key, value)?;
+                Self::update_config_file(&path, "cost.input_price_per_mtok", value)
+                    .with_context(|| format!("写入配置文件失败: {}", path.display()))?;
+                let new_value = updated.get_value(canonical_key)
+                    .with_context(|| format!("读取新值失败: {canonical_key}"))?;
+                *self = updated;
+                Ok(ConfigUpdateSummary {
+                    key: "cost.input_price_per_mtok".to_string(),
+                    old_value,
+                    new_value,
+                    restart_required: RESTART_REQUIRED_KEYS.contains(&"cost_per_1k_tokens"),
+                })
             }
             ["llm", "max_budget"] => {
-                let mut summary = self.set_value_with_summary("max_budget", value)?;
-                summary.key = "llm.max_budget".to_string();
-                Ok(summary)
+                let canonical_key = "max_budget";
+                let path = Self::config_file_path();
+                let old_value = self.get_value(canonical_key)
+                    .with_context(|| format!("读取旧值失败: {canonical_key}"))?;
+                let updated = self.updated(canonical_key, value)?;
+                Self::update_config_file(&path, "llm.max_budget", value)
+                    .with_context(|| format!("写入配置文件失败: {}", path.display()))?;
+                let new_value = updated.get_value(canonical_key)
+                    .with_context(|| format!("读取新值失败: {canonical_key}"))?;
+                *self = updated;
+                Ok(ConfigUpdateSummary {
+                    key: "llm.max_budget".to_string(),
+                    old_value,
+                    new_value,
+                    restart_required: RESTART_REQUIRED_KEYS.contains(&"max_budget"),
+                })
             }
             [single] => self.set_value_with_summary(single, value),
+            ["executor", "timeout"] => {
+                let canonical_key = "timeout";
+                let old_value = self.get_value(canonical_key)?;
+                let updated = self.updated(canonical_key, value)?;
+                Self::update_config_file(&Self::config_file_path(), "executor.timeout", value)?;
+                let new_value = updated.get_value(canonical_key)?;
+                *self = updated;
+                Ok(ConfigUpdateSummary {
+                    key: "executor.timeout".to_string(),
+                    old_value,
+                    new_value,
+                    restart_required: RESTART_REQUIRED_KEYS.contains(&canonical_key),
+                })
+            }
             _ => anyhow::bail!(
                 "未知或不允许修改的嵌套配置键 (unknown nested configuration key): {key}"
             ),
@@ -536,6 +581,7 @@ const NESTED_CONFIG_KEYS: &[&str] = &[
     "llm.max_budget",
     "llm.temperature",
     "cost.input_price_per_mtok",
+    "executor.timeout",
 ];
 
 /// 将用户输入自动识别为 TOML 布尔值、整数或字符串。
@@ -809,6 +855,10 @@ pub fn set_config_value_file(path: &Path, key: &str, value: &str) -> Result<()> 
     {
         let root_table = doc.as_table_mut();
         if is_nested {
+            if !NESTED_CONFIG_KEYS.contains(&normalized_key) {
+                anyhow::bail!("未知或不允许修改的嵌套配置键: {}", normalized_key);
+            }
+            validate_nested_config_value_type(normalized_key, value)?;
             let parts: Vec<&str> = normalized_key.split('.').collect();
             set_toml_edit_table(root_table, &parts, parsed)?;
         } else {
@@ -2209,4 +2259,222 @@ pub fn get_config_value(key: &str) -> Result<String> {
 pub fn set_config_value(key: &str, value: &str) -> Result<ConfigUpdateSummary> {
     let mut cfg = Config::load()?;
     cfg.set_value_with_summary(key, value)
+}
+
+/// Parse a string into the most appropriate TOML value for an existing value.
+///
+/// If `existing` is provided, its type is preserved when possible. Otherwise
+/// perform a reasonable inference: booleans first, then integers, then finite
+/// floats, finally strings. This ensures `config set model qwen-plus`,
+/// `config set max_parallel 4`, and `config set llm.temperature 0.7` all write
+/// correctly typed TOML values.
+fn config_set_parse_value_for_update(value: &str, existing: Option<&toml::Value>) -> Result<toml::Value> {
+    let trimmed = value.trim();
+    if let Some(existing) = existing {
+        match existing {
+            toml::Value::Boolean(_) => {
+                return config_set_parse_bool(trimmed)
+                    .with_context(|| format!("需要布尔值 true/false: {value}"))
+                    .map(toml::Value::Boolean);
+            }
+            toml::Value::Integer(_) => {
+                return config_set_parse_i64(trimmed)
+                    .with_context(|| format!("需要整数: {value}"))
+                    .map(toml::Value::Integer);
+            }
+            toml::Value::Float(_) => {
+                return config_set_parse_f64(trimmed)
+                    .with_context(|| format!("需要数字: {value}"))
+                    .map(toml::Value::Float);
+            }
+            _ => {}
+        }
+    }
+
+    if trimmed.eq_ignore_ascii_case("true") {
+        return Ok(toml::Value::Boolean(true));
+    }
+    if trimmed.eq_ignore_ascii_case("false") {
+        return Ok(toml::Value::Boolean(false));
+    }
+    if let Ok(i) = trimmed.parse::<i64>() {
+        return Ok(toml::Value::Integer(i));
+    }
+    if let Ok(f) = trimmed.parse::<f64>() {
+        if f.is_finite() {
+            return Ok(toml::Value::Float(f));
+        }
+        anyhow::bail!("数字必须是有限值: {value}");
+    }
+    Ok(toml::Value::String(value.to_string()))
+}
+
+fn config_set_parse_bool(value: &str) -> Result<bool> {
+    if value.eq_ignore_ascii_case("true") {
+        Ok(true)
+    } else if value.eq_ignore_ascii_case("false") {
+        Ok(false)
+    } else {
+        anyhow::bail!("expected true/false, got {value}")
+    }
+}
+
+fn config_set_parse_i64(value: &str) -> Result<i64> {
+    value.parse::<i64>().context("expected integer")
+}
+
+fn config_set_parse_f64(value: &str) -> Result<f64> {
+    value.parse::<f64>().context("expected number")
+}
+
+/// Insert a TOML value at a dot-separated path, creating intermediate tables as needed.
+fn config_set_insert_toml_path(root: &mut toml::Value, path: &[&str], value: toml::Value) -> Result<()> {
+    if path.is_empty() {
+        *root = value;
+        return Ok(());
+    }
+
+    if !root.is_table() {
+        anyhow::bail!("无法在非表值中设置嵌套键: {}", path.join("."));
+    }
+
+    let table = root.as_table_mut().unwrap();
+    let head = path[0];
+    if path.len() == 1 {
+        table.insert(head.to_string(), value);
+        return Ok(());
+    }
+
+    let entry = table
+        .entry(head.to_string())
+        .or_insert_with(|| toml::Value::Table(Default::default()));
+    config_set_insert_toml_path(entry, &path[1..], value)
+}
+
+/// Retrieve the current TOML value at a dot-separated path, if any.
+fn config_set_get_toml_value<'a>(root: &'a toml::Value, path: &[&str]) -> Option<&'a toml::Value> {
+    let mut current = root;
+    for segment in path {
+        match current {
+            toml::Value::Table(table) => {
+                current = table.get(*segment)?;
+            }
+            _ => return None,
+        }
+    }
+    Some(current)
+}
+
+/// Atomically update a single dot-separated key in a TOML file.
+///
+/// The existing file content is read first and kept as backup. A temporary file
+/// in the same directory is written, then renamed over the target. On any error
+/// the original content is restored and the temporary file is removed.
+fn config_set_write_file_atomic(path: &Path, key: &str, value: &str) -> Result<()> {
+    if path.exists() && !path.is_file() {
+        anyhow::bail!("配置文件路径不是文件: {}", path.display());
+    }
+
+    let original = match std::fs::read(path) {
+        Ok(bytes) => Some(bytes),
+        Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e).with_context(|| format!("读取配置文件失败: {}", path.display())),
+    };
+
+    let original_text = original.as_deref().map(|b| String::from_utf8_lossy(b).into_owned());
+    let tmp_path = path.with_extension("tmp");
+    let mut backup_written = false;
+
+    let result = (|| -> Result<()> {
+        let mut root = match original_text.as_deref() {
+            Some(text) if !text.trim().is_empty() => toml::from_str(text)
+                .with_context(|| format!("解析配置文件失败: {}", path.display()))?,
+            _ => toml::Value::Table(Default::default()),
+        };
+
+        let segments: Vec<&str> = key.split('.').filter(|s| !s.is_empty()).collect();
+        if segments.is_empty() {
+            anyhow::bail!("配置键不能为空");
+        }
+
+        let existing = config_set_get_toml_value(&root, &segments);
+        let typed = config_set_parse_value_for_update(value, existing)?;
+        config_set_insert_toml_path(&mut root, &segments, typed)?;
+
+        let new_content = toml::to_string_pretty(&root)
+            .with_context(|| format!("序列化配置为 TOML 失败: {}", path.display()))?;
+
+        std::fs::write(&tmp_path, new_content.as_bytes())
+            .with_context(|| format!("写入临时配置文件失败: {}", tmp_path.display()))?;
+        backup_written = true;
+
+        // Atomic replace. On Unix this is atomic; on Windows rename may fail
+        // if the destination exists, so remove it first as a best-effort fallback.
+        if let Err(e) = std::fs::rename(&tmp_path, path) {
+            #[cfg(windows)]
+            {
+                let _ = std::fs::remove_file(path);
+                std::fs::rename(&tmp_path, path)
+                    .with_context(|| format!("替换配置文件失败: {}", path.display()))?;
+            }
+            #[cfg(not(windows))]
+            {
+                return Err(e).with_context(|| format!("替换配置文件失败: {}", path.display()));
+            }
+        }
+
+        Ok(())
+    })();
+
+    if let Err(err) = result {
+        if let Some(original_bytes) = original {
+            // Rollback to original content.
+            if backup_written {
+                let _ = std::fs::write(path, original_bytes);
+            }
+        } else {
+            let _ = std::fs::remove_file(path);
+        }
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(err);
+    }
+
+    Ok(())
+}
+
+fn validate_nested_config_value_type(key: &str, value: &str) -> Result<()> {
+    match key {
+        "llm.model" => {
+            if !value.trim().is_empty() && parse_config_value(value).is_integer() {
+                anyhow::bail!("llm.model 需要是字符串，不能是数字");
+            }
+            if parse_config_value(value).is_bool() {
+                anyhow::bail!("llm.model 需要是字符串，不能是布尔值");
+            }
+        }
+        "llm.max_budget" | "llm.temperature" | "cost.input_price_per_mtok" => {
+            let f: f64 = value
+                .parse()
+                .with_context(|| format!("{key} 需要是数字 (invalid number)"))?;
+            if !f.is_finite() {
+                anyhow::bail!("{key} 必须是有限数字");
+            }
+            if key == "llm.max_budget" && f < 0.0 {
+                anyhow::bail!("llm.max_budget 必须为非负数");
+            }
+            if (key == "llm.temperature" || key == "cost.input_price_per_mtok") && f < 0.0 {
+                anyhow::bail!("{key} 不能为负数");
+            }
+        }
+        "executor.timeout" => {
+            let n: i64 = value
+                .parse()
+                .with_context(|| format!("{key} 需要是整数 (invalid integer)"))?;
+            if n <= 0 {
+                anyhow::bail!("{key} 必须大于 0");
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
