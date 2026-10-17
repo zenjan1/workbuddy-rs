@@ -50,6 +50,16 @@ impl Error for MemoryError {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenUsage {
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub total_tokens: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryEntry {
     pub id: u64,
@@ -59,6 +69,12 @@ pub struct MemoryEntry {
     pub content: String,
     #[serde(default)]
     pub created_at: String,
+    #[serde(default)]
+    pub token_usage: Option<TokenUsage>,
+    #[serde(default)]
+    pub input_chars: Option<u64>,
+    #[serde(default)]
+    pub output_chars: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -119,6 +135,9 @@ impl MemoryStore {
             title: title.to_owned(),
             content: content.to_owned(),
             created_at: timestamp.to_string(),
+            token_usage: None,
+            input_chars: None,
+            output_chars: None,
         };
 
         let mut file = OpenOptions::new()
@@ -285,6 +304,71 @@ pub fn list(workspace_dir: Option<&Path>) -> Result<Vec<MemoryEntry>, MemoryErro
 pub fn get(workspace_dir: Option<&Path>, id: &str) -> Result<MemoryEntry, MemoryError> {
     let store = MemoryStore::open_in_workspace_or_config(workspace_dir)?;
     store.get(id)
+}
+
+#[cfg(test)]
+mod memory_entry_usage_tests {
+    use super::*;
+
+    #[test]
+    fn new_fields_round_trip_through_json() {
+        let entry = MemoryEntry {
+            id: 1,
+            timestamp: 1700000000000,
+            title: "hello".to_owned(),
+            content: "world".to_owned(),
+            created_at: "1700000000000".to_owned(),
+            token_usage: Some(TokenUsage {
+                input_tokens: 10,
+                output_tokens: 20,
+                total_tokens: 30,
+            }),
+            input_chars: Some(5),
+            output_chars: Some(7),
+        };
+
+        let json = serde_json::to_string(&entry).unwrap();
+        let parsed: MemoryEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, entry);
+        assert_eq!(
+            parsed.token_usage,
+            Some(TokenUsage {
+                input_tokens: 10,
+                output_tokens: 20,
+                total_tokens: 30,
+            })
+        );
+        assert_eq!(parsed.input_chars, Some(5));
+        assert_eq!(parsed.output_chars, Some(7));
+    }
+
+    #[test]
+    fn old_json_without_usage_fields_deserializes_with_defaults() {
+        let json = r#"{"id": 2, "timestamp": 1700000000000, "title": "old", "content": "record", "created_at": "1700000000000"}"#;
+        let entry: MemoryEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.id, 2);
+        assert_eq!(entry.title, "old");
+        assert_eq!(entry.content, "record");
+        assert_eq!(entry.token_usage, None);
+        assert_eq!(entry.input_chars, None);
+        assert_eq!(entry.output_chars, None);
+    }
+
+    #[test]
+    fn partial_token_usage_fields_default_to_zero() {
+        let json = r#"{"id": 3, "timestamp": 1700000000000, "title": "partial", "content": "record", "created_at": "1700000000000", "token_usage": {"input_tokens": 11}, "input_chars": 4}"#;
+        let entry: MemoryEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            entry.token_usage,
+            Some(TokenUsage {
+                input_tokens: 11,
+                output_tokens: 0,
+                total_tokens: 0,
+            })
+        );
+        assert_eq!(entry.input_chars, Some(4));
+        assert_eq!(entry.output_chars, None);
+    }
 }
 
 #[cfg(any())]
