@@ -209,7 +209,7 @@ fn build_run_by_id(workspace_dir: &Path, id: &str) -> Option<serde_json::Value> 
 
     if let Some(body) = find_run_in_history_files(workspace_dir, id) {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) {
-            return Some(summarize_run_json(&value));
+            return Some(value);
         }
     }
 
@@ -261,7 +261,7 @@ fn readonly_route(workspace_dir: &Path, target: &str) -> (u16, &'static str, Str
 
     if path == "runs" {
         let runs = build_runs(workspace_dir, Some(query));
-        let body = json!(runs).to_string();
+        let body = serde_json::to_string(&runs).unwrap_or_else(|_| "[]".to_string());
         return (200, "OK", body);
     }
 
@@ -363,8 +363,7 @@ pub async fn serve_with_dir(workspace_dir: &Path, bind_addr: SocketAddr) -> anyh
         .route("/runs/{id}", get(get_run))
         .with_state(state);
 
-    let loopback = SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, bind_addr.port()));
-    let listener = tokio::net::TcpListener::bind(loopback).await?;
+    let listener = tokio::net::TcpListener::bind(bind_addr).await?;
     let local_addr = listener.local_addr()?;
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();

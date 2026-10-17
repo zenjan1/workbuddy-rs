@@ -186,6 +186,23 @@ fn serve_readonly_run_lookup_uses_mock_history_and_returns_404_for_unknown_id() 
         "unexpected run JSON: {body}"
     );
 
+    let expected_runs: serde_json::Value =
+        serde_json::from_slice(&original_runs_json).expect("failed to parse original runs.json");
+    let expected_run = expected_runs
+        .as_array()
+        .and_then(|runs| runs.iter().find(|run| run["id"].as_str() == Some("mock-run-id")))
+        .expect("mock-run-id is missing from runs.json");
+    assert_eq!(
+        parsed["command"].as_str(),
+        expected_run["command"].as_str(),
+        "run command does not match stored run: {body}"
+    );
+    assert_eq!(
+        parsed["cwd"].as_str(),
+        expected_run["cwd"].as_str(),
+        "run cwd does not match stored run: {body}"
+    );
+
     let (status, body) = http_request(addr, "GET", "/runs/unknown-run-id");
     assert_eq!(
         status,
