@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::review::LlmClient;
+use crate::llm::LlmClient;
 
 const REVIEWER_SYSTEM: &str = "You are a rigorous code reviewer. Given a task description and a git diff, produce a structured review in JSON with keys: risk_level (low/medium/high), suggestions (array of strings), key_issues (array of strings).";
 
@@ -72,6 +72,10 @@ pub async fn run_reviewer<C: LlmClient + ?Sized>(
     client: &C,
     run_log_path: &Path,
 ) -> Result<ReviewResult> {
+    if diff.trim().is_empty() {
+        anyhow::bail!("Git diff is empty");
+    }
+
     let user_prompt = format!(
         "Task description:\n{}\n\nGit diff:\n{}",
         task_description, diff
@@ -81,6 +85,12 @@ pub async fn run_reviewer<C: LlmClient + ?Sized>(
         .await
         .context("LLM reviewer call failed")?;
     let review = parse_review_output(&response);
+    if review.risk_level != "low" && review.risk_level != "medium" && review.risk_level != "high" {
+        anyhow::bail!(
+            "LLM reviewer returned invalid risk_level: {:?}",
+            review.risk_level
+        );
+    }
     save_review(run_log_path, &review)?;
     Ok(review)
 }

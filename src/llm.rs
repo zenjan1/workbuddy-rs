@@ -5,7 +5,16 @@ use anyhow::{bail, Context, Result};
 use serde_json::json;
 
 use crate::config::Config;
-use crate::util::clip;
+fn clip(s: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max_chars {
+        s.to_string()
+    } else {
+        let mut truncated: String = chars[..max_chars].iter().collect();
+        truncated.push_str("...");
+        truncated
+    }
+}
 
 /// 成本估算:根据 token 用量和每千 token 单价估算成本。
 /// 计算公式: tokens * cost_per_1k_tokens / 1000.0
@@ -508,4 +517,12 @@ mod tests {
         assert_eq!(usage.output_chars, out.text.chars().count());
         assert_eq!(usage.input_tokens, 0);
     }
+}
+
+pub trait LlmClient {
+    fn chat<'a>(
+        &'a self,
+        system: &'a str,
+        user: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send + 'a>>;
 }

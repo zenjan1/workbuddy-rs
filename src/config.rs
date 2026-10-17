@@ -41,6 +41,8 @@ pub struct Config {
     pub mock: bool,
     pub webhook_enabled: bool,
     pub review_enabled: bool,
+    /// 提交前自评审开关，默认关闭。
+    pub pre_commit_review: bool,
     pub webhook_url: Option<String>,
     pub webhook_retry: u32,
     pub webhook_timeout_secs: u64,
@@ -79,6 +81,7 @@ struct FileConfig {
     token_prices: TokenPrices,
     webhook_enabled: Option<bool>,
     review_enabled: Option<bool>,
+    pre_commit_review: Option<bool>,
     webhook_url: Option<String>,
     webhook_retry: Option<u32>,
     webhook_timeout_secs: Option<u64>,
@@ -101,6 +104,7 @@ const CONFIG_KEYS: &[&str] = &[
     "cost_per_1k_tokens",
     "webhook_url",
     "review_enabled",
+    "pre_commit_review",
     "webhook_enabled",
     "webhook_retry",
     "webhook_timeout_secs",
@@ -185,6 +189,7 @@ impl Config {
             mock: false,
             webhook_enabled: file.webhook_enabled.unwrap_or(false),
             review_enabled: file.review_enabled.unwrap_or(false),
+            pre_commit_review: file.pre_commit_review.unwrap_or(false),
             webhook_url: file.webhook_url.filter(|u| !u.trim().is_empty()),
             webhook_retry: file.webhook_retry.unwrap_or(3),
             webhook_timeout_secs: file.webhook_timeout_secs.unwrap_or(5),
@@ -247,6 +252,7 @@ impl Config {
             "max_budget" => self.max_budget.to_string(),
             "cost_per_1k_tokens" => self.cost_per_1k_tokens.to_string(),
             "review_enabled" => self.review_enabled.to_string(),
+            "pre_commit_review" => self.pre_commit_review.to_string(),
             "webhook_enabled" => self.webhook_enabled.to_string(),
             "webhook_url" => self.webhook_url.clone().unwrap_or_default(),
             "webhook_retry" => self.webhook_retry.to_string(),
@@ -398,14 +404,15 @@ impl Config {
                     self.webhook_url = Some(value.to_string());
                 }
             }
-            "webhook_enabled" | "review_enabled" => {
+            "webhook_enabled" | "review_enabled" | "pre_commit_review" => {
                 let b: bool = value
                     .parse()
                     .with_context(|| format!("{key} 需要是布尔值 true/false"))?;
-                if key == "webhook_enabled" {
-                    self.webhook_enabled = b;
-                } else {
-                    self.review_enabled = b;
+                match key {
+                    "webhook_enabled" => self.webhook_enabled = b,
+                    "review_enabled" => self.review_enabled = b,
+                    "pre_commit_review" => self.pre_commit_review = b,
+                    _ => unreachable!(),
                 }
             }
             "api_key" => {
@@ -1427,6 +1434,7 @@ mod tests {
             cost_per_1k_tokens: 0.0,
             mock: false,
             webhook_enabled: false,
+            pre_commit_review: false,
             review_enabled: false,
             webhook_url: None,
             webhook_retry: 3,
@@ -1900,6 +1908,7 @@ mod config_update_tests {
             cost_per_1k_tokens: 0.02,
             mock: false,
             webhook_enabled: false,
+            pre_commit_review: false,
             review_enabled: false,
             webhook_url: None,
             webhook_retry: 3,

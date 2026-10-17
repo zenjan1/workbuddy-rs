@@ -1,4 +1,5 @@
 /// 内置专家智能体目录(对应 WorkBuddy 的"多专家协同"范式)。
+pub mod reviewer;
 
 
 #[derive(Debug, Clone, Copy)]

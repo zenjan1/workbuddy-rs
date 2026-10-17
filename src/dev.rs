@@ -899,7 +899,7 @@ mod tests {
         )
         .unwrap();
 
-        let cfg = Config {
+        let cfg = Config { pre_commit_review: false,
             cost_per_1k_tokens: 0.0,
             price: 0.0,
             max_budget: 0.0,
@@ -986,7 +986,7 @@ mod tests {
         // 改动 code.rs(未提交)→ 进入 git diff --name-only
         std::fs::write(dir.join("code.rs"), "fn main() {\n    let x = 1;\n    let y = x;\n}\n").unwrap();
 
-        let cfg = Config {
+        let cfg = Config { pre_commit_review: false,
             cost_per_1k_tokens: 0.0,
             price: 0.0,
             max_budget: 0.0,

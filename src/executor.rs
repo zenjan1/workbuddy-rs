@@ -695,7 +695,7 @@ mod tests {
     ]}"#;
 
     fn mock_cfg() -> Config {
-        Config {
+        Config { pre_commit_review: false,
             price: 0.0,
             max_budget: 0.0,
             api_key: None,

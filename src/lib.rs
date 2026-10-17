@@ -10,3 +10,5 @@ pub mod memory;
 pub mod serve;
 pub mod utils;
 pub mod workspace;
+
+pub mod llm;
