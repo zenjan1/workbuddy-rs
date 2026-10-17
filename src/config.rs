@@ -100,9 +100,11 @@ const CONFIG_KEYS: &[&str] = &[
     "max_budget",
     "cost_per_1k_tokens",
     "webhook_url",
+    "review_enabled",
     "webhook_enabled",
     "webhook_retry",
     "webhook_timeout_secs",
+    "stream",
 ];
 
 /// 修改后需要重启进程才会生效的配置键。
@@ -223,6 +225,7 @@ impl Config {
             "price" => self.price.to_string(),
             "max_budget" => self.max_budget.to_string(),
             "cost_per_1k_tokens" => self.cost_per_1k_tokens.to_string(),
+            "review_enabled" => self.review_enabled.to_string(),
             "webhook_enabled" => self.webhook_enabled.to_string(),
             "webhook_url" => self.webhook_url.clone().unwrap_or_default(),
             "webhook_retry" => self.webhook_retry.to_string(),
@@ -276,7 +279,7 @@ impl Config {
             "max_budget" | "price" | "cost_per_1k_tokens" => {
                 let n: f64 = value
                     .parse()
-                    .with_context(|| format!("{key} 需要是数字"))?;
+                    .with_context(|| format!("{key} 需要是数字 (invalid number)"))?;
                 if !n.is_finite() {
                     anyhow::bail!("{key} 必须是有限数字");
                 }
@@ -297,7 +300,7 @@ impl Config {
             "max_parallel" | "timeout" | "request_timeout_secs" | "webhook_retry" | "webhook_timeout_secs" => {
                 let n: i64 = value
                     .parse()
-                    .with_context(|| format!("{key} 需要是整数"))?;
+                    .with_context(|| format!("{key} 需要是整数 (invalid integer)"))?;
                 if matches!(
                     key,
                     "max_parallel" | "timeout" | "request_timeout_secs" | "webhook_timeout_secs"
@@ -323,11 +326,15 @@ impl Config {
                     self.webhook_url = Some(value.to_string());
                 }
             }
-            "webhook_enabled" => {
+            "webhook_enabled" | "review_enabled" => {
                 let b: bool = value
                     .parse()
                     .with_context(|| format!("{key} 需要是布尔值 true/false"))?;
-                self.webhook_enabled = b;
+                if key == "webhook_enabled" {
+                    self.webhook_enabled = b;
+                } else {
+                    self.review_enabled = b;
+                }
             }
             "api_key" => {
                 if value.trim().is_empty() {
@@ -354,7 +361,7 @@ impl Config {
                 self.repo_dir = PathBuf::from(value);
             }
             _ => anyhow::bail!(
-                "未知配置键: {key}; 可用键: {}",
+                "未知配置键 (unknown configuration key): {key}; 可用键: {}",
                 CONFIG_KEYS.join(", ")
             ),
         }
@@ -376,7 +383,7 @@ impl Config {
         let canonical = normalize_config_key(key)?;
         if !CONFIG_KEYS.contains(&canonical) {
             anyhow::bail!(
-                "未知配置键: {key}; 可用键: {}",
+                "未知配置键 (unknown configuration key): {key}; 可用键: {}",
                 CONFIG_KEYS.join(", ")
             );
         }
@@ -445,12 +452,12 @@ pub fn set_config_value_inline(path: &Path, key: &str, value: &str) -> Result<()
     validate_key_syntax(key)?;
     if !CONFIG_KEYS.contains(&key) {
         anyhow::bail!(
-            "未知配置键: {key}; 可用键: {}",
+            "未知配置键 (unknown configuration key): {key}; 可用键: {}",
             CONFIG_KEYS.join(", ")
         );
     }
     if key.contains('.') {
-        anyhow::bail!("仅支持修改 TOML 顶层配置键: {key}");
+        return set_config_value_file(path, key, value);
     }
 
     let item = parse_config_set_value(key, value)?;
@@ -708,7 +715,7 @@ fn parse_config_set_value(key: &str, raw: &str) -> Result<toml_edit::Item> {
             }
             let n: f64 = trimmed
                 .parse()
-                .with_context(|| format!("{key} 需要是数字"))?;
+                .with_context(|| format!("{key} 需要是数字 (invalid number)"))?;
             if !n.is_finite() {
                 anyhow::bail!("{key} 必须是有限数字");
             }
@@ -724,7 +731,7 @@ fn parse_config_set_value(key: &str, raw: &str) -> Result<toml_edit::Item> {
         "max_parallel" | "timeout" | "request_timeout_secs" | "webhook_retry" | "webhook_timeout_secs" => {
             let n: i64 = raw
                 .parse()
-                .with_context(|| format!("{key} 需要是整数"))?;
+                .with_context(|| format!("{key} 需要是整数 (invalid integer)"))?;
             if matches!(key, "max_parallel" | "timeout" | "request_timeout_secs" | "webhook_timeout_secs") && n <= 0 {
                 anyhow::bail!("{key} 必须大于 0");
             }
@@ -737,7 +744,7 @@ fn parse_config_set_value(key: &str, raw: &str) -> Result<toml_edit::Item> {
             validate_url_value(key, raw)?;
             Ok(toml_edit::value(raw.to_string()))
         }
-        "webhook_enabled" | "stream" => {
+        "webhook_enabled" | "review_enabled" | "stream" => {
             let b: bool = raw
                 .parse()
                 .with_context(|| format!("{key} 需要是布尔值 true/false"))?;
@@ -755,7 +762,7 @@ fn parse_config_set_value(key: &str, raw: &str) -> Result<toml_edit::Item> {
             Ok(toml_edit::value(raw.to_string()))
         }
         _ => anyhow::bail!(
-            "未知配置键: {key}; 可用键: {}",
+            "未知配置键 (unknown configuration key): {key}; 可用键: {}",
             CONFIG_KEYS.join(", ")
         ),
     }
@@ -830,10 +837,12 @@ fn normalize_config_key(key: &str) -> Result<&str> {
         "webhook.enabled" => Ok("webhook_enabled"),
         "webhook.retry" => Ok("webhook_retry"),
         "webhook.timeout_secs" => Ok("webhook_timeout_secs"),
+        "stream" => Ok("stream"),
+        "llm.temperature" => Ok("llm.temperature"),
         "timeout" => Ok("timeout"),
         _ if CONFIG_KEYS.contains(&key) => Ok(key),
         _ => anyhow::bail!(
-            "未知配置键: {key}; 可用键: {} 或别名: llm.api_base, llm.base_url, llm.model, llm.price_per_1k_tokens, llm.timeout",
+            "未知配置键 (unknown configuration key): {key}; 可用键: {} 或别名: llm.api_base, llm.base_url, llm.model, llm.price_per_1k_tokens, llm.timeout",
             CONFIG_KEYS.join(", ")
         ),
     }
@@ -1119,7 +1128,7 @@ pub enum ConfigSetError {
 impl std::fmt::Display for ConfigSetError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::UnknownKey(key) => write!(f, "未知配置键: {key}"),
+            Self::UnknownKey(key) => write!(f, "未知配置键 (unknown configuration key): {key}"),
             Self::InvalidValue { key, message } => write!(f, "{key} 的值无效: {message}"),
             Self::Parse(message) => write!(f, "解析配置失败: {message}"),
             Self::Serialize(message) => write!(f, "序列化配置失败: {message}"),
@@ -1527,7 +1536,7 @@ mod tests {
     fn config_set_config_value_rejects_invalid_type() {
         let path = temp_config_path("invalid_type");
         let err = Config::update_config_file(&path, "max_budget", "not-a-number").unwrap_err();
-        assert!(err.to_string().contains("需要是数字"));
+        assert!(err.to_string().contains("需要是数字 (invalid number)"));
         std::fs::remove_file(&path).ok();
     }
 
@@ -1669,7 +1678,7 @@ foo = "bar"
         std::fs::write(&path, initial).unwrap();
 
         let err = Config::update_config_file(&path, "request_timeout_secs", "not-a-number").unwrap_err();
-        assert!(err.to_string().contains("需要是整数"), "错误信息应提示类型错误: {err}");
+        assert!(err.to_string().contains("需要是整数 (invalid integer)"), "错误信息应提示类型错误: {err}");
 
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(text, initial, "类型错误不应修改配置文件");
@@ -1841,7 +1850,7 @@ mod config_update_tests {
     fn wrong_type_errors() {
         let original = test_config();
         let err = original.updated("max_budget", "not-a-number").unwrap_err();
-        assert!(err.to_string().contains("需要是数字"));
+        assert!(err.to_string().contains("需要是数字 (invalid number)"));
         assert_eq!(original.max_budget, 10.0);
     }
 
@@ -1891,10 +1900,10 @@ mod config_set_tests {
     #[test]
     fn parse_config_set_value_rejects_invalid_types_and_unknown_keys() {
         let err = parse_config_set_value("max_budget", "not-a-number").unwrap_err();
-        assert!(format!("{err}").contains("需要是数字"));
+        assert!(format!("{err}").contains("需要是数字 (invalid number)"));
 
         let err = parse_config_set_value("max_parallel", "not-an-int").unwrap_err();
-        assert!(format!("{err}").contains("需要是整数"));
+        assert!(format!("{err}").contains("需要是整数 (invalid integer)"));
 
         let err = parse_config_set_value("webhook_enabled", "yes").unwrap_err();
         assert!(format!("{err}").contains("布尔值"));

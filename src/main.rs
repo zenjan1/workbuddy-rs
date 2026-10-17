@@ -385,7 +385,7 @@ async fn main() -> Result<()> {
                         )
                     })?;
 
-                    let cfg = Config::load()?;
+                    cfg = Config::load()?;
                     println!("已更新配置：{} = {}", key, value);
                     println!("{}", cfg.summary());
 

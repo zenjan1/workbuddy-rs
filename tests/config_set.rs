@@ -95,9 +95,18 @@ fn config_set_rejects_unknown_keys() {
     let original = read_config(&ws);
 
     let result = set_config_value(&ws.config_path(), "llm.unknown_key", "value");
+    let err = result
+        .expect_err("setting an unknown key should return an error")
+        .to_string();
     assert!(
-        result.is_err(),
-        "setting an unknown key should return an error"
+        err.to_lowercase().contains("unknown") || err.to_lowercase().contains("invalid"),
+        "error message should mention unknown/invalid key, got: {}",
+        err
+    );
+    assert!(
+        err.contains("llm.unknown_key"),
+        "error message should mention the rejected key, got: {}",
+        err
     );
 
     let raw = read_config(&ws);
@@ -126,9 +135,21 @@ fn config_set_rejects_invalid_types() {
     let original = read_config(&ws);
 
     let result = set_config_value(&ws.config_path(), "max_budget", "not-a-number");
+    let err = result
+        .expect_err("setting max_budget to a non-integer should return an error")
+        .to_string();
     assert!(
-        result.is_err(),
-        "setting max_budget to a non-integer should return an error"
+        err.contains("max_budget"),
+        "error message should mention the rejected key, got: {}",
+        err
+    );
+    assert!(
+        err.to_lowercase().contains("invalid")
+            || err.to_lowercase().contains("type")
+            || err.to_lowercase().contains("number")
+            || err.to_lowercase().contains("integer"),
+        "error message should describe the type problem, got: {}",
+        err
     );
 
     let raw = read_config(&ws);
@@ -571,5 +592,27 @@ future_llm_setting = true
         raw.contains("# WorkBuddy configuration"),
         "comment was not preserved: {}",
         raw
+    );
+}
+
+#[test]
+fn config_set_writes_new_whitelisted_key_to_toml_and_updates_runtime() {
+    let ws = TestWorkspace::new();
+    ws.write_initial_config();
+
+    set_config_value(&ws.config_path(), "llm.temperature", "0.9").expect("set llm.temperature");
+
+    let raw = read_config(&ws);
+    assert!(
+        raw.contains("temperature = 0.9"),
+        "new whitelisted key was not written to TOML: {}",
+        raw
+    );
+
+    let read_back =
+        get_config_value(&ws.config_path(), "llm.temperature").expect("get llm.temperature");
+    assert_eq!(
+        read_back, "0.9",
+        "runtime config did not reflect newly written key"
     );
 }
