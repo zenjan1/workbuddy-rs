@@ -1,5 +1,6 @@
 /target
 .workbuddy/state.json
+.workbuddy/memory.jsonl
 .workbuddy/failures/
 .workbuddy/dev.pid
 .workbuddy/dev.log*
