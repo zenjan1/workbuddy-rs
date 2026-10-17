@@ -103,6 +103,10 @@ impl MemoryStore {
             return Ok(entries[pos].clone());
         }
 
+        if let Some(existing) = entries.iter().find(|entry| entry.text == value) {
+            return Ok(existing.clone());
+        }
+
         let entry = MemoryEntry {
             key: key.to_owned(),
             text: value.to_owned(),
@@ -127,15 +131,15 @@ impl MemoryStore {
     }
 
     pub fn get(&self, key: &str) -> Result<MemoryEntry, MemoryError> {
-        let key = key.trim();
-        if key.is_empty() {
-            return Err(MemoryError::NotFound(key.to_owned()));
+        let query = key.trim();
+        if query.is_empty() {
+            return Err(MemoryError::NotFound(query.to_owned()));
         }
         let entries = self.read_entries()?;
         entries
             .into_iter()
-            .find(|entry| entry.key.as_str() == key)
-            .ok_or_else(|| MemoryError::NotFound(key.to_owned()))
+            .find(|entry| entry.key.as_str() == query || entry.text == query)
+            .ok_or_else(|| MemoryError::NotFound(query.to_owned()))
     }
 
     pub fn remove(&self, key: &str) -> Result<MemoryEntry, MemoryError> {
@@ -199,9 +203,9 @@ pub fn config_memory_file_path() -> PathBuf {
 }
 
 fn default_memory_file_path() -> PathBuf {
-    std::env::current_dir()
-        .map(|dir| dir.join(".workbuddy").join("memory.json"))
-        .unwrap_or_else(|_| PathBuf::from(".workbuddy").join("memory.json"))
+    dirs::home_dir()
+        .map(|home| home.join(".workbuddy").join("memory.json"))
+        .unwrap_or_else(|| PathBuf::from(".workbuddy").join("memory.json"))
 }
 
 pub fn add(
@@ -284,6 +288,30 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].key, "key");
         assert_eq!(entries[0].text, "second");
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn add_duplicate_content_is_idempotent_and_get_by_content() {
+        let dir = temp_workspace();
+        let store = MemoryStore::open(&dir).unwrap();
+
+        let first = store.add("alpha", "same content").unwrap();
+        let second = store.add("beta", "same content").unwrap();
+
+        assert_eq!(first.key, "alpha");
+        assert_eq!(second.key, "alpha");
+        assert_eq!(second.text, "same content");
+
+        let entries = store.list(None).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key, "alpha");
+        assert_eq!(entries[0].text, "same content");
+
+        let fetched = store.get("same content").unwrap();
+        assert_eq!(fetched.key, "alpha");
+        assert_eq!(fetched.text, "same content");
 
         cleanup(&dir);
     }

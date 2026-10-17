@@ -509,17 +509,19 @@ async fn main() -> Result<()> {
 }
 
 fn run_memory_command(action: MemoryAction, cfg: &Config) -> Result<()> {
+    let mut store = memory::MemoryStore::open(&cfg.workspace_dir)
+        .map_err(|e| anyhow::anyhow!("加载记忆存储失败: {e}"))?;
     match action {
         MemoryAction::Add { key, text } => {
             if key.trim().is_empty() {
                 anyhow::bail!("记忆键不能为空");
             }
-            memory::add(Some(cfg.workspace_dir.as_path()), &key, &text)
+            store.add(&key, &text)
                 .map_err(|e| anyhow::anyhow!("添加记忆失败: {e}"))?;
             println!("已保存记忆：{} = {}", key, text);
         }
         MemoryAction::List { filter } => {
-            let entries = memory::list(Some(cfg.workspace_dir.as_path()), filter.as_deref())
+            let entries = store.list(filter.as_deref())
                 .map_err(|e| anyhow::anyhow!("列出记忆失败: {e}"))?;
             if entries.is_empty() {
                 println!("(暂无记忆)");
@@ -533,7 +535,7 @@ fn run_memory_command(action: MemoryAction, cfg: &Config) -> Result<()> {
             if key.trim().is_empty() {
                 anyhow::bail!("记忆键不能为空");
             }
-            match memory::get(Some(cfg.workspace_dir.as_path()), &key) {
+            match store.get(&key) {
                 Ok(entry) => println!("{} = {}", key, entry.text),
                 Err(memory::MemoryError::NotFound(_)) => anyhow::bail!("未找到记忆键: {}", key),
                 Err(e) => anyhow::bail!("获取记忆失败: {e}"),
