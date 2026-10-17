@@ -159,7 +159,7 @@ async fn get_run(
                         Json(json!({ "error": "internal server error" })),
                     )
                 })?;
-                return Ok(Json(summarize_run_json(&value)));
+                return Ok(Json(value));
             }
             Err(_) => {
                 return Err((
@@ -172,7 +172,7 @@ async fn get_run(
 
     if let Some(body) = find_run_in_history_files(&state.workspace_dir, &id) {
         match serde_json::from_str::<serde_json::Value>(&body) {
-            Ok(value) => return Ok(Json(summarize_run_json(&value))),
+            Ok(value) => return Ok(Json(value)),
             Err(_) => {
                 return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -202,7 +202,7 @@ fn build_run_by_id(workspace_dir: &Path, id: &str) -> Option<serde_json::Value> 
     if let Ok(ws) = Workspace::open(workspace_dir, id) {
         if let Ok(run) = ws.load_record() {
             if let Ok(value) = serde_json::to_value(run) {
-                return Some(summarize_run_json(&value));
+                return Some(value);
             }
         }
     }
