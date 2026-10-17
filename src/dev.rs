@@ -450,39 +450,23 @@ pub async fn run_dev_loop(
         }
     });
 
-    // 若用户通过 --task 指定了任务(数字索引或标题/前缀),先解析为目标任务。
-    // 再将 TaskId 转换为 backlog 索引。
-    let selected_task: Option<crate::task_id::TaskId> = if let Some(ref input) = opts.task {
+    // 若用户通过 --task 指定了任务(数字索引或标题/前缀),调用 task_id::parse_task_selector 解析。
+    let selected_idx: Option<usize> = if let Some(ref input) = opts.task {
         let titles: Vec<String> = backlog.iter().map(|t| t.title.clone()).collect();
-        match crate::task_id::resolve_task_id(input, &titles) {
-            Ok(id) => Some(id),
+        match crate::task_id::parse_task_selector(input, &titles) {
+            Ok(task_id) => Some(match task_id {
+                crate::task_id::TaskId::Numeric(idx) => idx,
+                crate::task_id::TaskId::Slug(slug) => {
+                    match backlog.iter().position(|t| crate::task_id::TaskId::slugify(&t.title) == slug) {
+                        Some(idx) => idx,
+                        None => bail!("无法解析任务 '{}': 标题 slug 未匹配", input),
+                    }
+                }
+            }),
             Err(e) => bail!("无法解析任务 '{}': {}", input, e),
         }
     } else {
         None
-    };
-    let selected_idx: Option<usize> = match selected_task {
-        Some(crate::task_id::TaskId::Numeric(n)) => {
-            if n < backlog.len() {
-                Some(n)
-            } else {
-                bail!("指定任务索引 {} 超出范围 (共 {} 项)", n, backlog.len())
-            }
-        }
-        Some(crate::task_id::TaskId::Slug(slug)) => {
-            let matches: Vec<usize> = backlog
-                .iter()
-                .enumerate()
-                .filter(|(_, t)| crate::task_id::TaskId::slugify(&t.title) == slug)
-                .map(|(i, _)| i)
-                .collect();
-            match matches.len() {
-                1 => Some(matches[0]),
-                0 => bail!("任务 '{}' 未在 backlog 中找到", slug),
-                _ => bail!("任务 '{}' 匹配多个条目, 请使用数字索引", slug),
-            }
-        }
-        None => None,
     };
 
     eprintln!(

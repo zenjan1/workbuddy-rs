@@ -291,6 +291,69 @@ where
     })
 }
 
+/// 解析任务选择输入。
+///
+/// 若输入为非负整数，则按数字索引定位任务（保持旧行为），并检查越界；
+/// 否则按标题精确匹配，唯一命中返回对应 TaskId；
+/// 精确匹配无结果时按标题前缀模糊匹配；
+/// 无命中返回 NotFound，多个命中返回 Ambiguous 并列出候选。
+pub fn parse_task_selector<I, S>(raw: &str, titles: I) -> Result<TaskId, TaskIdError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let title_list: Vec<String> = titles
+        .into_iter()
+        .map(|s| s.as_ref().to_string())
+        .collect();
+
+    // 1. 数字输入优先按索引解析，并检查越界。
+    if let Ok(index) = raw.parse::<usize>() {
+        if index >= title_list.len() {
+            return Err(TaskIdError::NotFound {
+                query: raw.to_string(),
+                available: title_list,
+            });
+        }
+        return Ok(TaskId::Numeric(index));
+    }
+
+    let query_title = raw.trim().to_lowercase();
+    if !query_title.is_empty() {
+        // 2. 标题精确匹配（忽略大小写与首尾空白）。
+        let mut exact_matches: Vec<(usize, String)> = Vec::new();
+        for (index, title) in title_list.iter().enumerate() {
+            if title.trim().to_lowercase() == query_title {
+                exact_matches.push((index, title.clone()));
+            }
+        }
+        match exact_matches.len() {
+            1 => return Ok(resolved_id_from_match(&exact_matches[0])),
+            0 => {}
+            _ => return Err(duplicate_or_ambiguous(raw, exact_matches)),
+        }
+
+        // 3. 标题前缀模糊匹配（忽略大小写与首尾空白）。
+        let mut prefix_matches: Vec<(usize, String)> = Vec::new();
+        for (index, title) in title_list.iter().enumerate() {
+            if title.trim().to_lowercase().starts_with(&query_title) {
+                prefix_matches.push((index, title.clone()));
+            }
+        }
+        match prefix_matches.len() {
+            1 => return Ok(resolved_id_from_match(&prefix_matches[0])),
+            0 => {}
+            _ => return Err(duplicate_or_ambiguous(raw, prefix_matches)),
+        }
+    }
+
+    // 4. 无匹配返回 NotFound。
+    Err(TaskIdError::NotFound {
+        query: raw.to_string(),
+        available: title_list,
+    })
+}
+
 /// Helper: 从“索引 + 标题”返回 TaskId。
 /// 若标题无法生成非空 slug，则回退为数字索引。
 fn resolved_id_from_match(matched: &(usize, String)) -> TaskId {
@@ -583,5 +646,54 @@ mod tests {
             resolve_task_id("SETUP", titles),
             Err(TaskIdError::Ambiguous { .. })
         ));
+    }
+
+    #[test]
+    fn parse_selector_numeric_index_compat() {
+        let titles = ["Write docs", "Fix bug"];
+        assert_eq!(parse_task_selector("1", titles), Ok(TaskId::Numeric(1)));
+        assert_eq!(parse_task_selector("0", titles), Ok(TaskId::Numeric(0)));
+        // 越界索引返回 NotFound 错误。
+        assert!(matches!(
+            parse_task_selector("2", titles),
+            Err(TaskIdError::NotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_selector_exact_title_match() {
+        let titles = ["Write docs", "Fix login bug"];
+        assert_eq!(
+            parse_task_selector("fix login bug", titles),
+            Ok(TaskId::Slug("fix-login-bug".to_string()))
+        );
+        assert_eq!(
+            parse_task_selector("Write docs", titles),
+            Ok(TaskId::Slug("write-docs".to_string()))
+        );
+        assert_eq!(
+            parse_task_selector("  FIX LOGIN BUG  ", titles),
+            Ok(TaskId::Slug("fix-login-bug".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_selector_unique_prefix_match() {
+        let titles = ["my feature", "my bug"];
+        assert_eq!(
+            parse_task_selector("my feat", titles),
+            Ok(TaskId::Slug("my-feature".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_selector_ambiguous_prefix_reports_error() {
+        let titles = ["Setup server", "Setup client"];
+        let err = parse_task_selector("setup", titles).unwrap_err();
+        assert!(matches!(err, TaskIdError::Ambiguous { .. }));
+        if let TaskIdError::Ambiguous { matches, .. } = err {
+            assert!(matches.iter().any(|m| m == "Setup server"));
+            assert!(matches.iter().any(|m| m == "Setup client"));
+        }
     }
 }

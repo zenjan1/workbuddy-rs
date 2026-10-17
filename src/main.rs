@@ -201,7 +201,7 @@ fn resolve_task_run<'a>(
     runs: &'a [RunRecord],
     id: &str,
 ) -> anyhow::Result<Option<&'a RunRecord>> {
-    match crate::task_id::resolve_task_id(id, runs.iter().map(|r| r.goal.as_str())) {
+    match crate::task_id::parse_task_selector(id, runs.iter().map(|r| r.goal.as_str())) {
         Ok(crate::task_id::TaskId::Numeric(idx)) => runs
             .get(idx)
             .map(Some)
