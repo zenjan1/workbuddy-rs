@@ -16,45 +16,7 @@ mod serve;
 mod status;
 mod task_id;
 mod tui;
-mod review {
-    use super::*;
-    use anyhow::anyhow;
-    use std::process::Command;
-
-    pub async fn review(cfg: Config) -> Result<()> {
-        let output = Command::new("git")
-            .args(["diff", "--cached"])
-            .output()
-            .map_err(|e| anyhow!("git diff --cached 失败: {e}"))?;
-        let cached_diff = String::from_utf8_lossy(&output.stdout).to_string();
-        let diff = if cached_diff.trim().is_empty() {
-            let output = Command::new("git")
-                .args(["diff"])
-                .output()
-                .map_err(|e| anyhow!("git diff 失败: {e}"))?;
-            String::from_utf8_lossy(&output.stdout).to_string()
-        } else {
-            cached_diff
-        };
-        if diff.trim().is_empty() {
-            println!("没有需要评审的 diff");
-            return Ok(());
-        }
-
-        let llm: Arc<dyn Llm> = if cfg.mock {
-            Arc::new(MockLlm)
-        } else {
-            Arc::new(OpenAiCompat::new(&cfg)?)
-        };
-        let system = "你是一位资深代码评审专家(reviewer)。";
-        let prompt = format!(
-            "请对以下 git diff 进行提交前的自评审,指出潜在问题:\n\n{diff}"
-        );
-        let output = llm.chat(system, &prompt).await?;
-        println!("{}", output.text);
-        Ok(())
-    }
-}
+mod review;
 mod resolver;
 mod util;
 mod utils;
@@ -337,7 +299,18 @@ async fn main() -> Result<()> {
             cmd_show(cfg, &run.id)
         }
         Cmd::Agents => cmd_agents(),
-        Cmd::Review => review::review(cfg).await,
+        Cmd::Review => {
+            let llm: Box<dyn Llm> = if cfg.mock {
+                Box::new(MockLlm)
+            } else {
+                Box::new(OpenAiCompat::new(&cfg)?)
+            };
+            let code = review::run_review_command(llm.as_ref(), &cfg).await?;
+            if code != 0 {
+                std::process::exit(code as i32);
+            }
+            Ok(())
+        }
         Cmd::Config { action, get } => {
             if get.is_some() && action.is_some() {
                 anyhow::bail!("--get 不能与子命令同时使用");
@@ -769,17 +742,17 @@ mod config_set_tests {
             &path,
             r#"
 model = "old-model"
-timeout = 30
+request_timeout_secs = 30
 
 [other]
 nested = "keep"
 "#,
         );
 
-        crate::config::set_config(&path, "timeout", "45").unwrap();
+        crate::config::set_config(&path, "request_timeout_secs", "45").unwrap();
 
         let contents = read_config(&path);
-        assert!(contents.contains("timeout = 45"), "timeout should be updated: {contents}");
+        assert!(contents.contains("request_timeout_secs = 45"), "request_timeout_secs should be updated: {contents}");
         assert!(
             contents.contains("model = \"old-model\""),
             "model should be preserved: {contents}"
@@ -799,14 +772,14 @@ nested = "keep"
             &path,
             r#"
 model = "old-model"
-timeout = 30
+request_timeout_secs = 30
 "#,
         );
         let before = read_config(&path);
 
-        let result = crate::config::set_config(&path, "timeout", "not-a-number");
+        let result = crate::config::set_config(&path, "request_timeout_secs", "not-a-number");
 
-        assert!(result.is_err(), "invalid timeout value should be rejected");
+        assert!(result.is_err(), "invalid request_timeout_secs value should be rejected");
         let after = read_config(&path);
         assert_eq!(before, after, "config file must not change after error");
         let _ = std::fs::remove_file(&path);

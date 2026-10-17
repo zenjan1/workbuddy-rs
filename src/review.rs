@@ -22,7 +22,23 @@ impl<T: crate::llm::Llm> LlmClient for T {
         system: &'a str,
         user: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
-        crate::llm::Llm::chat(self, system, user)
+        Box::pin(async move {
+            let response = crate::llm::Llm::chat(self, system, user).await?;
+            Ok(response.text)
+        })
+    }
+}
+
+impl LlmClient for dyn crate::llm::Llm {
+    fn chat<'a>(
+        &'a self,
+        system: &'a str,
+        user: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
+        Box::pin(async move {
+            let response = crate::llm::Llm::chat(self, system, user).await?;
+            Ok(response.text)
+        })
     }
 }
 
@@ -60,7 +76,7 @@ pub fn collect_diff() -> Result<String> {
     Ok(String::new())
 }
 
-pub async fn review_changes<C: LlmClient>(
+pub async fn review_changes<C: LlmClient + ?Sized>(
     client: &C,
     cfg: &Config,
     diff: &str,
@@ -92,6 +108,107 @@ pub async fn run_review<C: LlmClient>(client: &C, cfg: &Config) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn collect_uncommitted_diff() -> Result<String> {
+    let output = Command::new("git")
+        .args(["diff", "HEAD", "--no-color"])
+        .output();
+    if let Ok(output) = output {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            if !stdout.trim().is_empty() {
+                return Ok(stdout);
+            }
+        }
+    }
+
+    let output = Command::new("git")
+        .args(["diff", "--no-color"])
+        .output()
+        .with_context(|| "failed to run git diff")?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+    }
+
+    Ok(String::new())
+}
+
+fn severity_to_str(severity: &Severity) -> &'static str {
+    match severity {
+        Severity::Error => "blocking",
+        Severity::Warning => "warning",
+        Severity::Info => "info",
+    }
+}
+
+fn violations_to_json(violations: &[Violation]) -> serde_json::Value {
+    let mut arr = Vec::new();
+    for v in violations {
+        arr.push(serde_json::json!({
+            "severity": severity_to_str(&v.severity),
+            "file": v.file,
+            "line": v.line,
+            "message": v.message,
+            "rule": v.rule,
+        }));
+    }
+    serde_json::Value::Array(arr)
+}
+
+fn parse_llm_issues(review: &str) -> Vec<Violation> {
+    let trimmed = review.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        if let Some(arr) = value.as_array() {
+            let mut violations = Vec::new();
+            for item in arr {
+                let severity_str = item.get("severity").and_then(|v| v.as_str()).unwrap_or("warning");
+                let severity = match severity_str {
+                    "blocking" | "error" => Severity::Error,
+                    "warning" => Severity::Warning,
+                    _ => Severity::Info,
+                };
+                let file = item.get("file").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let line = item.get("line").and_then(|v| v.as_u64()).map(|n| n as usize);
+                let message = item.get("message").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let rule = item.get("rule").and_then(|v| v.as_str()).unwrap_or("llm").to_string();
+                violations.push(Violation::new(rule, file, line, severity, message));
+            }
+            return violations;
+        }
+    }
+
+    vec![Violation::new("llm", "", None, Severity::Info, review.to_string())]
+}
+
+pub async fn run_review_command<C: LlmClient + ?Sized>(client: &C, cfg: &Config) -> Result<u8> {
+    let diff = collect_uncommitted_diff()?;
+    run_review_command_with_diff(client, cfg, &diff).await
+}
+
+pub async fn run_review_command_with_diff<C: LlmClient + ?Sized>(
+    client: &C,
+    cfg: &Config,
+    diff: &str,
+) -> Result<u8> {
+    let mut violations = run_rules_against_diff(diff).violations;
+
+    let should_review = !cfg.model.trim().is_empty() && !diff.trim().is_empty();
+    if should_review {
+        if let Some(review) = review_changes(client, cfg, diff).await? {
+            violations.extend(parse_llm_issues(&review));
+        }
+    }
+
+    let json = violations_to_json(&violations);
+    println!("{}", serde_json::to_string_pretty(&json)?);
+
+    let blocking = violations.iter().any(|v| v.severity == Severity::Error);
+    Ok(if blocking { 1 } else { 0 })
 }
 
 #[cfg(test)]
@@ -138,6 +255,9 @@ mod tests {
             max_budget: 0.0,
             cost_per_1k_tokens: 0.0,
             mock: true,
+            pre_commit_review: false,
+            review_enabled: false,
+            webhook_enabled: false,
             webhook_url: None,
             webhook_retry: 0,
             webhook_timeout_secs: 5,
@@ -341,11 +461,69 @@ impl Rule for FormatRule {
     }
 }
 
+pub struct DebugResidueRule;
+
+impl Rule for DebugResidueRule {
+    fn name(&self) -> &str { "debug-residue" }
+
+    fn check(&self, files: &[FileDiff]) -> Vec<Violation> {
+        let mut violations = Vec::new();
+        for file in files {
+            for (line_num, content) in &file.added_lines {
+                let trimmed = content.trim();
+                if trimmed.contains("dbg!")
+                    || trimmed.contains("println!")
+                    || trimmed.contains("eprintln!")
+                {
+                    violations.push(Violation::new(
+                        self.name(),
+                        file.path.clone(),
+                        Some(*line_num),
+                        Severity::Warning,
+                        format!("调试残留: {}", trimmed),
+                    ));
+                }
+            }
+        }
+        violations
+    }
+}
+
+pub struct ConflictMarkerRule;
+
+impl Rule for ConflictMarkerRule {
+    fn name(&self) -> &str { "conflict-marker" }
+
+    fn check(&self, files: &[FileDiff]) -> Vec<Violation> {
+        let mut violations = Vec::new();
+        for file in files {
+            for (line_num, content) in &file.added_lines {
+                let trimmed = content.trim();
+                if trimmed.starts_with("<<<<<<<")
+                    || trimmed == "======="
+                    || trimmed.starts_with(">>>>>>>")
+                {
+                    violations.push(Violation::new(
+                        self.name(),
+                        file.path.clone(),
+                        Some(*line_num),
+                        Severity::Error,
+                        format!("冲突标记: {}", trimmed),
+                    ));
+                }
+            }
+        }
+        violations
+    }
+}
+
 pub fn default_rules() -> Vec<Box<dyn Rule>> {
     vec![
         Box::new(TodoRule),
         Box::new(MissingTestRule),
         Box::new(FormatRule),
+        Box::new(DebugResidueRule),
+        Box::new(ConflictMarkerRule),
     ]
 }
 
@@ -355,6 +533,20 @@ pub fn parse_diff(diff: &str) -> Vec<FileDiff> {
     let mut new_line = 1usize;
 
     for raw in diff.lines() {
+        if raw.starts_with("diff --git ") {
+            let rest = raw.strip_prefix("diff --git ").unwrap_or_default();
+            let mut parts = rest.split_whitespace();
+            let _ = parts.next();
+            let b = parts.next().unwrap_or_default();
+            let path = b.strip_prefix("b/").unwrap_or(b).split('\t').next().unwrap_or_default().to_string();
+            if !path.is_empty() {
+                if let Some(f) = current.replace(FileDiff { path: path.clone(), added_lines: Vec::new() }) {
+                    files.push(f);
+                }
+                new_line = 1;
+            }
+            continue;
+        }
         if raw.starts_with("+++ b/") {
             let path = raw.strip_prefix("+++ b/").unwrap_or_default().split('\t').next().unwrap_or_default().to_string();
             if let Some(f) = current.replace(FileDiff { path: path.clone(), added_lines: Vec::new() }) {
@@ -485,5 +677,110 @@ mod tests_local_rules {
         assert!(report.violations.iter().any(|v| v.rule == "todo"));
         assert!(report.violations.iter().any(|v| v.rule == "format"));
         assert!(report.violations.iter().any(|v| v.rule == "missing-test"));
+    }
+}
+
+#[cfg(test)]
+mod tests_run_review_command {
+    use super::*;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
+
+    fn config_with_model(model: &str) -> Config {
+        Config {
+            api_key: None,
+            base_url: "http://localhost".to_string(),
+            model: model.to_string(),
+            max_parallel: 1,
+            workspace_dir: std::env::temp_dir(),
+            repo_dir: std::env::temp_dir(),
+            request_timeout_secs: 30,
+            price: 0.0,
+            max_budget: 0.0,
+            cost_per_1k_tokens: 0.0,
+            mock: false,
+            pre_commit_review: false,
+            review_enabled: false,
+            webhook_enabled: false,
+            webhook_url: None,
+            webhook_retry: 0,
+            webhook_timeout_secs: 5,
+        }
+    }
+
+    struct MockLlm {
+        calls: Arc<Mutex<Vec<(String, String)>>>,
+        response: String,
+    }
+
+    impl MockLlm {
+        fn new(calls: Arc<Mutex<Vec<(String, String)>>>, response: &str) -> Self {
+            Self {
+                calls,
+                response: response.to_string(),
+            }
+        }
+    }
+
+    impl LlmClient for MockLlm {
+        fn chat<'a>(
+            &'a self,
+            system: &'a str,
+            user: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
+            let calls = self.calls.clone();
+            let response = self.response.clone();
+            let system = system.to_string();
+            let user = user.to_string();
+            Box::pin(async move {
+                calls.lock().unwrap().push((system, user));
+                Ok(response)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn local_static_checks_detect_debug_and_conflict() {
+        let diff = "diff --git a/src/foo.rs b/src/foo.rs\n@@ -1,2 +1,3 @@\n+<<<<<<< HEAD\n+println!(\"debug\");\n+let x = 1;\n";
+        let report = run_rules_against_diff(diff);
+        assert!(report.violations.iter().any(|v| v.rule == "debug-residue" && v.severity == Severity::Warning));
+        assert!(report.violations.iter().any(|v| v.rule == "conflict-marker" && v.severity == Severity::Error));
+    }
+
+    #[test]
+    fn json_output_contains_expected_fields() {
+        let diff = "diff --git a/src/foo.rs b/src/foo.rs\n@@ -1,2 +1,3 @@\n+<<<<<<< HEAD\n+println!(\"debug\");\n+let x = 1;\n";
+        let report = run_rules_against_diff(diff);
+        let json = violations_to_json(&report.violations);
+        let arr = json.as_array().unwrap();
+        assert!(!arr.is_empty());
+        let first = &arr[0];
+        assert!(first.get("severity").is_some());
+        assert!(first.get("file").is_some());
+        assert!(first.get("line").is_some());
+        assert!(first.get("message").is_some());
+    }
+
+    #[tokio::test]
+    async fn run_review_command_invokes_llm_when_model_set() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mock = MockLlm::new(calls.clone(), "[]");
+        let cfg = config_with_model("reviewer-model");
+        let diff = "diff --git a/src/foo.rs b/src/foo.rs\n@@ -1,2 +1,3 @@\n+fn main() {}\n";
+        let code = run_review_command_with_diff(&mock, &cfg, diff).await.unwrap();
+        assert_eq!(code, 0);
+        assert_eq!(calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn run_review_command_returns_nonzero_on_blocking() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mock = MockLlm::new(calls.clone(), "[]");
+        let cfg = config_with_model("");
+        let diff = "diff --git a/src/foo.rs b/src/foo.rs\n@@ -1,2 +1,3 @@\n+<<<<<<< HEAD\n";
+        let code = run_review_command_with_diff(&mock, &cfg, diff).await.unwrap();
+        assert_eq!(code, 1);
+        assert_eq!(calls.lock().unwrap().len(), 0);
     }
 }
