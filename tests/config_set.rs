@@ -649,3 +649,76 @@ fn cli_config_set_llm_model_reloads_and_reads_back() {
     let read_back = get_config_value(&ws.config_path(), "llm.model").expect("get llm.model");
     assert_eq!(read_back, "gpt-4o", "config value read back did not match");
 }
+
+#[test]
+fn config_set_rejects_unknown_top_level_key() {
+    let ws = TestWorkspace::new();
+    ws.write_initial_config();
+
+    let original = read_config(&ws);
+
+    let result = set_config_value(&ws.config_path(), "unknown_top_level", "value");
+    let err = result
+        .expect_err("setting an unknown top-level key should return an error")
+        .to_string();
+    assert!(
+        err.to_lowercase().contains("unknown") || err.to_lowercase().contains("invalid"),
+        "error message should mention unknown/invalid key, got: {}",
+        err
+    );
+    assert!(
+        err.contains("unknown_top_level"),
+        "error message should mention the rejected key, got: {}",
+        err
+    );
+
+    assert_eq!(
+        read_config(&ws),
+        original,
+        "config file changed after rejected top-level key update"
+    );
+}
+
+#[test]
+fn config_set_automatic_type_conversion_persists_across_reads() {
+    let ws = TestWorkspace::new();
+    fs::write(
+        ws.config_path(),
+        "model = \"default-model\"\nmax_budget = 5000\nstream = true\n",
+    )
+    .expect("failed to write initial config");
+
+    set_config_value(&ws.config_path(), "model", "gpt-4o").expect("set model");
+    set_config_value(&ws.config_path(), "max_budget", "12000").expect("set max_budget");
+    set_config_value(&ws.config_path(), "stream", "false").expect("set stream");
+
+    let raw = read_config(&ws);
+    assert!(
+        raw.contains("model = \"gpt-4o\""),
+        "model was not updated: {}",
+        raw
+    );
+    assert!(
+        raw.contains("max_budget = 12000"),
+        "max_budget was not updated: {}",
+        raw
+    );
+    assert!(
+        raw.contains("stream = false"),
+        "stream was not updated: {}",
+        raw
+    );
+
+    assert_eq!(
+        get_config_value(&ws.config_path(), "model").expect("get model"),
+        "gpt-4o"
+    );
+    assert_eq!(
+        get_config_value(&ws.config_path(), "max_budget").expect("get max_budget"),
+        "12000"
+    );
+    assert_eq!(
+        get_config_value(&ws.config_path(), "stream").expect("get stream"),
+        "false"
+    );
+}
