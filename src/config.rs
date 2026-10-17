@@ -315,7 +315,7 @@ impl Config {
                 let path = Self::config_file_path();
                 let old_value = self.get_value(canonical_key)
                     .with_context(|| format!("读取旧值失败: {canonical_key}"))?;
-                let updated = self.updated(canonical_key, value)?;
+                let updated = { let mut updated = self.clone(); updated.apply_value(canonical_key, value)?; updated };
                 Self::update_config_file(&path, "cost.input_price_per_mtok", value)
                     .with_context(|| format!("写入配置文件失败: {}", path.display()))?;
                 let new_value = updated.get_value(canonical_key)
@@ -333,7 +333,7 @@ impl Config {
                 let path = Self::config_file_path();
                 let old_value = self.get_value(canonical_key)
                     .with_context(|| format!("读取旧值失败: {canonical_key}"))?;
-                let updated = self.updated(canonical_key, value)?;
+                let updated = { let mut updated = self.clone(); updated.apply_value(canonical_key, value)?; updated };
                 Self::update_config_file(&path, "llm.max_budget", value)
                     .with_context(|| format!("写入配置文件失败: {}", path.display()))?;
                 let new_value = updated.get_value(canonical_key)
@@ -350,7 +350,7 @@ impl Config {
             ["executor", "timeout"] => {
                 let canonical_key = "timeout";
                 let old_value = self.get_value(canonical_key)?;
-                let updated = self.updated(canonical_key, value)?;
+                let updated = { let mut updated = self.clone(); updated.apply_value(canonical_key, value)?; updated };
                 Self::update_config_file(&Self::config_file_path(), "executor.timeout", value)?;
                 let new_value = updated.get_value(canonical_key)?;
                 *self = updated;
@@ -390,7 +390,7 @@ impl Config {
 
         let old_value = self.get_value(canonical_key)
             .with_context(|| format!("读取旧值失败: {canonical_key}"))?;
-        let updated = self.updated(canonical_key, value)?;
+        let updated = { let mut updated = self.clone(); updated.apply_value(canonical_key, value)?; updated };
         Self::update_config_file(&path, canonical_key, value)
             .with_context(|| format!("写入配置文件失败: {}", path.display()))?;
 
@@ -406,7 +406,8 @@ impl Config {
         })
     }
 
-    fn apply_value(&mut self, key: &str, value: &str) -> Result<()> {
+    /// 校验并应用配置值，支持字符串/数值/布尔类型转换与范围检查。
+    pub fn apply_value(&mut self, key: &str, value: &str) -> Result<()> {
         match key {
             "max_budget" | "price" | "cost_per_1k_tokens" => {
                 let n: f64 = value
