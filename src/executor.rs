@@ -67,31 +67,30 @@ impl Executor {
         result: &Result<(Vec<StepResult>, String)>,
         elapsed_ms: u64,
     ) {
-        let webhooks = {
-            let guard = crate::config::WEBHOOKS.read().unwrap();
-            guard.clone()
-        };
-        if webhooks.is_empty() {
-            return;
-        }
-        let (status, summary) = match result {
-            Ok((results, summary)) => {
-                if results.iter().any(|r| !r.ok) {
-                    ("failure", summary.clone())
+        let (status, error) = match result {
+            Ok((results, _summary)) => {
+                if let Some(first_failed) = results.iter().find(|r| !r.ok) {
+                    (
+                        "failed",
+                        first_failed
+                            .error
+                            .clone()
+                            .or_else(|| Some("任务执行未成功".to_string())),
+                    )
                 } else {
-                    ("success", summary.clone())
+                    ("completed", None)
                 }
             }
-            Err(e) => ("failure", format!("执行失败: {:#}", e)),
+            Err(e) => ("failed", Some(format!("执行失败: {:#}", e))),
         };
-        let urls: Vec<String> = webhooks.iter().map(|w| w.url.clone()).collect();
-        let payload = crate::webhook::Payload {
-            title: format!("[{}] {} — {}", status, plan.goal, summary),
-            status: status.to_string(),
-            summary: summary.clone(),
-            duration_ms: elapsed_ms,
-        };
-        crate::webhook::notify_webhooks(&urls, &payload);
+        crate::webhook::notify_task_finished(
+            &self.cfg,
+            &plan.goal,
+            &plan.goal,
+            status,
+            elapsed_ms,
+            error.as_deref(),
+        );
     }
 
     fn save_output(&self, id: usize, text: &str) {
