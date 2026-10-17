@@ -17,6 +17,7 @@ struct SupervisorStatus {
     supervisor_running: bool,
     pid: Option<u32>,
     last_log: Option<String>,
+    recent_logs: Vec<String>,
     completed: usize,
     failed: usize,
 }
@@ -191,20 +192,31 @@ fn parse_status_inner(
         } else if workspace_dir.join("runs").is_dir() {
             StatusSummary::from_history_with_limit(&[], 5)
         } else {
-            anyhow::bail!(
-                "missing status metadata: no run history, log, status, or runs directory in {}",
-                workspace_dir.display()
-            );
+            StatusSummary::from_history_with_limit(&[], 5)
         }
     };
     summary.supervisor_running = supervisor_running;
     summary.running = supervisor_running;
     summary.pid = pid;
 
+    if let Ok(logs) = read_memory_recent_logs(workspace_dir, 5) {
+        if !logs.is_empty() {
+            summary.recent_logs = logs;
+        }
+    }
+
     // 如果本地状态文件存在，则优先采用其中显式给出的完成/失败计数；
     // 若历史日志为空，则使用状态文件中的最近日志尾部。
-    let status_path = workspace_dir.join(STATUS_FILE_NAME);
-    if status_path.exists() {
+    let direct_status = workspace_dir.join(STATUS_FILE_NAME);
+    let nested_status = workspace_dir.join(".workbuddy").join(STATUS_FILE_NAME);
+    let status_path = if direct_status.exists() {
+        Some(direct_status)
+    } else if nested_status.exists() {
+        Some(nested_status)
+    } else {
+        None
+    };
+    if let Some(status_path) = status_path {
         let data = fs::read_to_string(&status_path)
             .with_context(|| format!("读取状态文件失败 {}", status_path.display()))?;
         let supervisor_status: SupervisorStatus = serde_json::from_str(&data)
@@ -220,7 +232,17 @@ fn parse_status_inner(
             summary.failed_runs = supervisor_status.failed;
             summary.failed = supervisor_status.failed;
         }
-        if summary.recent_logs.is_empty() {
+        if !supervisor_status.recent_logs.is_empty() {
+            let limit = 5usize;
+            summary.recent_logs = supervisor_status
+                .recent_logs
+                .iter()
+                .rev()
+                .take(limit)
+                .rev()
+                .cloned()
+                .collect();
+        } else if summary.recent_logs.is_empty() {
             if let Some(last_log) = supervisor_status.last_log {
                 summary.recent_logs.push(last_log);
             }
@@ -490,7 +512,7 @@ fn read_legacy_count(workspace_dir: &Path, name: &str) -> anyhow::Result<usize> 
         fs::read_to_string(&path)
             .with_context(|| format!("读取 {} 失败", path.display()))?
     } else {
-        anyhow::bail!("missing {} count file", name)
+        return Ok(0);
     };
     let trimmed = content.trim();
     trimmed
@@ -499,16 +521,42 @@ fn read_legacy_count(workspace_dir: &Path, name: &str) -> anyhow::Result<usize> 
 }
 
 fn read_legacy_logs(workspace_dir: &Path) -> anyhow::Result<Vec<String>> {
-    let log_path = workspace_dir.join("workbuddy.log");
-    let data = fs::read_to_string(&log_path)
-        .with_context(|| format!("读取工作日志失败 {}", log_path.display()))?;
-    let mut lines: Vec<String> = data
-        .lines()
-        .map(|line| line.trim().to_string())
-        .filter(|line| !line.is_empty())
-        .collect();
-    let split_at = lines.len().saturating_sub(5);
-    Ok(lines.split_off(split_at))
+    read_log_file_recent(workspace_dir, &["workbuddy.log"], 5)
+}
+
+fn read_memory_recent_logs(workspace_dir: &Path, limit: usize) -> anyhow::Result<Vec<String>> {
+    read_log_file_recent(
+        workspace_dir,
+        &["memory.jsonl", "memory.log", "workbuddy.log"],
+        limit,
+    )
+}
+
+fn read_log_file_recent(
+    workspace_dir: &Path,
+    file_names: &[&str],
+    limit: usize,
+) -> anyhow::Result<Vec<String>> {
+    for file_name in file_names {
+        let log_path = workspace_dir.join(file_name);
+        if !log_path.exists() {
+            continue;
+        }
+        let data = fs::read_to_string(&log_path)
+            .with_context(|| format!("读取工作日志失败 {}", log_path.display()))?;
+        let mut lines: Vec<String> = data
+            .lines()
+            .map(|line| line.trim().to_string())
+            .filter(|line| !line.is_empty())
+            .collect();
+        let split_at = lines.len().saturating_sub(limit);
+        let recent = lines.split_off(split_at);
+        return Ok(recent
+            .into_iter()
+            .map(|line| truncate_chars(&line, 160))
+            .collect());
+    }
+    Ok(Vec::new())
 }
 
 pub fn format_status(summary: &StatusSummary) -> String {
@@ -547,9 +595,15 @@ fn truncate_chars(input: &str, max_chars: usize) -> String {
     if input.chars().count() <= max_chars {
         input.to_string()
     } else {
-        let mut truncated: String = input.chars().take(max_chars).collect();
-        truncated.push_str("...");
-        truncated
+        let suffix = "...";
+        let suffix_len = suffix.chars().count();
+        if max_chars <= suffix_len {
+            input.chars().take(max_chars).collect()
+        } else {
+            let mut truncated: String = input.chars().take(max_chars - suffix_len).collect();
+            truncated.push_str(suffix);
+            truncated
+        }
     }
 }
 
@@ -590,6 +644,83 @@ fn split_usage(log: &str) -> (String, Option<String>) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    fn temp_workspace(test_name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "workbuddy-status-test-{}-{}",
+            test_name,
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).expect("create temp workspace dir");
+        path
+    }
+
+    fn cleanup(path: &Path) {
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn no_history_shows_zero_counts_and_friendly_message() {
+        let dir = temp_workspace("no_history");
+        let summary = parse_status(&dir).expect("empty workspace should parse as zero counts");
+        assert_eq!(summary.completed_runs, 0);
+        assert_eq!(summary.failed_runs, 0);
+        assert!(summary.recent_logs.is_empty());
+        let output = format_status(&summary);
+        assert!(output.contains("No run history."));
+        assert!(output.contains("0 completed, 0 failed"));
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn mixed_success_failure_counts_are_computed_from_history() {
+        let history = vec![
+            HistoryEntry { success: true, log: "ok one".to_string() },
+            HistoryEntry { success: false, log: "failed one".to_string() },
+            HistoryEntry { success: true, log: "ok two".to_string() },
+        ];
+        let summary = StatusSummary::from_history(&history);
+        assert_eq!(summary.completed_runs, 2);
+        assert_eq!(summary.failed_runs, 1);
+        assert_eq!(summary.completed, 2);
+        assert_eq!(summary.failed, 1);
+    }
+
+    #[test]
+    fn recent_logs_are_limited_to_n_entries() {
+        let history: Vec<HistoryEntry> = (0..10)
+            .map(|i| HistoryEntry { success: true, log: format!("log {i}") })
+            .collect();
+        let summary = StatusSummary::from_history(&history);
+        assert_eq!(summary.recent_logs.len(), 5);
+        assert_eq!(summary.recent_logs[0], "log 9");
+        assert_eq!(summary.recent_logs[4], "log 5");
+    }
+
+    #[test]
+    fn memory_recent_logs_are_truncated_to_length() {
+        let dir = temp_workspace("memory_recent_logs");
+        let long_line = "m".repeat(200);
+        let content = (0..6)
+            .map(|i| format!("line {i} {long_line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(dir.join("memory.log"), content).expect("write memory.log");
+
+        let logs = read_memory_recent_logs(&dir, 3).expect("read memory recent logs");
+        assert_eq!(logs.len(), 3);
+        assert!(logs[0].starts_with("line 3 "));
+        assert!(logs[0].chars().count() <= 160);
+        assert!(logs[0].ends_with("..."));
+        cleanup(&dir);
+    }
+}
+#[cfg(test)]
+mod extended_tests {
     use super::*;
     use crate::workspace::{RunRecord, StepRecord};
     use std::fs;

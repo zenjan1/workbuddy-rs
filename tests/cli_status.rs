@@ -168,20 +168,14 @@ fn status_parses_mock_state_and_formats_summary() {
 }
 
 #[test]
-fn status_missing_metadata_returns_friendly_error() {
+fn status_missing_metadata_returns_friendly_default() {
     let dir = make_temp_dir();
 
-    let err = workbuddy_rs::status::parse_status(&dir).expect_err("missing metadata should fail");
-    let msg = err.to_string().to_lowercase();
-
-    assert!(
-        msg.contains("missing")
-            || msg.contains("not found")
-            || msg.contains("不存在")
-            || msg.contains("缺少")
-            || msg.contains("no "),
-        "error should be friendly when metadata is missing: {msg}"
-    );
+    let summary = workbuddy_rs::status::parse_status(&dir)
+        .expect("missing metadata should fall back to zero counts");
+    assert_eq!(summary.completed_runs, 0);
+    assert_eq!(summary.failed_runs, 0);
+    assert!(summary.recent_logs.is_empty());
 }
 
 #[test]
@@ -223,4 +217,128 @@ fn status_corrupt_metadata_returns_friendly_error() {
             || msg.contains("错误"),
         "error should be friendly when metadata is corrupt: {msg}"
     );
+}
+
+fn write_status_state(dir: &Path, completed: u64, failed: u64, recent_logs: &[&str]) {
+    let state_dir = dir.join(".workbuddy");
+    fs::create_dir_all(&state_dir).expect("create .workbuddy state dir");
+    let logs = if recent_logs.is_empty() {
+        String::new()
+    } else {
+        recent_logs
+            .iter()
+            .map(|line| format!("    \"{}\"", line))
+            .collect::<Vec<_>>()
+            .join(",\n")
+            + "\n"
+    };
+    let json = format!(
+        r#"{{
+  "supervisor_running": false,
+  "completed": {},
+  "failed": {},
+  "recent_logs": [
+{}
+  ]
+}}"#,
+        completed, failed, logs
+    );
+    fs::write(state_dir.join("status.json"), json).unwrap();
+}
+
+#[test]
+fn status_command_with_no_history_reports_zero_counts_offline() {
+    let dir = make_temp_dir();
+    write_status_state(&dir, 0, 0, &[]);
+
+    let bin = env!("CARGO_BIN_EXE_workbuddy");
+    let output = Command::new(bin)
+        .current_dir(&dir)
+        .arg("status")
+        .output()
+        .expect("failed to run workbuddy status");
+
+    assert!(output.status.success(), "status exited with {:?}", output.status);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr_lower = stderr.to_lowercase();
+
+    assert!(
+        !stderr_lower.contains("error") && !stderr_lower.contains("panic"),
+        "stderr should not contain errors: {stderr}"
+    );
+    assert!(stdout.contains('0'), "stdout should report zero counts: {stdout}");
+}
+
+#[test]
+fn status_with_mixed_success_and_failure_counts_accurately() {
+    let dir = make_temp_dir();
+    write_status_state(&dir, 424242, 434343, &["alpha-success", "beta-failure", "gamma-success"]);
+
+    let bin = env!("CARGO_BIN_EXE_workbuddy");
+    let output = Command::new(bin)
+        .current_dir(&dir)
+        .arg("status")
+        .output()
+        .expect("failed to run workbuddy status");
+
+    assert!(output.status.success(), "status exited with {:?}", output.status);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr_lower = stderr.to_lowercase();
+
+    assert!(
+        !stderr_lower.contains("error") && !stderr_lower.contains("panic"),
+        "stderr should not contain errors: {stderr}"
+    );
+    assert!(stdout.contains("424242"), "stdout should show completed count: {stdout}");
+    assert!(stdout.contains("434343"), "stdout should show failed count: {stdout}");
+}
+
+#[test]
+fn status_format_truncates_recent_logs_to_latest_five() {
+    let dir = make_temp_dir();
+    write_status_state(
+        &dir,
+        1,
+        1,
+        &[
+            "OLD_LOG_A",
+            "OLD_LOG_B",
+            "OLD_LOG_C",
+            "RECENT_LOG_1",
+            "RECENT_LOG_2",
+            "RECENT_LOG_3",
+            "RECENT_LOG_4",
+            "RECENT_LOG_5",
+        ],
+    );
+
+    let report = workbuddy_rs::status::parse_status(&dir).expect("state with many logs should parse");
+    let output = workbuddy_rs::status::format_status(&report);
+
+    for keep in [
+        "RECENT_LOG_1",
+        "RECENT_LOG_2",
+        "RECENT_LOG_3",
+        "RECENT_LOG_4",
+        "RECENT_LOG_5",
+    ] {
+        assert!(output.contains(keep), "recent log {keep} should be shown: {output}");
+    }
+    for old in ["OLD_LOG_A", "OLD_LOG_B", "OLD_LOG_C"] {
+        assert!(!output.contains(old), "old log {old} should be truncated: {output}");
+    }
+}
+
+#[test]
+fn status_report_paths_are_fully_offline() {
+    let dir = make_temp_dir();
+    write_status_state(&dir, 1, 1, &["offline-log"]);
+
+    // These functions only read local state and format text; they must not
+    // construct an LLM client or make network calls.
+    let report = workbuddy_rs::status::parse_status(&dir).expect("parse_status should work offline");
+    let output = workbuddy_rs::status::format_status(&report);
+    assert!(output.contains("offline-log"));
 }
