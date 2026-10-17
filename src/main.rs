@@ -462,8 +462,14 @@ async fn main() -> Result<()> {
                     anyhow::anyhow!("未找到任务 '{}'。请使用 `workbuddy list` 查看任务列表。", id)
                 })?;
             }
-            let summary = workspace::Workspace::status_summary(&cfg.workspace_dir);
-            println!("{}", summary);
+            match status::parse_status(&cfg.workspace_dir) {
+                Ok(summary) => println!("{}", status::format_status(&summary)),
+                Err(e) => {
+                    let empty = status::StatusSummary::from_history(&[]);
+                    println!("{}", status::format_status(&empty));
+                    eprintln!("workbuddy status: 无法读取运行状态: {e:#}");
+                }
+            }
             Ok(())
         },
         Cmd::Tui => {

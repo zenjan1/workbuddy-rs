@@ -1,4 +1,35 @@
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+fn make_temp_dir() -> PathBuf {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock before unix epoch")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "workbuddy-status-test-{}-{}",
+        std::process::id(),
+        unique
+    ));
+    fs::create_dir_all(&dir).expect("create temp dir");
+    dir
+}
+
+fn write_mock_state(dir: &Path) {
+    fs::create_dir_all(dir).expect("create state dir");
+    fs::write(dir.join("supervisor.pid"), format!("{}\n", std::process::id())).unwrap();
+    fs::write(dir.join("supervisor.lock"), "").unwrap();
+    fs::write(dir.join("completed.txt"), "314159\n").unwrap();
+    fs::write(dir.join("completed"), "314159\n").unwrap();
+    fs::write(dir.join("failed.txt"), "271828\n").unwrap();
+    fs::write(dir.join("failed"), "271828\n").unwrap();
+    fs::write(
+        dir.join("workbuddy.log"),
+        "OLD_LOG_0\nLOG_UNIQUE_ALPHA\nLOG_UNIQUE_BETA\nLOG_UNIQUE_GAMMA\nLOG_UNIQUE_DELTA\nLOG_UNIQUE_EPSILON\n",
+    )
+    .unwrap();
+}
 
 #[test]
 fn status_command_succeeds_offline_and_prints_summary() {
@@ -39,5 +70,81 @@ fn status_command_succeeds_offline_and_prints_summary() {
         stdout_lower.contains("recent") || stdout.contains("最近日志") || stdout.contains("日志摘要") || stdout_lower.contains("log"),
         "stdout should mention recent logs: {}",
         stdout
+    );
+}
+
+#[test]
+fn status_parses_mock_state_and_formats_summary() {
+    let dir = make_temp_dir();
+    write_mock_state(&dir);
+
+    let report = workbuddy_rs::status::parse_status(&dir).expect("parse_status should succeed");
+    let output = workbuddy_rs::status::format_status(&report);
+
+    let output_lower = output.to_lowercase();
+    assert!(
+        output_lower.contains("supervisor") || output.contains("监督者"),
+        "formatted output should mention supervisor status: {output}"
+    );
+    assert!(
+        output.contains("314159"),
+        "formatted output should include completed count: {output}"
+    );
+    assert!(
+        output.contains("271828"),
+        "formatted output should include failed count: {output}"
+    );
+    assert!(
+        output.contains("LOG_UNIQUE_ALPHA"),
+        "recent log should include the 2nd line: {output}"
+    );
+    assert!(
+        output.contains("LOG_UNIQUE_DELTA"),
+        "recent log should include the 5th line: {output}"
+    );
+    assert!(
+        output.contains("LOG_UNIQUE_EPSILON"),
+        "recent log should include the last line: {output}"
+    );
+    assert!(
+        !output.contains("OLD_LOG_0"),
+        "oldest log line should be omitted from summary: {output}"
+    );
+}
+
+#[test]
+fn status_missing_metadata_returns_friendly_error() {
+    let dir = make_temp_dir();
+
+    let err = workbuddy_rs::status::parse_status(&dir).expect_err("missing metadata should fail");
+    let msg = err.to_string().to_lowercase();
+
+    assert!(
+        msg.contains("missing")
+            || msg.contains("not found")
+            || msg.contains("不存在")
+            || msg.contains("缺少")
+            || msg.contains("no "),
+        "error should be friendly when metadata is missing: {msg}"
+    );
+}
+
+#[test]
+fn status_corrupt_metadata_returns_friendly_error() {
+    let dir = make_temp_dir();
+    write_mock_state(&dir);
+    fs::write(dir.join("completed.txt"), "not-a-number\n").unwrap();
+    fs::write(dir.join("completed"), "not-a-number\n").unwrap();
+
+    let err = workbuddy_rs::status::parse_status(&dir).expect_err("corrupt metadata should fail");
+    let msg = err.to_string().to_lowercase();
+
+    assert!(
+        msg.contains("invalid")
+            || msg.contains("corrupt")
+            || msg.contains("parse")
+            || msg.contains("无法")
+            || msg.contains("错误"),
+        "error should be friendly when metadata is corrupt: {msg}"
     );
 }

@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use serde::Deserialize;
 
-use crate::dev::load_backlog;
 use crate::workspace::RunRecord;
 use crate::task_id::TaskId;
 
@@ -123,82 +122,6 @@ pub fn run(workspace_dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn show(workspace_dir: &Path, task_ref: &str) -> anyhow::Result<()> {
-    let tasks = load_backlog(workspace_dir)?;
-    let titles: Vec<String> = tasks.iter().map(|t| t.title.clone()).collect();
-    match crate::task_id::resolve_task_id(task_ref, &titles) {
-        Ok(task_id) => {
-            match find_run_record(workspace_dir, &task_id.to_string()) {
-                Some(record) => println!("{}", format_run_summary(&record)),
-                None => println!("{}", task_id),
-            }
-            Ok(())
-        }
-        Err(err) => {
-            eprintln!("workbuddy show: 无法识别任务: {}", err);
-            Ok(())
-        }
-    }
-}
-
-fn find_run_record(workspace_dir: &Path, task_id: &str) -> Option<RunRecord> {
-    let mut run_files = collect_run_files(workspace_dir).ok()?;
-    run_files.sort_by_key(|path| {
-        let modified = fs::metadata(path)
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|duration| duration.as_millis());
-        let numeric = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .and_then(|s| s.rsplit_once('-').map(|(_, n)| n))
-            .and_then(|n| n.parse::<u64>().ok())
-            .unwrap_or(u64::MAX);
-        (modified, numeric)
-    });
-
-    let mut best: Option<RunRecord> = None;
-    for path in run_files {
-        let Ok(data) = fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(record) = serde_json::from_str::<RunRecord>(&data) else {
-            continue;
-        };
-        let record_id = format_task_id(record.id.as_str());
-        if record_id == task_id {
-            best = Some(record);
-        }
-    }
-    best
-}
-
-fn format_run_summary(record: &RunRecord) -> String {
-    let success = record.steps.iter().all(|step| step.ok);
-    let state = if success { "completed" } else { "failed" };
-    let prompt_tokens = record
-        .token_usage
-        .as_ref()
-        .map(|usage| usage.input_tokens)
-        .unwrap_or(0);
-    let completion_tokens = record
-        .token_usage
-        .as_ref()
-        .map(|usage| usage.output_tokens)
-        .unwrap_or(0);
-    let chars = record.char_usage.unwrap_or(0);
-    format!(
-        "Task: {}\nGoal: {}\nStatus: {}\nSteps: {}\nUsage: prompt_tokens: {}, completion_tokens: {}, chars: {}",
-        format_task_id(record.id.as_str()),
-        record.goal,
-        state,
-        record.steps.len(),
-        prompt_tokens,
-        completion_tokens,
-        chars
-    )
-}
 
 pub fn parse_status(workspace_dir: &Path) -> anyhow::Result<StatusSummary> {
     parse_status_inner(workspace_dir, None)
@@ -218,19 +141,37 @@ fn parse_status_inner(
     let supervisor_running = read_supervisor_running(workspace_dir)?;
     let pid = read_supervisor_pid(workspace_dir)?;
     let cost_per_1k_tokens = read_cost_per_1k_tokens(workspace_dir);
-    let history = match run_log_path {
-        Some(path) => {
-            let data = fs::read_to_string(path)
-                .with_context(|| format!("读取运行日志失败 {}", path.display()))?;
-            let record: RunRecord = serde_json::from_str(&data)
-                .with_context(|| format!("解析运行日志失败 {}", path.display()))?;
-            let raw: serde_json::Value = serde_json::from_str(&data)
-                .with_context(|| format!("解析运行日志失败 {}", path.display()))?;
-            history_entries_from_run(&record, &raw, cost_per_1k_tokens)
+    let mut summary = if let Some(path) = run_log_path {
+        let data = fs::read_to_string(path)
+            .with_context(|| format!("读取运行日志失败 {}", path.display()))?;
+        let record: RunRecord = serde_json::from_str(&data)
+            .with_context(|| format!("解析运行日志失败 {}", path.display()))?;
+        let raw: serde_json::Value = serde_json::from_str(&data)
+            .with_context(|| format!("解析运行日志失败 {}", path.display()))?;
+        let history = history_entries_from_run(&record, &raw, cost_per_1k_tokens);
+        StatusSummary::from_history_with_limit(&history, 5)
+    } else {
+        let run_files = collect_run_files(workspace_dir)?;
+        if !run_files.is_empty() {
+            let history = load_history(workspace_dir, cost_per_1k_tokens)?;
+            StatusSummary::from_history_with_limit(&history, 5)
+        } else if workspace_dir.join("workbuddy.log").exists() {
+            let (completed, failed, recent_logs) = read_legacy_status(workspace_dir)?;
+            let mut legacy_summary = StatusSummary::from_history_with_limit(&[], 5);
+            legacy_summary.completed_runs = completed;
+            legacy_summary.failed_runs = failed;
+            legacy_summary.completed = completed;
+            legacy_summary.failed = failed;
+            legacy_summary.recent_logs = recent_logs;
+            legacy_summary
+        } else if workspace_dir.join(STATUS_FILE_NAME).exists() {
+            StatusSummary::from_history_with_limit(&[], 5)
+        } else if workspace_dir.join("runs").is_dir() {
+            StatusSummary::from_history_with_limit(&[], 5)
+        } else {
+            anyhow::bail!("缺少运行状态元数据（未找到 runs 目录、status.json 或 workbuddy.log）")
         }
-        None => load_history(workspace_dir, cost_per_1k_tokens)?,
     };
-    let mut summary = StatusSummary::from_history_with_limit(&history, 5);
     summary.supervisor_running = supervisor_running;
     summary.running = supervisor_running;
     summary.pid = pid;
@@ -382,18 +323,9 @@ fn history_entries_from_run(
     } else {
         task_id_display
     };
-    let timestamp = raw
-        .get("timestamp")
-        .or_else(|| raw.get("created_at"))
-        .or_else(|| raw.get("started_at"))
-        .or_else(|| raw.get("finished_at"))
-        .or_else(|| raw.get("start_time"))
-        .and_then(|value| value.as_str())
-        .unwrap_or("unknown");
     let title = truncate_chars(&record.goal, 60);
     let log = format!(
-        "[{}] {} {} {} ({} steps): {} {}",
-        timestamp,
+        "{} {} {} ({} steps): {} {}",
         task_id_display,
         state,
         title,
@@ -512,6 +444,44 @@ fn collect_run_files(workspace_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
     }
     files.sort();
     Ok(files)
+}
+
+fn read_legacy_status(workspace_dir: &Path) -> anyhow::Result<(usize, usize, Vec<String>)> {
+    let completed = read_legacy_count(workspace_dir, "completed")?;
+    let failed = read_legacy_count(workspace_dir, "failed")?;
+    let recent_logs = read_legacy_logs(workspace_dir)?;
+    Ok((completed, failed, recent_logs))
+}
+
+fn read_legacy_count(workspace_dir: &Path, name: &str) -> anyhow::Result<usize> {
+    let txt_path = workspace_dir.join(format!("{}.txt", name));
+    let path = workspace_dir.join(name);
+    let content = if txt_path.exists() {
+        fs::read_to_string(&txt_path)
+            .with_context(|| format!("读取 {} 失败", txt_path.display()))?
+    } else if path.exists() {
+        fs::read_to_string(&path)
+            .with_context(|| format!("读取 {} 失败", path.display()))?
+    } else {
+        anyhow::bail!("missing {} count file", name)
+    };
+    let trimmed = content.trim();
+    trimmed
+        .parse::<usize>()
+        .map_err(|_| anyhow::anyhow!("invalid {} count: {}", name, trimmed))
+}
+
+fn read_legacy_logs(workspace_dir: &Path) -> anyhow::Result<Vec<String>> {
+    let log_path = workspace_dir.join("workbuddy.log");
+    let data = fs::read_to_string(&log_path)
+        .with_context(|| format!("读取工作日志失败 {}", log_path.display()))?;
+    let mut lines: Vec<String> = data
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect();
+    let split_at = lines.len().saturating_sub(5);
+    Ok(lines.split_off(split_at))
 }
 
 pub fn format_status(summary: &StatusSummary) -> String {
