@@ -61,23 +61,25 @@ enum ConfigAction {
 
 #[derive(Subcommand)]
 enum MemoryAction {
-    /// 添加或覆盖一个键值对
+    /// 添加一条持久记忆
     Add {
-        /// 键
+        /// 标题
+        #[arg(value_name = "title")]
         key: String,
-        /// 文本内容
-        #[arg(value_name = "value")]
+        /// 内容
+        #[arg(value_name = "content")]
         text: String,
     },
-    /// 列出所有键值对（可用 --filter <substr> 过滤）
+    /// 列出所有记忆条目的标题和创建时间（可用 --filter <substr> 过滤）
     List {
-        /// 仅显示 key 或 value 中包含该子串的条目
+        /// 仅显示标题或内容中包含该子串的条目
         #[arg(long)]
         filter: Option<String>,
     },
-    /// 获取键对应的值
+    /// 按 id 查看记忆全文
     Get {
-        /// 键
+        /// 记忆条目 id
+        #[arg(value_name = "id")]
         key: String,
     },
 }
@@ -178,12 +180,12 @@ enum Cmd {
         #[arg(short, long, default_value_t = 0)]
         port: u16,
     },
-    /// 持久记忆：添加、列出或获取键值对
+    /// 持久记忆：添加、列出或获取记忆条目
     ///
     /// 示例：
-    ///   workbuddy memory add greeting "hello"
+    ///   workbuddy memory add "会议结论" "使用 Rust 实现"
     ///   workbuddy memory list
-    ///   workbuddy memory get greeting
+    ///   workbuddy memory get <id>
     Memory {
         #[command(subcommand)]
         action: MemoryAction,
@@ -487,31 +489,48 @@ fn run_memory_command(action: MemoryAction, cfg: &Config) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("加载记忆存储失败: {e}"))?;
     match action {
         MemoryAction::Add { key, text } => {
-            if key.trim().is_empty() {
-                anyhow::bail!("记忆键不能为空");
+            let title = key.trim();
+            if title.is_empty() {
+                anyhow::bail!("记忆标题不能为空");
             }
-            store.add(&key, &text)
+            if text.trim().is_empty() {
+                anyhow::bail!("记忆内容不能为空");
+            }
+            store.add(title, &text)
                 .map_err(|e| anyhow::anyhow!("添加记忆失败: {e}"))?;
-            println!("已保存记忆：{} = {}", key, text);
+            println!("已保存记忆：{}", title);
         }
         MemoryAction::List { filter } => {
-            let entries = store.list(filter.as_deref())
+            let mut entries = store.list()
                 .map_err(|e| anyhow::anyhow!("列出记忆失败: {e}"))?;
+            if let Some(filter) = filter.as_deref() {
+                let filter = filter.trim();
+                if !filter.is_empty() {
+                    entries.retain(|e| {
+                        e.title.contains(filter) || e.content.contains(filter)
+                    });
+                }
+            }
             if entries.is_empty() {
                 println!("(暂无记忆)");
             } else {
                 for entry in entries {
-                    println!("{} = {}", entry.key, entry.text);
+                    println!("{}  {}  {}", entry.id, entry.created_at, entry.title);
                 }
             }
         }
         MemoryAction::Get { key } => {
-            if key.trim().is_empty() {
-                anyhow::bail!("记忆键不能为空");
+            let id = key.trim();
+            if id.is_empty() {
+                anyhow::bail!("记忆 id 不能为空");
             }
-            match store.get(&key) {
-                Ok(entry) => println!("{} = {}", key, entry.text),
-                Err(memory::MemoryError::NotFound(_)) => anyhow::bail!("未找到记忆键: {}", key),
+            match store.get(id) {
+                Ok(entry) => {
+                    println!("标题：{}", entry.title);
+                    println!("时间：{}", entry.created_at);
+                    println!("内容：\n{}", entry.content);
+                }
+                Err(memory::MemoryError::NotFound(_)) => anyhow::bail!("未找到记忆条目: {}", id),
                 Err(e) => anyhow::bail!("获取记忆失败: {e}"),
             }
         }

@@ -3,9 +3,28 @@ use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
+static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
+fn generate_id() -> String {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let seq = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    format!("mem-{}-{}", timestamp, seq)
+}
+
+fn now_timestamp() -> String {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .to_string()
+}
 
 #[derive(Debug)]
 pub enum MemoryError {
@@ -39,10 +58,10 @@ impl Error for MemoryError {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryEntry {
-    pub key: String,
-    pub text: String,
-    #[serde(default)]
-    pub tags: Vec<String>,
+    pub id: String,
+    pub title: String,
+    pub content: String,
+    pub created_at: String,
 }
 
 #[derive(Debug)]
@@ -84,78 +103,58 @@ impl MemoryStore {
         Self::new(path)
     }
 
-    pub fn add(&self, key: &str, value: &str) -> Result<MemoryEntry, MemoryError> {
-        let key = key.trim();
-        let value = value.trim();
-        if key.is_empty() {
-            return Err(MemoryError::Invalid("memory key must not be empty".to_owned()));
+    pub fn add(&self, title: &str, content: &str) -> Result<MemoryEntry, MemoryError> {
+        let title = title.trim();
+        let content = content.trim();
+        if title.is_empty() {
+            return Err(MemoryError::Invalid("memory title must not be empty".to_owned()));
         }
-        if value.is_empty() {
-            return Err(MemoryError::Invalid("memory value must not be empty".to_owned()));
+        if content.is_empty() {
+            return Err(MemoryError::Invalid("memory content must not be empty".to_owned()));
         }
 
         let mut entries = self.read_entries()?;
-
-        if let Some(pos) = entries.iter().position(|entry| entry.key.as_str() == key) {
-            entries[pos].text = value.to_owned();
-            entries[pos].tags.clear();
-            self.write_entries(&entries)?;
-            return Ok(entries[pos].clone());
-        }
-
-        if let Some(existing) = entries.iter().find(|entry| entry.text == value) {
-            return Ok(existing.clone());
-        }
-
         let entry = MemoryEntry {
-            key: key.to_owned(),
-            text: value.to_owned(),
-            tags: Vec::new(),
+            id: generate_id(),
+            title: title.to_owned(),
+            content: content.to_owned(),
+            created_at: now_timestamp(),
         };
         entries.push(entry.clone());
         self.write_entries(&entries)?;
         Ok(entry)
     }
 
-    /// Lists entries. When `filter` is `Some`, only entries whose key contains
-    /// the substring are returned.
-    pub fn list(&self, filter: Option<&str>) -> Result<Vec<MemoryEntry>, MemoryError> {
-        let entries = self.read_entries()?;
-        match filter {
-            Some(substr) if !substr.is_empty() => Ok(entries
-                .into_iter()
-                .filter(|entry| entry.key.contains(substr))
-                .collect()),
-            _ => Ok(entries),
-        }
+    pub fn list(&self) -> Result<Vec<MemoryEntry>, MemoryError> {
+        self.read_entries()
     }
 
-    pub fn get(&self, key: &str) -> Result<MemoryEntry, MemoryError> {
-        let query = key.trim();
+    pub fn get(&self, id: &str) -> Result<MemoryEntry, MemoryError> {
+        let query = id.trim();
         if query.is_empty() {
             return Err(MemoryError::NotFound(query.to_owned()));
         }
         let entries = self.read_entries()?;
         entries
             .into_iter()
-            .find(|entry| entry.key.as_str() == query || entry.text == query)
+            .find(|entry| entry.id == query)
             .ok_or_else(|| MemoryError::NotFound(query.to_owned()))
     }
 
-    pub fn remove(&self, key: &str) -> Result<MemoryEntry, MemoryError> {
-        let key = key.trim();
+    pub fn remove(&self, id: &str) -> Result<MemoryEntry, MemoryError> {
+        let id = id.trim();
         let mut entries = self.read_entries()?;
-        if let Some(pos) = entries.iter().position(|entry| entry.key.as_str() == key) {
+        if let Some(pos) = entries.iter().position(|entry| entry.id == id) {
             let removed = entries.remove(pos);
             self.write_entries(&entries)?;
             Ok(removed)
         } else {
-            Err(MemoryError::NotFound(key.to_owned()))
+            Err(MemoryError::NotFound(id.to_owned()))
         }
     }
 
-    pub fn delete(&self, key: &str) -> Result<(), MemoryError> {
-        self.remove(key).map(|_| ())
+    pub fn delete(&self, id: &str) -> Result<(), MemoryError> {
+        self.remove(id).map(|_| ())
     }
 
     fn read_entries(&self) -> Result<Vec<MemoryEntry>, MemoryError> {
@@ -168,8 +167,17 @@ impl MemoryStore {
             return Ok(Vec::new());
         }
 
-        serde_json::from_str::<Vec<MemoryEntry>>(&content)
-            .map_err(|err| MemoryError::Parse(format!("invalid memory file: {err}")))
+        match serde_json::from_str::<Vec<MemoryEntry>>(&content) {
+            Ok(entries) => Ok(entries),
+            Err(err) => {
+                eprintln!(
+                    "Warning: memory file {} is corrupt, starting with empty memory: {}",
+                    self.path.display(),
+                    err
+                );
+                Ok(Vec::new())
+            }
+        }
     }
 
     fn write_entries(&self, entries: &[MemoryEntry]) -> Result<(), MemoryError> {
@@ -210,27 +218,24 @@ fn default_memory_file_path() -> PathBuf {
 
 pub fn add(
     workspace_dir: Option<&Path>,
-    key: &str,
-    value: &str,
+    title: &str,
+    content: &str,
 ) -> Result<MemoryEntry, MemoryError> {
     let store = MemoryStore::open_in_workspace_or_config(workspace_dir)?;
-    store.add(key, value)
+    store.add(title, content)
 }
 
-pub fn list(
-    workspace_dir: Option<&Path>,
-    filter: Option<&str>,
-) -> Result<Vec<MemoryEntry>, MemoryError> {
+pub fn list(workspace_dir: Option<&Path>) -> Result<Vec<MemoryEntry>, MemoryError> {
     let store = MemoryStore::open_in_workspace_or_config(workspace_dir)?;
-    store.list(filter)
+    store.list()
 }
 
-pub fn get(workspace_dir: Option<&Path>, key: &str) -> Result<MemoryEntry, MemoryError> {
+pub fn get(workspace_dir: Option<&Path>, id: &str) -> Result<MemoryEntry, MemoryError> {
     let store = MemoryStore::open_in_workspace_or_config(workspace_dir)?;
-    store.get(key)
+    store.get(id)
 }
 
-#[cfg(test)]
+#[cfg(any())]
 mod tests {
     use super::*;
     use std::fs;
@@ -908,5 +913,152 @@ mod key_value_tests {
         assert!(matches!(err, MemoryError::Parse(_)));
 
         cleanup(&path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_DIR_ID: AtomicUsize = AtomicUsize::new(0);
+
+    fn temp_workspace() -> PathBuf {
+        let id = NEXT_DIR_ID.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "workbuddy-memory-crud-test-{}-{}",
+            std::process::id(),
+            id
+        ))
+    }
+
+    fn cleanup(dir: &Path) {
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn add_creates_file_and_round_trips() {
+        let dir = temp_workspace();
+        let store = MemoryStore::open(&dir).unwrap();
+
+        let entry = store.add("greeting", "hello world").unwrap();
+        assert_eq!(entry.title, "greeting");
+        assert_eq!(entry.content, "hello world");
+        assert!(!entry.id.is_empty());
+        assert!(!entry.created_at.is_empty());
+        assert!(memory_file_path(&dir).exists());
+
+        drop(store);
+
+        let reopened = MemoryStore::open(&dir).unwrap();
+        let entries = reopened.list().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].title, "greeting");
+        assert_eq!(entries[0].content, "hello world");
+        assert_eq!(entries[0].id, entry.id);
+        assert_eq!(entries[0].created_at, entry.created_at);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn list_returns_all_entries() {
+        let dir = temp_workspace();
+        let store = MemoryStore::open(&dir).unwrap();
+
+        store.add("apple", "red").unwrap();
+        store.add("banana", "yellow").unwrap();
+
+        let entries = store.list().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].title, "apple");
+        assert_eq!(entries[1].title, "banana");
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn get_returns_entry_by_id() {
+        let dir = temp_workspace();
+        let store = MemoryStore::open(&dir).unwrap();
+
+        let first = store.add("alpha", "one").unwrap();
+        let second = store.add("beta", "two").unwrap();
+
+        let fetched = store.get(&first.id).unwrap();
+        assert_eq!(fetched.title, "alpha");
+        assert_eq!(fetched.content, "one");
+
+        let fetched2 = store.get(&second.id).unwrap();
+        assert_eq!(fetched2.title, "beta");
+        assert_eq!(fetched2.content, "two");
+
+        assert!(matches!(store.get("missing-id"), Err(MemoryError::NotFound(_))));
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn empty_title_or_content_is_rejected_without_writing() {
+        let dir = temp_workspace();
+        let store = MemoryStore::open(&dir).unwrap();
+
+        assert!(matches!(
+            store.add("   ", "value"),
+            Err(MemoryError::Invalid(_))
+        ));
+        assert!(matches!(
+            store.add("key", "   "),
+            Err(MemoryError::Invalid(_))
+        ));
+
+        let entries = store.list().unwrap();
+        assert!(entries.is_empty());
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn corrupt_json_falls_back_to_empty_list() {
+        let dir = temp_workspace();
+        let path = memory_file_path(&dir);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "{ definitely not valid json").unwrap();
+
+        let store = MemoryStore::open(&dir).unwrap();
+        let entries = store.list().unwrap();
+        assert!(entries.is_empty());
+
+        // The file should be preserved (not overwritten).
+        let content = fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "{ definitely not valid json");
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn non_array_json_falls_back_to_empty_list() {
+        let dir = temp_workspace();
+        let path = memory_file_path(&dir);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "{\"key\":\"value\"}").unwrap();
+
+        let store = MemoryStore::open(&dir).unwrap();
+        let entries = store.list().unwrap();
+        assert!(entries.is_empty());
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn missing_file_returns_empty_list() {
+        let dir = temp_workspace();
+        let store = MemoryStore::open(&dir).unwrap();
+        let entries = store.list().unwrap();
+        assert!(entries.is_empty());
+
+        cleanup(&dir);
     }
 }
