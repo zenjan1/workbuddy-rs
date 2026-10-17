@@ -8,7 +8,8 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    widgets::{Block, Borders, List, ListItem, ListState},
+    layout::Constraint,
+    widgets::{Block, Borders, Cell, List, ListItem, ListState, Row, Table},
     Frame, Terminal,
 };
 
@@ -277,6 +278,45 @@ fn draw_ui(frame: &mut Frame, items: &[BacklogItem], selected: usize) {
     frame.render_stateful_widget(list, frame.area(), &mut state);
 }
 
+pub fn render(frame: &mut Frame, items: &[BacklogItem]) {
+    if items.is_empty() {
+        let list = List::new(vec![ListItem::new("No backlog tasks")])
+            .block(Block::default().borders(Borders::ALL).title(" Backlog "));
+        frame.render_widget(list, frame.area());
+        return;
+    }
+
+    let header = Row::new(vec![
+        Cell::from("Title"),
+        Cell::from("Status"),
+        Cell::from("Priority"),
+    ]);
+
+    let rows: Vec<Row> = items
+        .iter()
+        .map(|item| {
+            Row::new(vec![
+                Cell::from(item.title.clone()),
+                Cell::from(item.status.clone()),
+                Cell::from(item.priority.to_string()),
+            ])
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Percentage(50),
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+        ],
+    )
+    .header(header)
+    .block(Block::default().borders(Borders::ALL).title(" Backlog "));
+
+    frame.render_widget(table, frame.area());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,6 +433,14 @@ mod tests {
         assert_eq!(rows[0], "[design-tui-module]   1. Design TUI module [pending]");
         assert_eq!(rows[1], "[render-backlog-list]   2. Render backlog list [pending]");
         assert_eq!(rows[2], "[handle-q-to-quit]   3. Handle q to quit [done]");
+    }
+
+    #[test]
+    fn render_static_does_not_panic() {
+        let items = sample_items();
+        let backend = ratatui::backend::TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).expect("failed to create terminal");
+        terminal.draw(|frame| render(frame, &items)).expect("draw failed");
     }
 }
 
