@@ -218,15 +218,18 @@ where
         .map(|s| s.as_ref().to_string())
         .collect();
 
-    let query_slug = TaskId::slugify(raw);
+    // 1. 数字输入优先按索引解析，保持旧版行为（包括 0/1 基数和边界行为）。
+    if let Ok(index) = raw.parse::<usize>() {
+        return Ok(TaskId::Numeric(index));
+    }
 
-    // 仅当 slug 非空时才可能进行 slug 匹配
-    if !query_slug.is_empty() {
-        // 精确匹配：标题 slug 全称。
+    // 2. 非数字输入按任务标题进行大小写不敏感匹配：先精确，后唯一前缀。
+    let query_title = raw.trim().to_lowercase();
+    if !query_title.is_empty() {
+        // 精确标题匹配（忽略大小写与首尾空白）。
         let mut exact_matches: Vec<(usize, String)> = Vec::new();
         for (index, title) in title_list.iter().enumerate() {
-            let title_slug = TaskId::slugify(title);
-            if title_slug == query_slug {
+            if title.trim().to_lowercase() == query_title {
                 exact_matches.push((index, title.clone()));
             }
         }
@@ -237,16 +240,10 @@ where
             _ => return Err(duplicate_or_ambiguous(raw, exact_matches)),
         }
 
-        // 数字索引优先于 slug 前缀匹配，保持旧行为。
-        if let Ok(index) = raw.parse::<usize>() {
-            return Ok(TaskId::Numeric(index));
-        }
-
-        // 前缀匹配：标题 slug 前缀。
+        // 标题唯一前缀匹配（忽略大小写与首尾空白）。
         let mut prefix_matches: Vec<(usize, String)> = Vec::new();
         for (index, title) in title_list.iter().enumerate() {
-            let title_slug = TaskId::slugify(title);
-            if title_slug.starts_with(&query_slug) {
+            if title.trim().to_lowercase().starts_with(&query_title) {
                 prefix_matches.push((index, title.clone()));
             }
         }
@@ -255,6 +252,36 @@ where
             1 => return Ok(resolved_id_from_match(&prefix_matches[0])),
             0 => {}
             _ => return Err(duplicate_or_ambiguous(raw, prefix_matches)),
+        }
+    }
+
+    // 3. 为兼容旧 slug 输入，保留 slug 精确/前缀匹配作为后备。
+    let query_slug = TaskId::slugify(raw);
+    if !query_slug.is_empty() {
+        let mut slug_exact_matches: Vec<(usize, String)> = Vec::new();
+        for (index, title) in title_list.iter().enumerate() {
+            if TaskId::slugify(title) == query_slug {
+                slug_exact_matches.push((index, title.clone()));
+            }
+        }
+
+        match slug_exact_matches.len() {
+            1 => return Ok(resolved_id_from_match(&slug_exact_matches[0])),
+            0 => {}
+            _ => return Err(duplicate_or_ambiguous(raw, slug_exact_matches)),
+        }
+
+        let mut slug_prefix_matches: Vec<(usize, String)> = Vec::new();
+        for (index, title) in title_list.iter().enumerate() {
+            if TaskId::slugify(title).starts_with(&query_slug) {
+                slug_prefix_matches.push((index, title.clone()));
+            }
+        }
+
+        match slug_prefix_matches.len() {
+            1 => return Ok(resolved_id_from_match(&slug_prefix_matches[0])),
+            0 => {}
+            _ => return Err(duplicate_or_ambiguous(raw, slug_prefix_matches)),
         }
     }
 
@@ -469,12 +496,12 @@ mod tests {
     }
 
     #[test]
-    fn resolve_slug_priority_over_numeric_when_title_matches() {
+    fn resolve_numeric_priority_over_title_when_numeric_input() {
         let titles = ["Fix bug", "123"];
-        // 输入字符串 "123" 与标题 "123" 的 slug 完全匹配，应优先解析为 slug。
-        assert_eq!(resolve_task_id("123", titles), Ok(TaskId::Slug("123".to_string())));
-        // 数字回退仍然有效：输入 "1" 没有 slug 匹配，应解析为数字索引。
+        // 数字输入始终优先按索引解析，即使有标题与数字相同。
+        assert_eq!(resolve_task_id("123", titles), Ok(TaskId::Numeric(123)));
         assert_eq!(resolve_task_id("1", titles), Ok(TaskId::Numeric(1)));
+        assert_eq!(resolve_task_id("0", titles), Ok(TaskId::Numeric(0)));
     }
 
     #[test]
@@ -523,5 +550,38 @@ mod tests {
     fn resolve_numeric_index_does_not_require_title_list() {
         let titles: Vec<&str> = Vec::new();
         assert_eq!(resolve_task_id("7", titles), Ok(TaskId::Numeric(7)));
+    }
+
+    #[test]
+    fn resolve_digit_index_succeeds() {
+        let titles = ["Task A", "Task B"];
+        assert_eq!(resolve_task_id("5", titles), Ok(TaskId::Numeric(5)));
+    }
+
+    #[test]
+    fn resolve_exact_title_case_insensitive_succeeds() {
+        let titles = ["Write docs", "Fix bug"];
+        assert_eq!(
+            resolve_task_id("wRiTe dOcS", titles),
+            Ok(TaskId::Slug("write-docs".to_string()))
+        );
+    }
+
+    #[test]
+    fn resolve_unique_prefix_case_insensitive_succeeds() {
+        let titles = ["Write docs", "Fix bug"];
+        assert_eq!(
+            resolve_task_id("FIX", titles),
+            Ok(TaskId::Slug("fix-bug".to_string()))
+        );
+    }
+
+    #[test]
+    fn resolve_ambiguous_prefix_case_insensitive_reports_error() {
+        let titles = ["Setup server", "Setup client"];
+        assert!(matches!(
+            resolve_task_id("SETUP", titles),
+            Err(TaskIdError::Ambiguous { .. })
+        ));
     }
 }
