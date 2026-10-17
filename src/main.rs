@@ -440,11 +440,9 @@ async fn main() -> Result<()> {
             status::run_with_log_lines(&workspace_dir, log_lines)
         },
         Cmd::Tui => {
-            let backlog_path = cfg.repo_dir.join(".workbuddy/backlog.json");
-            if let Err(e) = tui::run(&backlog_path) {
-                eprintln!("启动 TUI 失败: {e:#}");
-                std::process::exit(1);
-            }
+            let backlog_dir = cfg.repo_dir.join(".workbuddy");
+            tui::run(&backlog_dir)
+                .map_err(|e| anyhow::anyhow!("启动 TUI 失败: {e:#}"))?;
             Ok(())
         }
         Cmd::Serve { data_dir, host, port } => {

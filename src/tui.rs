@@ -133,18 +133,35 @@ fn status_rank(status: &str) -> u8 {
     }
 }
 
-/// Pure rendering function: sorts the backlog list by status and priority,
-/// draws it with ratatui's TestBackend, and returns the resulting static
-/// snapshot as a string. It includes the "Backlog" title and task count in
-/// the output.
-pub fn render_backlog(state: &BacklogState) -> String {
-    let mut tasks = state.tasks.clone();
-    tasks.sort_by(|a, b| {
+/// Pure sorting: status rank ascending, priority descending, id ascending.
+///
+/// This is the canonical backlog ordering used by both the live TUI and
+/// snapshot rendering, so it can be unit tested without terminal access.
+pub fn sort_backlog(items: Vec<BacklogItem>) -> Vec<BacklogItem> {
+    let mut items = items;
+    items.sort_by(|a, b| {
         status_rank(&a.status)
             .cmp(&status_rank(&b.status))
             .then_with(|| b.priority.cmp(&a.priority))
             .then_with(|| a.id.cmp(&b.id))
     });
+    items
+}
+
+/// Pure refresh: replace current state with freshly loaded backlog data.
+///
+/// The new items are sorted with [`sort_backlog`] so callers don't need to
+/// duplicate ordering logic when polling a file or API.
+pub fn refresh_backlog(_current: &BacklogState, fresh: Vec<BacklogItem>) -> BacklogState {
+    BacklogState::new(sort_backlog(fresh))
+}
+
+/// Pure rendering function: sorts the backlog list by status and priority,
+/// draws it with ratatui's TestBackend, and returns the resulting static
+/// snapshot as a string. It includes the "Backlog" title and task count in
+/// the output.
+pub fn render_backlog(state: &BacklogState) -> String {
+    let tasks = sort_backlog(state.tasks.clone());
 
     let rows = if tasks.is_empty() {
         vec!["No backlog tasks".to_string()]
@@ -208,13 +225,7 @@ pub fn handle_key(key: KeyCode, selected: usize, item_count: usize) -> (usize, K
 /// Run the blocking TUI. Renders `items` as a selectable list, supports
 /// Up/Down to move the cursor and `q` to quit.
 pub fn run_tui(tasks: Vec<Task>) -> Result<()> {
-    let mut tasks = tasks;
-    tasks.sort_by(|a, b| {
-        status_rank(&a.status)
-            .cmp(&status_rank(&b.status))
-            .then_with(|| b.priority.cmp(&a.priority))
-            .then_with(|| a.id.cmp(&b.id))
-    });
+    let tasks = sort_backlog(tasks);
     let items = &tasks;
     enable_raw_mode()?;
     let mut stdout = stdout();
@@ -441,6 +452,37 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(80, 20);
         let mut terminal = Terminal::new(backend).expect("failed to create terminal");
         terminal.draw(|frame| render(frame, &items)).expect("draw failed");
+    }
+
+    #[test]
+    fn sort_backlog_sorts_by_status_priority_and_id() {
+        let tasks = vec![
+            BacklogItem::with_priority(4, "Second pending", "待办", 2),
+            BacklogItem::with_priority(3, "Failed step", "失败", 5),
+            BacklogItem::with_priority(1, "Write plan", "待办", 7),
+            BacklogItem::with_priority(2, "Execute plan", "运行中", 9),
+        ];
+
+        let sorted = sort_backlog(tasks);
+        let ids: Vec<_> = sorted.iter().map(|task| task.id).collect();
+
+        assert_eq!(ids, vec![1, 4, 2, 3]);
+    }
+
+    #[test]
+    fn refresh_backlog_replaces_old_state_and_sorts() {
+        let current = BacklogState::new(sample_items());
+        let fresh = vec![
+            BacklogItem::with_priority(11, "New pending", "待办", 1),
+            BacklogItem::with_priority(10, "New failed", "失败", 9),
+        ];
+
+        let refreshed = refresh_backlog(&current, fresh);
+
+        assert_eq!(refreshed.tasks.len(), 2);
+        assert_eq!(refreshed.tasks[0].title, "New pending");
+        assert_eq!(refreshed.tasks[1].title, "New failed");
+        assert_eq!(current.tasks.len(), 3, "refresh must not mutate current state");
     }
 }
 
