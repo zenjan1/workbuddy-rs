@@ -151,22 +151,14 @@ async fn get_run(
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     if let Ok(ws) = Workspace::open(&state.workspace_dir, &id) {
-        match ws.load_record() {
-            Ok(run) => {
-                let value = serde_json::to_value(run).map_err(|_| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({ "error": "internal server error" })),
-                    )
-                })?;
-                return Ok(Json(value));
-            }
-            Err(_) => {
-                return Err((
+        if let Ok(run) = ws.load_record() {
+            let value = serde_json::to_value(run).map_err(|_| {
+                (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({ "error": "internal server error" })),
-                ));
-            }
+                )
+            })?;
+            return Ok(Json(value));
         }
     }
 

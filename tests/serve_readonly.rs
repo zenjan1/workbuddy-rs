@@ -116,6 +116,12 @@ fn serve_readonly_health_runs_and_method_not_allowed() {
         matches!(status, 405 | 404),
         "POST /health should return 405 or 404, got {status}"
     );
+
+    let (status, _body) = http_request(addr, "POST", "/runs/mock-run-id");
+    assert!(
+        matches!(status, 405 | 404),
+        "POST /runs/mock-run-id should return 405 or 404, got {status}"
+    );
 }
 
 fn seed_mock_run_history(temp: &TestWorkspace, run_ids: &[&str]) {
