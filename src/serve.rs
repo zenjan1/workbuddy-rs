@@ -253,7 +253,8 @@ fn readonly_route(workspace_dir: &Path, target: &str) -> (u16, &'static str, Str
 
     if path == "runs" {
         let runs = build_runs(workspace_dir, Some(query));
-        let body = serde_json::to_string(&runs).unwrap_or_else(|_| "[]".to_string());
+        let body = serde_json::to_string(&runs)
+            .unwrap_or_else(|_| json!([]).to_string());
         return (200, "OK", body);
     }
 
