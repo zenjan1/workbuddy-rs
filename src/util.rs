@@ -37,6 +37,35 @@ pub fn json_string(s: &str) -> String {
     out
 }
 
+/// 安全将字符串解析为布尔值，支持 true/false、1/0、yes/no、on/off（不区分大小写）。
+pub fn parse_bool(value: &str) -> Result<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "y" | "on" => Ok(true),
+        "false" | "0" | "no" | "n" | "off" => Ok(false),
+        _ => bail!("无法解析为布尔值: {}", value),
+    }
+}
+
+/// 安全将字符串解析为 i64 整数，解析失败时返回错误。
+pub fn parse_i64(value: &str) -> Result<i64> {
+    value
+        .trim()
+        .parse::<i64>()
+        .with_context(|| format!("无法解析为整数: {}", value))
+}
+
+/// 安全将字符串解析为 f64 浮点数，解析失败或非有限数时返回错误。
+pub fn parse_f64(value: &str) -> Result<f64> {
+    let parsed = value
+        .trim()
+        .parse::<f64>()
+        .with_context(|| format!("无法解析为浮点数: {}", value))?;
+    if !parsed.is_finite() {
+        bail!("无法解析为有限浮点数: {}", value);
+    }
+    Ok(parsed)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MemoryEntry {
     pub id: u64,
@@ -248,5 +277,32 @@ mod tests {
         std::fs::write(&path, "not valid json").unwrap();
 
         assert!(list_memories(&path).is_err());
+    }
+
+    #[test]
+    fn parse_bool_accepts_common_values() {
+        assert!(parse_bool("true").unwrap());
+        assert!(parse_bool("TRUE").unwrap());
+        assert!(parse_bool("1").unwrap());
+        assert!(parse_bool("yes").unwrap());
+        assert!(!parse_bool("false").unwrap());
+        assert!(!parse_bool("0").unwrap());
+        assert!(parse_bool("maybe").is_err());
+    }
+
+    #[test]
+    fn parse_i64_parses_integers() {
+        assert_eq!(parse_i64("42").unwrap(), 42);
+        assert_eq!(parse_i64(" -7 ").unwrap(), -7);
+        assert!(parse_i64("abc").is_err());
+        assert!(parse_i64("3.14").is_err());
+    }
+
+    #[test]
+    fn parse_f64_parses_floats() {
+        assert_eq!(parse_f64("3.14").unwrap(), 3.14);
+        assert!(parse_f64("abc").is_err());
+        assert!(parse_f64("NaN").is_err());
+        assert!(parse_f64("inf").is_err());
     }
 }

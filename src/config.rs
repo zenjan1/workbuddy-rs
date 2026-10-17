@@ -2069,3 +2069,17 @@ pub fn set_config(path: &Path, key: &str, value: &str) -> Result<()> {
 
     set_config_value_file(path, key, value)
 }
+/// 读取指定配置键的当前值。加载当前配置文件（若不存在则使用默认值）后返回字符串表示。
+#[cfg(any())]
+pub fn get_config_value(key: &str) -> Result<String> {
+    let cfg = Config::load()?;
+    cfg.get_value(key)
+}
+
+/// 设置指定配置键的值并持久化。该函数加载当前配置，校验并写入文件，最后更新内存。
+/// 任何校验或写入错误都不会修改已加载配置（如果文件写入失败，内存配置保持不变）。
+#[cfg(any())]
+pub fn set_config_value(key: &str, value: &str) -> Result<ConfigUpdateSummary> {
+    let mut cfg = Config::load()?;
+    cfg.set_value_with_summary(key, value)
+}
