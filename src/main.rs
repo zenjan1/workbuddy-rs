@@ -171,11 +171,14 @@ enum Cmd {
     },
     /// 启动 TUI 界面查看 backlog(只读)
     Tui,
-    /// 启动只读 HTTP 服务（固定绑定 127.0.0.1，默认使用临时端口）
+    /// 启动只读 HTTP 服务（默认绑定 127.0.0.1，仅允许本机回环地址）
     Serve {
         /// 数据目录（默认使用配置的 workspace_dir）
         #[arg(long)]
         data_dir: Option<std::path::PathBuf>,
+        /// 监听地址（仅允许本机回环地址）
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
         /// 监听端口（默认 0 表示由系统分配临时端口；可显式指定）
         #[arg(short, long, default_value_t = 0)]
         port: u16,
@@ -444,13 +447,25 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Serve { data_dir, port } => {
+        Cmd::Serve { data_dir, host, port } => {
             let workspace_dir = data_dir.unwrap_or_else(|| cfg.workspace_dir.clone());
-            let bind_addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-            let addr_label = if port == 0 {
-                "127.0.0.1:0（系统分配临时端口）".to_string()
+            let host = host.trim();
+            let ip: std::net::IpAddr = host
+                .parse()
+                .map_err(|e| anyhow::anyhow!("无效的监听地址 '{}': {e}", host))?;
+            if !ip.is_loopback() {
+                anyhow::bail!("仅允许监听本机回环地址，拒绝: {}", host);
+            }
+            let bind_addr = std::net::SocketAddr::from((ip, port));
+            let display_host = if ip.is_ipv4() {
+                ip.to_string()
             } else {
-                format!("http://{}", bind_addr)
+                format!("[{}]", ip)
+            };
+            let addr_label = if port == 0 {
+                format!("{}:0（系统分配临时端口）", display_host)
+            } else {
+                format!("http://{}:{}", display_host, port)
             };
             println!("正在启动只读 HTTP 服务: {}", addr_label);
             serve::run(&workspace_dir, bind_addr)
@@ -614,8 +629,10 @@ mod serve_cmd_tests {
         match cli.cmd {
             Cmd::Serve {
                 data_dir: None,
+                host,
                 port,
             } => {
+                assert_eq!(host, "127.0.0.1");
                 assert_eq!(port, 0);
             }
             _ => panic!("expected serve command with defaults"),

@@ -252,7 +252,28 @@ async fn get_run(
 }
 
 fn build_health(workspace_dir: &Path) -> serde_json::Value {
-    json!({ "status": "ok", "workspace": workspace_dir.to_string_lossy() })
+    let status_path = workspace_dir.join("status.json");
+    let mut supervisor = json!({
+        "running": false,
+        "pid": null,
+        "completed_runs": 0,
+        "failed_runs": 0,
+    });
+    if let Ok(contents) = std::fs::read_to_string(&status_path) {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) {
+            supervisor = json!({
+                "running": value.get("supervisor_running").and_then(|v| v.as_bool()).unwrap_or(false),
+                "pid": value.get("pid").cloned().unwrap_or(serde_json::Value::Null),
+                "completed_runs": value.get("completed_runs").and_then(|v| v.as_u64()).unwrap_or(0),
+                "failed_runs": value.get("failed_runs").and_then(|v| v.as_u64()).unwrap_or(0),
+            });
+        }
+    }
+    json!({
+        "status": "ok",
+        "workspace": workspace_dir.to_string_lossy(),
+        "supervisor": supervisor,
+    })
 }
 
 fn build_runs(workspace_dir: &Path, query: Option<&str>) -> Vec<serde_json::Value> {
@@ -418,8 +439,11 @@ pub fn serve_readonly<P: AsRef<Path>>(workspace_dir: P) -> Result<SocketAddr> {
 }
 
 pub async fn serve_with_dir(workspace_dir: &Path, bind_addr: SocketAddr) -> anyhow::Result<SocketAddr> {
+    let workspace_dir = workspace_dir.to_path_buf();
+    let listener = tokio::net::TcpListener::bind(bind_addr).await?;
+    let local_addr = listener.local_addr()?;
     let state = AppState {
-        workspace_dir: Arc::new(workspace_dir.to_path_buf()),
+        workspace_dir: Arc::new(workspace_dir),
     };
     let app = Router::new()
         .route("/health", get(health))
@@ -427,18 +451,9 @@ pub async fn serve_with_dir(workspace_dir: &Path, bind_addr: SocketAddr) -> anyh
         .route("/runs/{id}", get(get_run))
         .route("/run", post(create_run))
         .with_state(state);
-
-    // Ensure the service listens on the loopback interface only; port 0 is supported
-    // by the operating system and the actual bound port is returned below.
-    let bind_addr = SocketAddr::new(
-        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-        bind_addr.port(),
-    );
-    let listener = tokio::net::TcpListener::bind(bind_addr).await?;
-    let local_addr = listener.local_addr()?;
     tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, app).await {
-            eprintln!("serve error: {e}");
+        if let Err(err) = axum::serve(listener, app).await {
+            eprintln!("server error: {err}");
         }
     });
     Ok(local_addr)

@@ -1,8 +1,8 @@
 use std::fs;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use workbuddy_rs::serve::{serve, serve_readonly};
 
@@ -68,6 +68,25 @@ fn http_request(addr: SocketAddr, method: &str, target: &str) -> (u16, String) {
         .unwrap_or_default();
 
     (status, body)
+}
+
+fn wait_for_port_release(addr: SocketAddr, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match std::net::TcpListener::bind(addr) {
+            Ok(listener) => {
+                drop(listener);
+                return;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
+                if Instant::now() >= deadline {
+                    panic!("port {addr} was not released within {timeout:?}: {err}");
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(err) => panic!("unexpected error while binding {addr}: {err}"),
+        }
+    }
 }
 
 #[test]
@@ -324,4 +343,46 @@ fn serve_post_run() {
         status, 400,
         "POST /run with empty task should return 400, got {status}"
     );
+}
+
+#[test]
+fn serve_releases_port_after_shutdown() {
+    let temp = TestWorkspace::new();
+    let runtime = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+    let addr = runtime
+        .block_on(serve(
+            temp.path(),
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+        ))
+        .expect("failed to start server");
+
+    assert!(
+        addr.ip().is_loopback(),
+        "server should bind loopback, got {addr}"
+    );
+
+    let (status, body) = http_request(addr, "GET", "/health");
+    assert_eq!(status, 200, "/health returned status {status}, body: {body}");
+    let health: serde_json::Value =
+        serde_json::from_str(&body).expect("/health body is not valid JSON");
+    assert_eq!(health["status"].as_str(), Some("ok"), "/health body: {body}");
+
+    let (status, body) = http_request(addr, "GET", "/runs");
+    assert_eq!(status, 200, "/runs returned status {status}, body: {body}");
+    let runs: serde_json::Value =
+        serde_json::from_str(&body).expect("/runs body is not valid JSON");
+    assert!(runs.is_array(), "/runs did not return an array: {body}");
+
+    let (status, body) = http_request(addr, "GET", "/runs/mock-run-id-that-does-not-exist");
+    assert_eq!(
+        status, 404,
+        "GET /runs/mock-run-id-that-does-not-exist should return 404, got {status}, body: {body}"
+    );
+
+    // Simulate service exit by shutting down the ephemeral runtime that owns the
+    // server task. Once the runtime is dropped, the listening socket must be
+    // released so another process (or test) can bind the same port.
+    let _ = runtime.shutdown_timeout(Duration::from_secs(5));
+
+    wait_for_port_release(addr, Duration::from_secs(5));
 }
