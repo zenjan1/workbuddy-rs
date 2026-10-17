@@ -18,6 +18,9 @@ fn make_temp_dir() -> PathBuf {
 
 fn write_mock_state(dir: &Path) {
     fs::create_dir_all(dir).expect("create state dir");
+
+    // Legacy file-based state, kept for compatibility with parsers that
+    // read individual metadata files rather than the structured JSON file.
     fs::write(dir.join("supervisor.pid"), format!("{}\n", std::process::id())).unwrap();
     fs::write(dir.join("supervisor.lock"), "").unwrap();
     fs::write(dir.join("completed.txt"), "314159\n").unwrap();
@@ -29,12 +32,38 @@ fn write_mock_state(dir: &Path) {
         "OLD_LOG_0\nLOG_UNIQUE_ALPHA\nLOG_UNIQUE_BETA\nLOG_UNIQUE_GAMMA\nLOG_UNIQUE_DELTA\nLOG_UNIQUE_EPSILON\n",
     )
     .unwrap();
+
+    // Structured state file used by the status command. The recent log lines
+    // intentionally omit OLD_LOG_0 so the summary only contains recent entries.
+    let state_dir = dir.join(".workbuddy");
+    fs::create_dir_all(&state_dir).expect("create .workbuddy state dir");
+    fs::write(
+        state_dir.join("status.json"),
+        r#"{
+  "supervisor_running": false,
+  "completed": 314159,
+  "failed": 271828,
+  "recent_logs": [
+    "LOG_UNIQUE_ALPHA",
+    "LOG_UNIQUE_BETA",
+    "LOG_UNIQUE_GAMMA",
+    "LOG_UNIQUE_DELTA",
+    "LOG_UNIQUE_EPSILON"
+  ]
+}
+"#,
+    )
+    .unwrap();
 }
 
 #[test]
 fn status_command_succeeds_offline_and_prints_summary() {
+    let dir = make_temp_dir();
+    write_mock_state(&dir);
+
     let bin = env!("CARGO_BIN_EXE_workbuddy");
     let output = Command::new(bin)
+        .current_dir(&dir)
         .arg("status")
         .output()
         .expect("failed to run workbuddy status");
@@ -69,6 +98,32 @@ fn status_command_succeeds_offline_and_prints_summary() {
     assert!(
         stdout_lower.contains("recent") || stdout.contains("最近日志") || stdout.contains("日志摘要") || stdout_lower.contains("log"),
         "stdout should mention recent logs: {}",
+        stdout
+    );
+
+    assert!(
+        stdout.contains("314159"),
+        "stdout should include completed count from mock state: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("271828"),
+        "stdout should include failed count from mock state: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("LOG_UNIQUE_ALPHA"),
+        "stdout should include a recent log entry: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("LOG_UNIQUE_EPSILON"),
+        "stdout should include the latest log entry: {}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("OLD_LOG_0"),
+        "stdout should omit old log entries: {}",
         stdout
     );
 }
@@ -133,8 +188,29 @@ fn status_missing_metadata_returns_friendly_error() {
 fn status_corrupt_metadata_returns_friendly_error() {
     let dir = make_temp_dir();
     write_mock_state(&dir);
+
     fs::write(dir.join("completed.txt"), "not-a-number\n").unwrap();
     fs::write(dir.join("completed"), "not-a-number\n").unwrap();
+
+    // Corrupt the structured JSON state too so parsers that prefer it
+    // also observe invalid metadata.
+    fs::write(
+        dir.join(".workbuddy").join("status.json"),
+        r#"{
+  "supervisor_running": false,
+  "completed": "not-a-number",
+  "failed": 271828,
+  "recent_logs": [
+    "LOG_UNIQUE_ALPHA",
+    "LOG_UNIQUE_BETA",
+    "LOG_UNIQUE_GAMMA",
+    "LOG_UNIQUE_DELTA",
+    "LOG_UNIQUE_EPSILON"
+  ]
+}
+"#,
+    )
+    .unwrap();
 
     let err = workbuddy_rs::status::parse_status(&dir).expect_err("corrupt metadata should fail");
     let msg = err.to_string().to_lowercase();

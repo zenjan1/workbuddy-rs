@@ -13,6 +13,7 @@ use crate::llm::{Llm, Usage};
 use crate::plan::{Plan, Step, StepKind};
 use crate::util::clip;
 use crate::workspace::Workspace;
+use crate::status;
 
 const DEPS_CONTEXT_MAX: usize = 800;
 const SHELL_TIMEOUT_SECS: u64 = 60;
@@ -104,8 +105,10 @@ impl Executor {
     /// 拓扑并行执行计划:无依赖的步骤并发(受 max_parallel 限制),
     /// 失败时其全部下游标记为 skipped。返回 (按 id 排序的结果, 执行摘要)。
     pub async fn execute(&self, plan: &Plan) -> Result<(Vec<StepResult>, String)> {
+        let _ = crate::status::set_running(true);
         let start = std::time::Instant::now();
         let result = self.execute_inner(plan).await;
+        let _ = crate::status::set_running(false);
         let elapsed_ms = start.elapsed().as_millis() as u64;
         self.notify_webhook_result(plan, &result, elapsed_ms);
         result
@@ -176,6 +179,11 @@ impl Executor {
             }
             for o in batch {
                 let mark = if o.ok { "完成" } else { "失败" };
+                let step_summary = if o.ok {
+                    o.output.as_deref().map(|s| clip(s, 80).replace('\n', " ")).unwrap_or_default()
+                } else {
+                    o.error.as_deref().map(|s| clip(s, 120).to_string()).unwrap_or_default()
+                };
                 eprintln!(
                     "[执行] 步骤 {} [{}] {} ({:.1}s)",
                     o.id,
@@ -216,6 +224,7 @@ impl Executor {
                         char_usage: o.char_usage,
                     });
                 }
+                let _ = crate::status::record_step(o.id, o.ok, &step_summary);
                 done.insert(o.id);
             }
         }

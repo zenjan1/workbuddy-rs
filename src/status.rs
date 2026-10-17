@@ -122,6 +122,28 @@ pub fn run(workspace_dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub fn run_with_log_lines(workspace_dir: &Path, log_lines: usize) -> anyhow::Result<()> {
+    match parse_status(workspace_dir) {
+        Ok(mut summary) => {
+            let limit = log_lines.max(1);
+            summary.recent_logs.truncate(limit);
+            println!("{}", format_status(&summary));
+        }
+        Err(err) => {
+            eprintln!("workbuddy status: 无法读取运行状态: {err:#}");
+        }
+    }
+    Ok(())
+}
+
+pub fn set_running(_running: bool) -> anyhow::Result<()> {
+    Ok(())
+}
+
+pub fn record_step(_id: usize, _ok: bool, _summary: &str) -> anyhow::Result<()> {
+    Ok(())
+}
+
 
 pub fn parse_status(workspace_dir: &Path) -> anyhow::Result<StatusSummary> {
     parse_status_inner(workspace_dir, None)
@@ -169,7 +191,10 @@ fn parse_status_inner(
         } else if workspace_dir.join("runs").is_dir() {
             StatusSummary::from_history_with_limit(&[], 5)
         } else {
-            anyhow::bail!("缺少运行状态元数据（未找到 runs 目录、status.json 或 workbuddy.log）")
+            anyhow::bail!(
+                "missing status metadata: no run history, log, status, or runs directory in {}",
+                workspace_dir.display()
+            );
         }
     };
     summary.supervisor_running = supervisor_running;
@@ -574,6 +599,62 @@ mod tests {
     fn format_task_id_keeps_numeric_indices_and_slugs() {
         assert_eq!(format_task_id("1"), "1");
         assert_eq!(format_task_id("add-status-command"), "add-status-command");
+    }
+
+    #[test]
+    fn parse_status_missing_file_falls_back_to_defaults() {
+        let workspace = test_workspace("missing-status");
+        fs::create_dir_all(&workspace).unwrap();
+        let summary = parse_status(&workspace).expect("status should fall back");
+        assert!(!summary.supervisor_running);
+        assert_eq!(summary.completed_runs, 0);
+        assert_eq!(summary.failed_runs, 0);
+        assert!(summary.recent_logs.is_empty());
+    }
+
+    #[test]
+    fn parse_status_reads_valid_status_json() {
+        let workspace = test_workspace("valid-status");
+        fs::create_dir_all(&workspace).unwrap();
+        let status_path = workspace.join(STATUS_FILE_NAME);
+        fs::write(
+            &status_path,
+            r#"{
+                "running": true,
+                "pid": 1234,
+                "completed": 3,
+                "failed": 2,
+                "last_log": "finished task"
+            }"#,
+        )
+        .unwrap();
+
+        let summary = parse_status(&workspace).expect("parse status");
+        assert!(summary.supervisor_running);
+        assert_eq!(summary.pid, Some(1234));
+        assert_eq!(summary.completed_runs, 3);
+        assert_eq!(summary.failed_runs, 2);
+        assert_eq!(summary.recent_logs, vec!["finished task".to_string()]);
+    }
+
+    #[test]
+    fn format_status_contains_required_fields() {
+        let summary = StatusSummary {
+            supervisor_running: true,
+            pid: Some(42),
+            completed_runs: 2,
+            failed_runs: 1,
+            recent_logs: vec!["task-a completed".to_string()],
+            running: true,
+            completed: 2,
+            failed: 1,
+        };
+        let output = format_status(&summary);
+        assert!(output.contains("Supervisor: running (pid 42)"));
+        assert!(output.contains("Completed: 2"));
+        assert!(output.contains("Failed: 1"));
+        assert!(output.contains("Recent logs:"));
+        assert!(output.contains("task-a completed"));
     }
 
     #[test]

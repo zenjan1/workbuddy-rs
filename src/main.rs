@@ -199,10 +199,11 @@ enum Cmd {
         /// 可选：任务标识符（数字索引、标题或 slug）
         id: Option<String>,
     },
-    /// 查看 workspace 运行状态(只读)
+    /// 查看 supervisor 运行状态与最近日志(只读)
     Status {
-        /// 可选：任务标识符（数字索引、标题或 slug）
-        id: Option<String>,
+        /// 最近日志条数（默认 10）
+        #[arg(long, default_value_t = 10)]
+        log_lines: usize,
     },
     /// 启动 TUI 界面查看 backlog(只读)
     Tui,
@@ -455,22 +456,9 @@ async fn main() -> Result<()> {
         Cmd::Memory { action } => {
             run_memory_command(action, &cfg)
         }
-        Cmd::Status { id } => {
-            if let Some(id) = id {
-                let runs = Workspace::root(&cfg.workspace_dir);
-                let _ = resolve_task_run(&runs, &id)?.ok_or_else(|| {
-                    anyhow::anyhow!("未找到任务 '{}'。请使用 `workbuddy list` 查看任务列表。", id)
-                })?;
-            }
-            match status::parse_status(&cfg.workspace_dir) {
-                Ok(summary) => println!("{}", status::format_status(&summary)),
-                Err(e) => {
-                    let empty = status::StatusSummary::from_history(&[]);
-                    println!("{}", status::format_status(&empty));
-                    eprintln!("workbuddy status: 无法读取运行状态: {e:#}");
-                }
-            }
-            Ok(())
+        Cmd::Status { log_lines } => {
+            let workspace_dir = std::env::current_dir()?;
+            status::run_with_log_lines(&workspace_dir, log_lines)
         },
         Cmd::Tui => {
             if let Err(e) = tui::run(&cfg.workspace_dir) {
@@ -603,10 +591,20 @@ mod status_cmd_tests {
     use super::*;
 
     #[test]
-    fn cli_parses_status() {
+    fn cli_parses_status_default_log_lines() {
         let cli = Cli::try_parse_from(["workbuddy", "status"]).expect("parse status");
         match cli.cmd {
-            Cmd::Status { id: None } => {}
+            Cmd::Status { log_lines } => assert_eq!(log_lines, 10),
+            _ => panic!("expected status command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_status_custom_log_lines() {
+        let cli = Cli::try_parse_from(["workbuddy", "status", "--log-lines", "25"])
+            .expect("parse status custom log lines");
+        match cli.cmd {
+            Cmd::Status { log_lines } => assert_eq!(log_lines, 25),
             _ => panic!("expected status command"),
         }
     }
