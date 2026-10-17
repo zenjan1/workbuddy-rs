@@ -722,3 +722,58 @@ fn config_set_automatic_type_conversion_persists_across_reads() {
         "false"
     );
 }
+
+#[test]
+fn config_set_creates_bak_backup_and_writes_valid_toml_after_typed_updates() {
+    let ws = TestWorkspace::new();
+    ws.write_initial_config();
+
+    let original = read_config(&ws);
+
+    set_config_value(&ws.config_path(), "model", "gpt-4o").expect("set model");
+
+    let backup_path = ws.path.join("config.toml.bak");
+    let backup = fs::read_to_string(&backup_path).unwrap_or_else(|err| {
+        panic!("backup file {} was not created: {}", backup_path.display(), err)
+    });
+    assert_eq!(
+        backup, original,
+        "backup content should match original config before update"
+    );
+
+    set_config_value(&ws.config_path(), "max_budget", "12000").expect("set max_budget");
+    set_config_value(&ws.config_path(), "stream", "false").expect("set stream");
+
+    let raw = read_config(&ws);
+    assert!(
+        raw.contains("model = \"gpt-4o\""),
+        "string value was not updated: {}",
+        raw
+    );
+    assert!(
+        raw.contains("max_budget = 12000"),
+        "integer value was not updated: {}",
+        raw
+    );
+    assert!(
+        raw.contains("stream = false"),
+        "boolean value was not updated: {}",
+        raw
+    );
+
+    assert_eq!(
+        get_config_value(&ws.config_path(), "model").expect("reparse updated model"),
+        "gpt-4o",
+        "updated config could not be parsed back for model"
+    );
+    assert_eq!(
+        get_config_value(&ws.config_path(), "max_budget").expect("reparse updated max_budget"),
+        "12000",
+        "updated config could not be parsed back for max_budget"
+    );
+    assert_eq!(
+        get_config_value(&ws.config_path(), "stream").expect("reparse updated stream"),
+        "false",
+        "updated config could not be parsed back for stream"
+    );
+}

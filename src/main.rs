@@ -349,7 +349,8 @@ async fn main() -> Result<()> {
                         anyhow::bail!("配置键不能为空");
                     }
 
-                    cfg.set(&key, &value).map_err(|e| {
+                    let config_path = config::find_config_path()?;
+                    config::set_config_value(&config_path, &key, &value).map_err(|e| {
                         anyhow::anyhow!(
                             "设置配置 {} = {} 失败：{}（提示：配置键可能不存在或值类型无效，现有配置未修改）",
                             key,

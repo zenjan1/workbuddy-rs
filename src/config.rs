@@ -538,6 +538,111 @@ const NESTED_CONFIG_KEYS: &[&str] = &[
     "cost.input_price_per_mtok",
 ];
 
+/// 将用户输入自动识别为 TOML 布尔值、整数或字符串。
+///
+/// 识别规则：
+/// - `true` / `false` 不区分大小写 -> 布尔值
+/// - 可解析为 `i64` 的输入 -> 整数
+/// - 其他输入 -> 字符串
+pub fn parse_config_value(value: &str) -> toml::Value {
+    let trimmed = value.trim();
+    if trimmed.eq_ignore_ascii_case("true") {
+        toml::Value::Boolean(true)
+    } else if trimmed.eq_ignore_ascii_case("false") {
+        toml::Value::Boolean(false)
+    } else if let Ok(i) = trimmed.parse::<i64>() {
+        toml::Value::Integer(i)
+    } else {
+        toml::Value::String(value.to_string())
+    }
+}
+
+/// 将键值写回指定 TOML 配置文件。
+///
+/// 读取现有配置（若存在），更新或插入键值；对未知配置键打印警告但允许写入
+/// （方便预留扩展键）。写入前将原文件备份为 `<config_path>.bak`，然后序列化
+/// 为合法 TOML 后写回。不会修改进程内已有 `Config` 实例。
+pub fn set_config_value_legacy(key: &str, value: &str, config_path: &Path) -> Result<()> {
+    let key = key.trim();
+    if key.is_empty() {
+        anyhow::bail!("配置键不能为空");
+    }
+    if key.split('.').any(|s| s.is_empty()) {
+        anyhow::bail!("配置键包含空路径段: {key}");
+    }
+
+    if !Config::is_known_config_key(key) {
+        eprintln!(
+            "警告: 配置键 {key} 不在已知配置列表中，将按预留扩展键写入。"
+        );
+    }
+
+    let typed_value = parse_config_value(value);
+
+    // 读取现有 TOML 或从空表开始。文件不存在时视为新文件。
+    let mut root = if config_path.exists() {
+        let text = std::fs::read_to_string(config_path)
+            .with_context(|| format!("读取配置文件失败: {}", config_path.display()))?;
+        if text.trim().is_empty() {
+            toml::map::Map::new()
+        } else {
+            let parsed: toml::Value = toml::from_str(&text)
+                .with_context(|| format!("解析配置文件失败: {}", config_path.display()))?;
+            parsed
+                .as_table()
+                .cloned()
+                .unwrap_or_else(|| toml::map::Map::new())
+        }
+    } else {
+        toml::map::Map::new()
+    };
+
+    insert_toml_value(&mut root, key, typed_value);
+
+    // 写入前备份原文件。
+    if config_path.exists() {
+        let backup_path = PathBuf::from(format!("{}.bak", config_path.display()));
+        std::fs::copy(config_path, &backup_path)
+            .with_context(|| format!("备份配置文件失败: {}", backup_path.display()))?;
+    }
+
+    if let Some(parent) = config_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("创建配置目录失败: {}", parent.display()))?;
+        }
+    }
+
+    let root_value = toml::Value::Table(root);
+    let serialized = toml::to_string(&root_value)
+        .context("序列化配置为 TOML 失败")?;
+    std::fs::write(config_path, serialized)
+        .with_context(|| format!("写入配置文件失败: {}", config_path.display()))
+}
+
+/// 将值插入 TOML 表，支持 `a.b.c` 形式的嵌套路径。
+fn insert_toml_value(
+    table: &mut toml::map::Map<String, toml::Value>,
+    key: &str,
+    value: toml::Value,
+) {
+    if let Some((parent, child)) = key.split_once('.') {
+        let entry = table
+            .entry(parent.to_string())
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+        let child_table = match entry.as_table_mut() {
+            Some(t) => t,
+            None => {
+                *entry = toml::Value::Table(toml::map::Map::new());
+                entry.as_table_mut().expect("just inserted table")
+            }
+        };
+        insert_toml_value(child_table, child, value);
+    } else {
+        table.insert(key.to_string(), value);
+    }
+}
+
 
 
 
