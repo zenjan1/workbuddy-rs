@@ -2,6 +2,7 @@
 pub mod agents;
 pub mod config;
 pub mod plan;
+pub mod roadmap;
 pub mod task_id;
 
 pub mod memory;
