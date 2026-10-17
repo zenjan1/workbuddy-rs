@@ -356,10 +356,18 @@ pub async fn serve_with_dir(workspace_dir: &Path, bind_addr: SocketAddr) -> anyh
         .route("/runs/{id}", get(get_run))
         .with_state(state);
 
+    // Ensure the service listens on the loopback interface only; port 0 is supported
+    // by the operating system and the actual bound port is returned below.
+    let bind_addr = SocketAddr::new(
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        bind_addr.port(),
+    );
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
     let local_addr = listener.local_addr()?;
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        if let Err(e) = axum::serve(listener, app).await {
+            eprintln!("serve error: {e}");
+        }
     });
     Ok(local_addr)
 }
