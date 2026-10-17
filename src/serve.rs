@@ -7,9 +7,10 @@ use anyhow::Result;
 use axum::{
     extract::{Path as AxumPath, RawQuery, State},
     http::StatusCode,
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::workspace::{RunRecord, Workspace};
@@ -132,6 +133,76 @@ struct AppState {
     workspace_dir: Arc<PathBuf>,
 }
 
+#[derive(Debug, Deserialize)]
+struct CreateRunRequest {
+    #[serde(default)]
+    task: Option<String>,
+}
+
+async fn create_run(
+    State(state): State<AppState>,
+    Json(payload): Json<CreateRunRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<serde_json::Value>)> {
+    let task = payload.task.unwrap_or_default().trim().to_string();
+    if task.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "task must not be empty" })),
+        ));
+    }
+
+    let ws = Workspace::create_new(&state.workspace_dir, &task).map_err(|err| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("failed to create run: {err}") })),
+        )
+    })?;
+    let id = ws
+        .dir
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| {
+            format!(
+                "run-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            )
+        });
+
+    let created = format!(
+        "{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    );
+    let queue_record = serde_json::to_value(&RunRecord {
+        id: id.clone(),
+        goal: task.clone(),
+        created,
+        model: "mock".to_string(),
+        mock: true,
+        steps: Vec::new(),
+        token_usage: None,
+        char_usage: None,
+    })
+    .unwrap_or_else(|_| json!({ "id": id.clone(), "goal": task.clone() }));
+
+    let queue_path = state.workspace_dir.join("runs.jsonl");
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&queue_path)
+        .and_then(|mut file| writeln!(file, "{queue_record}"));
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({ "id": id })),
+    ))
+}
+
 async fn health(State(state): State<AppState>) -> impl axum::response::IntoResponse {
     (StatusCode::OK, Json(json!({ "status": "ok", "workspace": state.workspace_dir.to_string_lossy() })))
 }
@@ -143,7 +214,7 @@ async fn list_runs(
     let all_runs = combined_runs_json(&state.workspace_dir);
     let (limit, offset) = parse_pagination(query.as_deref());
     let runs: Vec<serde_json::Value> = all_runs.into_iter().skip(offset).take(limit).collect();
-    Ok(Json(json!({ "runs": runs })))
+    Ok(Json(serde_json::Value::Array(runs)))
 }
 
 async fn get_run(
@@ -354,6 +425,7 @@ pub async fn serve_with_dir(workspace_dir: &Path, bind_addr: SocketAddr) -> anyh
         .route("/health", get(health))
         .route("/runs", get(list_runs))
         .route("/runs/{id}", get(get_run))
+        .route("/run", post(create_run))
         .with_state(state);
 
     // Ensure the service listens on the loopback interface only; port 0 is supported
@@ -479,6 +551,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn serve_post_run() {
+        let (workspace_dir, _) = create_test_workspace();
+        let state = AppState {
+            workspace_dir: Arc::new(workspace_dir.clone()),
+        };
+        let get_state = state.clone();
+        let app = Router::new()
+            .route("/run", post(create_run))
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/run")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_string(&json!({ "task": "echo test" })).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        let id = json["id"].as_str().expect("run id should be a string").to_string();
+        assert!(!id.is_empty());
+
+        let app_get = Router::new()
+            .route("/runs", get(list_runs))
+            .with_state(get_state);
+        let response = app_get
+            .oneshot(Request::builder().uri("/runs").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let runs_json: Value = serde_json::from_slice(&body).unwrap();
+        let runs = runs_json.as_array().expect("runs should be an array");
+        assert!(
+            runs.iter().any(|run| run["id"].as_str() == Some(id.as_str())),
+            "run {id} should be listed after POST /run"
+        );
+    }
+
+    #[tokio::test]
     async fn test_axum_http_routes() {
         let (workspace_dir, run_id) = create_test_workspace();
         let state = AppState {
@@ -510,8 +629,8 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let json: Value = serde_json::from_slice(&body).unwrap();
-        assert!(json.is_object());
-        let runs = json["runs"].as_array().unwrap();
+        assert!(json.is_array());
+        let runs = json.as_array().unwrap();
         assert_eq!(runs.len(), 1);
 
         // runs with pagination query: offset=1 should skip the only run
@@ -528,8 +647,8 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let json: Value = serde_json::from_slice(&body).unwrap();
-        assert!(json.is_object());
-        assert_eq!(json["runs"].as_array().unwrap().len(), 0);
+        assert!(json.is_array());
+        assert_eq!(json.as_array().unwrap().len(), 0);
 
         // runs/{id}
         let response = app
@@ -640,8 +759,8 @@ mod tests {
         let response = client.get(format!("{base_url}/runs")).send().await.unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         let json: Value = response.json().await.unwrap();
-        assert!(json.is_object());
-        let runs = json["runs"].as_array().unwrap();
+        assert!(json.is_array());
+        let runs = json.as_array().unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0]["id"], run_id);
         assert!(runs[0].get("steps").is_none());
