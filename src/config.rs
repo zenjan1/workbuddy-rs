@@ -121,6 +121,27 @@ const RESTART_REQUIRED_KEYS: &[&str] = &[
     "cost_per_1k_tokens",
 ];
 
+fn ensure_not_sensitive_config_key(key: &str) -> Result<()> {
+    let normalized_key = key.to_ascii_lowercase().replace('-', "_");
+    let sensitive_segments = [
+        "api_key",
+        "apikey",
+        "token",
+        "access_token",
+        "secret",
+        "password",
+    ];
+    if normalized_key
+        .split('.')
+        .any(|segment| sensitive_segments.contains(&segment))
+    {
+        anyhow::bail!(
+            "不允许通过 config set 修改敏感配置项 (sensitive configuration key): {key}"
+        );
+    }
+    Ok(())
+}
+
 impl Config {
     pub fn load() -> Result<Self> {
         let file = Self::load_file()?;
@@ -239,6 +260,53 @@ impl Config {
         self.set_value_with_summary(key, value).map(|_| ())
     }
 
+    /// `config set <key> <value>` 的兼容入口，支持点号嵌套路径。
+    ///
+    /// 对于顶层键，直接复用现有的持久化与校验逻辑；对于已存在的嵌套别名
+    /// （例如 `llm.model`），映射到 Config 中对应的运行时字段。未知嵌套节点
+    /// 或敏感认证信息会立即返回错误，不会创建缺失字段。
+    pub fn set(&mut self, key: &str, value: &str) -> Result<ConfigUpdateSummary> {
+        ensure_not_sensitive_config_key(key)?;
+
+        let segments: Vec<&str> = key.split('.').filter(|s| !s.is_empty()).collect();
+        if segments.is_empty() {
+            anyhow::bail!("配置键不能为空");
+        }
+
+        match segments.as_slice() {
+            ["llm", "model"] => {
+                let old_value = self.model.clone();
+                Self::update_config_file(&Self::config_file_path(), "llm.model", value)?;
+                self.model = value.to_string();
+                Ok(ConfigUpdateSummary {
+                    key: "llm.model".to_string(),
+                    old_value,
+                    new_value: value.to_string(),
+                    restart_required: RESTART_REQUIRED_KEYS.contains(&"model"),
+                })
+            }
+            ["llm", "temperature"] => {
+                let old_value = String::new();
+                Self::update_config_file(&Self::config_file_path(), "llm.temperature", value)?;
+                Ok(ConfigUpdateSummary {
+                    key: "llm.temperature".to_string(),
+                    old_value,
+                    new_value: value.to_string(),
+                    restart_required: false,
+                })
+            }
+            ["cost", "input_price_per_mtok"] => {
+                let mut summary = self.set_value_with_summary("cost_per_1k_tokens", value)?;
+                summary.key = "cost.input_price_per_mtok".to_string();
+                Ok(summary)
+            }
+            [single] => self.set_value_with_summary(single, value),
+            _ => anyhow::bail!(
+                "未知或不允许修改的嵌套配置键 (unknown nested configuration key): {key}"
+            ),
+        }
+    }
+
     /// `config set <key> <value>` 的入口方法。
     ///
     /// 该方法复用 [`set_value_with_summary`] 的完整校验和原子写入逻辑：
@@ -252,6 +320,10 @@ impl Config {
     /// 该方法先校验键名和值类型，再原子写回配置文件，最后更新内存配置。
     /// 任何一步失败都不会污染内存或配置文件。
     pub fn set_value_with_summary(&mut self, key: &str, value: &str) -> Result<ConfigUpdateSummary> {
+        ensure_not_sensitive_config_key(key)?;
+        if key.contains('.') {
+            return self.set(key, value);
+        }
         Self::validate_config_key(key)?;
         let canonical_key = normalize_config_key(key)?;
         let path = Self::config_file_path();
@@ -372,14 +444,18 @@ impl Config {
     /// 判断配置键是否允许通过 `config set` 写入。
     pub fn is_known_config_key(key: &str) -> bool {
         validate_key_syntax(key).is_ok()
-            && normalize_config_key(key)
-                .map(|canonical| CONFIG_KEYS.contains(&canonical))
-                .unwrap_or(false)
+            && (NESTED_CONFIG_KEYS.contains(&key)
+                || normalize_config_key(key)
+                    .map(|canonical| CONFIG_KEYS.contains(&canonical))
+                    .unwrap_or(false))
     }
 
     /// 校验配置键是否允许通过 `config set` 写入。
     pub fn validate_config_key(key: &str) -> Result<()> {
         validate_key_syntax(key)?;
+        if NESTED_CONFIG_KEYS.contains(&key) {
+            return Ok(());
+        }
         let canonical = normalize_config_key(key)?;
         if !CONFIG_KEYS.contains(&canonical) {
             anyhow::bail!(
@@ -441,6 +517,7 @@ impl Config {
 /// 支持通过 `config set` 修改的额外嵌套配置键（例如历史/别名配置）。
 const NESTED_CONFIG_KEYS: &[&str] = &[
     "llm.model",
+    "llm.max_budget",
     "llm.temperature",
     "cost.input_price_per_mtok",
 ];
@@ -450,14 +527,14 @@ const NESTED_CONFIG_KEYS: &[&str] = &[
 /// 使用文本行内替换修改单个顶层 TOML 配置键，保留注释和其他格式。
 pub fn set_config_value_inline(path: &Path, key: &str, value: &str) -> Result<()> {
     validate_key_syntax(key)?;
+    if key.contains('.') {
+        return set_config_value_file(path, key, value);
+    }
     if !CONFIG_KEYS.contains(&key) {
         anyhow::bail!(
             "未知配置键 (unknown configuration key): {key}; 可用键: {}",
             CONFIG_KEYS.join(", ")
         );
-    }
-    if key.contains('.') {
-        return set_config_value_file(path, key, value);
     }
 
     let item = parse_config_set_value(key, value)?;

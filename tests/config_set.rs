@@ -616,3 +616,36 @@ fn config_set_writes_new_whitelisted_key_to_toml_and_updates_runtime() {
         "runtime config did not reflect newly written key"
     );
 }
+
+#[test]
+fn cli_config_set_llm_model_reloads_and_reads_back() {
+    let ws = TestWorkspace::new();
+    ws.write_initial_config();
+
+    let output = run_config_set(&ws, "llm.model", "gpt-4o");
+    assert!(
+        output.status.success(),
+        "config set llm.model failed; stdout: {}, stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let raw = read_config(&ws);
+    let llm_section = raw
+        .split("[llm]")
+        .nth(1)
+        .expect("config should contain [llm] section");
+    assert!(
+        llm_section.contains("model = \"gpt-4o\""),
+        "llm.model was not persisted in [llm]: {}",
+        raw
+    );
+    assert!(
+        raw.contains("model = \"default-model\""),
+        "top-level model should be preserved: {}",
+        raw
+    );
+
+    let read_back = get_config_value(&ws.config_path(), "llm.model").expect("get llm.model");
+    assert_eq!(read_back, "gpt-4o", "config value read back did not match");
+}
