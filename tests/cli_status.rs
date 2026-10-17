@@ -342,3 +342,33 @@ fn status_report_paths_are_fully_offline() {
     let output = workbuddy_rs::status::format_status(&report);
     assert!(output.contains("offline-log"));
 }
+
+#[test]
+fn status_degrades_to_legacy_files_and_log_aggregation_when_no_state_json() {
+    let dir = make_temp_dir();
+
+    fs::write(dir.join("completed.txt"), "123\n").unwrap();
+    fs::write(dir.join("completed"), "123\n").unwrap();
+    fs::write(dir.join("failed.txt"), "456\n").unwrap();
+    fs::write(dir.join("failed"), "456\n").unwrap();
+    fs::write(
+        dir.join("workbuddy.log"),
+        "OLD_1\nRECENT_1\nRECENT_2\nRECENT_3\nRECENT_4\nRECENT_5\n",
+    )
+    .unwrap();
+
+    let report = workbuddy_rs::status::parse_status(&dir)
+        .expect("legacy state and log aggregation should succeed");
+
+    assert_eq!(report.completed_runs, 123);
+    assert_eq!(report.failed_runs, 456);
+
+    let expected_recent_logs = vec![
+        "RECENT_1".to_string(),
+        "RECENT_2".to_string(),
+        "RECENT_3".to_string(),
+        "RECENT_4".to_string(),
+        "RECENT_5".to_string(),
+    ];
+    assert_eq!(report.recent_logs, expected_recent_logs);
+}

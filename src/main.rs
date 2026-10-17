@@ -436,7 +436,8 @@ async fn main() -> Result<()> {
             run_memory_command(action, &cfg)
         }
         Cmd::Status { log_lines } => {
-            let workspace_dir = std::env::current_dir()?;
+            let workspace_dir = std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."));
             status::run_with_log_lines(&workspace_dir, log_lines)
         },
         Cmd::Tui => {

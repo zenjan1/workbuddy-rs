@@ -88,7 +88,7 @@ impl StatusSummary {
         Self::from_history_with_limit(history, 5)
     }
 
-    fn from_history_with_limit(history: &[HistoryEntry], limit: usize) -> StatusSummary {
+    pub(crate) fn from_history_with_limit(history: &[HistoryEntry], limit: usize) -> StatusSummary {
         let completed_runs = history.iter().filter(|entry| entry.success).count();
         let failed_runs = history.len() - completed_runs;
         let recent_logs = history
@@ -157,6 +157,19 @@ pub fn parse_status_from_run_log(
     parse_status_inner(workspace_dir, Some(run_log_path))
 }
 
+pub(crate) fn parse_run_log_entries(
+    run_log_path: &Path,
+    cost_per_1k_tokens: Option<f64>,
+) -> anyhow::Result<Vec<HistoryEntry>> {
+    let data = fs::read_to_string(run_log_path)
+        .with_context(|| format!("读取运行日志失败 {}", run_log_path.display()))?;
+    let record: RunRecord = serde_json::from_str(&data)
+        .with_context(|| format!("解析运行日志失败 {}", run_log_path.display()))?;
+    let raw: serde_json::Value = serde_json::from_str(&data)
+        .with_context(|| format!("解析运行日志失败 {}", run_log_path.display()))?;
+    Ok(history_entries_from_run(&record, &raw, cost_per_1k_tokens))
+}
+
 fn parse_status_inner(
     workspace_dir: &Path,
     run_log_path: Option<&Path>,
@@ -165,13 +178,7 @@ fn parse_status_inner(
     let pid = read_supervisor_pid(workspace_dir)?;
     let cost_per_1k_tokens = read_cost_per_1k_tokens(workspace_dir);
     let mut summary = if let Some(path) = run_log_path {
-        let data = fs::read_to_string(path)
-            .with_context(|| format!("读取运行日志失败 {}", path.display()))?;
-        let record: RunRecord = serde_json::from_str(&data)
-            .with_context(|| format!("解析运行日志失败 {}", path.display()))?;
-        let raw: serde_json::Value = serde_json::from_str(&data)
-            .with_context(|| format!("解析运行日志失败 {}", path.display()))?;
-        let history = history_entries_from_run(&record, &raw, cost_per_1k_tokens);
+        let history = parse_run_log_entries(path, cost_per_1k_tokens)?;
         StatusSummary::from_history_with_limit(&history, 5)
     } else {
         let run_files = collect_run_files(workspace_dir)?;
@@ -330,7 +337,7 @@ fn usage_from_json(raw: &serde_json::Value, record: &RunRecord) -> RunUsage {
     }
 }
 
-fn history_entries_from_run(
+pub(crate) fn history_entries_from_run(
     record: &RunRecord,
     raw: &serde_json::Value,
     cost_per_1k_tokens: Option<f64>,
