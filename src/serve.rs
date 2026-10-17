@@ -371,12 +371,8 @@ pub async fn serve_with_dir(workspace_dir: &Path, bind_addr: SocketAddr) -> anyh
     Ok(local_addr)
 }
 
-pub async fn serve(port: u16) -> anyhow::Result<SocketAddr> {
-    let workspace_dir = std::env::var("WORKBUDDY_WORKSPACE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(".workbuddy"));
-    let addr = SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
-    serve_with_dir(&workspace_dir, addr).await
+pub async fn serve(workspace_dir: &Path, bind_addr: SocketAddr) -> anyhow::Result<SocketAddr> {
+    serve_with_dir(workspace_dir, bind_addr).await
 }
 
 pub async fn start(workspace_dir: &Path, port: u16) -> anyhow::Result<u16> {

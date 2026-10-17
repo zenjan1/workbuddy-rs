@@ -206,13 +206,13 @@ enum Cmd {
     },
     /// 启动 TUI 界面查看 backlog(只读)
     Tui,
-    /// 启动只读 HTTP 服务（固定绑定 127.0.0.1）
+    /// 启动只读 HTTP 服务（固定绑定 127.0.0.1，默认使用临时端口）
     Serve {
         /// 数据目录（默认使用配置的 workspace_dir）
         #[arg(long)]
         data_dir: Option<std::path::PathBuf>,
-        /// 监听端口（默认 8080；测试可传 0 由系统分配）
-        #[arg(short, long, default_value_t = 8080)]
+        /// 监听端口（默认 0 表示由系统分配临时端口；可显式指定）
+        #[arg(short, long, default_value_t = 0)]
         port: u16,
     },
     /// 持久记忆：添加、列出或获取键值对
@@ -476,7 +476,12 @@ async fn main() -> Result<()> {
         Cmd::Serve { data_dir, port } => {
             let workspace_dir = data_dir.unwrap_or_else(|| cfg.workspace_dir.clone());
             let bind_addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-            println!("正在启动只读 HTTP 服务: http://{bind_addr}");
+            let addr_label = if port == 0 {
+                "127.0.0.1:0（系统分配临时端口）".to_string()
+            } else {
+                format!("http://{}", bind_addr)
+            };
+            println!("正在启动只读 HTTP 服务: {}", addr_label);
             serve::run(&workspace_dir, bind_addr)
                 .await
                 .map_err(|e| anyhow::anyhow!("启动只读 HTTP 服务失败（地址 {bind_addr}）: {e:#}"))?;
@@ -613,7 +618,7 @@ mod serve_cmd_tests {
                 data_dir: None,
                 port,
             } => {
-                assert_eq!(port, 8080);
+                assert_eq!(port, 0);
             }
             _ => panic!("expected serve command with defaults"),
         }
