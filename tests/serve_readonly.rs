@@ -386,3 +386,77 @@ fn serve_releases_port_after_shutdown() {
 
     wait_for_port_release(addr, Duration::from_secs(5));
 }
+
+#[test]
+fn serve_readonly_run_list_and_detail_have_expected_json_shapes() {
+    let temp = TestWorkspace::new();
+
+    let run_ids = ["shape-run-1", "shape-run-2"];
+    seed_mock_run_history(&temp, &run_ids);
+
+    let addr = serve_readonly(temp.path()).expect("failed to start read-only server");
+
+    let (status, body) = http_request(addr, "GET", "/runs");
+    assert_eq!(status, 200, "/runs returned status {status}, body: {body}");
+    let runs: Vec<serde_json::Value> =
+        serde_json::from_str(&body).expect("/runs body is not valid JSON");
+    assert_eq!(runs.len(), 2, "expected 2 runs, got: {body}");
+
+    for run in &runs {
+        let run = run.as_object().unwrap_or_else(|| {
+            panic!("run list item is not a JSON object: {body}")
+        });
+
+        assert!(run.contains_key("id"), "run is missing id: {run:?}");
+        assert!(
+            run["id"].is_string(),
+            "run id is not a string: {run:?}"
+        );
+
+        assert!(
+            run.contains_key("command"),
+            "run is missing command: {run:?}"
+        );
+        assert!(
+            run["command"].is_string(),
+            "run command is not a string: {run:?}"
+        );
+
+        assert!(run.contains_key("cwd"), "run is missing cwd: {run:?}");
+        assert!(
+            run["cwd"].is_string(),
+            "run cwd is not a string: {run:?}"
+        );
+    }
+
+    let (status, body) = http_request(addr, "GET", "/runs/shape-run-1");
+    assert_eq!(
+        status, 200,
+        "GET /runs/shape-run-1 returned status {status}, body: {body}"
+    );
+    let detail: serde_json::Value =
+        serde_json::from_str(&body).expect("run detail body is not valid JSON");
+    let detail = detail
+        .as_object()
+        .unwrap_or_else(|| panic!("run detail is not a JSON object: {body}"));
+
+    assert_eq!(
+        detail["id"].as_str(),
+        Some("shape-run-1"),
+        "unexpected run detail id: {body}"
+    );
+    assert!(
+        detail["command"].is_string(),
+        "run detail command is not a string: {body}"
+    );
+    assert!(
+        detail["cwd"].is_string(),
+        "run detail cwd is not a string: {body}"
+    );
+
+    let (status, body) = http_request(addr, "GET", "/runs/shape-run-missing");
+    assert_eq!(
+        status, 404,
+        "GET /runs/shape-run-missing should return 404, got {status}, body: {body}"
+    );
+}

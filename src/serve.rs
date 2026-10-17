@@ -122,7 +122,7 @@ fn combined_runs_json(workspace_dir: &Path) -> Vec<serde_json::Value> {
     for value in load_history_values(workspace_dir) {
         let id = run_id_of_value(&value).unwrap_or("");
         if id.is_empty() || !runs.iter().any(|existing| run_id_of_value(existing) == Some(id)) {
-            runs.push(summarize_run_json(&value));
+            runs.push(value);
         }
     }
     runs

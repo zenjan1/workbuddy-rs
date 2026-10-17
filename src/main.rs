@@ -179,8 +179,8 @@ enum Cmd {
         /// 监听地址（仅允许本机回环地址）
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
-        /// 监听端口（默认 0 表示由系统分配临时端口；可显式指定）
-        #[arg(short, long, default_value_t = 0)]
+        /// 监听端口（默认 8787）
+        #[arg(short, long, default_value_t = 8787)]
         port: u16,
     },
     /// 持久记忆：添加、列出或获取记忆条目
@@ -631,7 +631,7 @@ mod serve_cmd_tests {
                 port,
             } => {
                 assert_eq!(host, "127.0.0.1");
-                assert_eq!(port, 0);
+                assert_eq!(port, 8787);
             }
             _ => panic!("expected serve command with defaults"),
         }
