@@ -108,7 +108,6 @@ const CONFIG_KEYS: &[&str] = &[
     "webhook_enabled",
     "webhook_retry",
     "webhook_timeout_secs",
-    "stream",
 ];
 
 /// 修改后需要重启进程才会生效的配置键。
@@ -292,6 +291,11 @@ impl Config {
                 })
             }
             ["llm", "temperature"] => {
+                let parsed: f64 = value.parse()
+                    .with_context(|| format!("llm.temperature 需要是数字 (invalid number)"))?;
+                if !parsed.is_finite() {
+                    anyhow::bail!("llm.temperature 必须是有限数字");
+                }
                 let old_value = String::new();
                 Self::update_config_file(&Self::config_file_path(), "llm.temperature", value)?;
                 Ok(ConfigUpdateSummary {
@@ -304,6 +308,11 @@ impl Config {
             ["cost", "input_price_per_mtok"] => {
                 let mut summary = self.set_value_with_summary("cost_per_1k_tokens", value)?;
                 summary.key = "cost.input_price_per_mtok".to_string();
+                Ok(summary)
+            }
+            ["llm", "max_budget"] => {
+                let mut summary = self.set_value_with_summary("max_budget", value)?;
+                summary.key = "llm.max_budget".to_string();
                 Ok(summary)
             }
             [single] => self.set_value_with_summary(single, value),
