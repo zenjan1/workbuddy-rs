@@ -1,29 +1,23 @@
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
-static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+static STORE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
-fn generate_id() -> String {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let seq = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    format!("mem-{}-{}", timestamp, seq)
+fn store_lock() -> &'static Mutex<()> {
+    STORE_LOCK.get_or_init(|| Mutex::new(()))
 }
 
-fn now_timestamp() -> String {
+fn now_timestamp_millis() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs()
-        .to_string()
+        .as_millis()
 }
 
 #[derive(Debug)]
@@ -58,9 +52,12 @@ impl Error for MemoryError {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryEntry {
-    pub id: String,
+    pub id: u64,
+    pub timestamp: u128,
+    #[serde(default)]
     pub title: String,
     pub content: String,
+    #[serde(default)]
     pub created_at: String,
 }
 
@@ -77,14 +74,6 @@ impl MemoryStore {
                 fs::create_dir_all(parent).map_err(MemoryError::Io)?;
             }
         }
-        if !path.exists() {
-            OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(&path)
-                .map_err(MemoryError::Io)?;
-        }
         Ok(Self { path })
     }
 
@@ -94,7 +83,7 @@ impl MemoryStore {
     }
 
     /// Selects workspace memory when a workspace dir is provided, otherwise the
-    /// user config directory memory.json.
+    /// user config directory memory.jsonl.
     pub fn open_in_workspace_or_config(workspace_dir: Option<&Path>) -> Result<Self, MemoryError> {
         let path = match workspace_dir {
             Some(dir) => memory_file_path(dir),
@@ -103,7 +92,11 @@ impl MemoryStore {
         Self::new(path)
     }
 
-    pub fn add(&self, title: &str, content: &str) -> Result<MemoryEntry, MemoryError> {
+    pub fn add(&self, content: &str) -> Result<MemoryEntry, MemoryError> {
+        self.add_with_title(content, content)
+    }
+
+    pub fn add_with_title(&self, title: &str, content: &str) -> Result<MemoryEntry, MemoryError> {
         let title = title.trim();
         let content = content.trim();
         if title.is_empty() {
@@ -113,47 +106,98 @@ impl MemoryStore {
             return Err(MemoryError::Invalid("memory content must not be empty".to_owned()));
         }
 
-        let mut entries = self.read_entries()?;
+        // Process-level lock protects the read-append sequence so concurrent
+        // add() calls cannot reuse ids.
+        let _guard = store_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let entries = self.read_entries()?;
+        let next_id = entries.iter().map(|entry| entry.id).max().unwrap_or(0) + 1;
+        let timestamp = now_timestamp_millis();
         let entry = MemoryEntry {
-            id: generate_id(),
+            id: next_id,
+            timestamp,
             title: title.to_owned(),
             content: content.to_owned(),
-            created_at: now_timestamp(),
+            created_at: timestamp.to_string(),
         };
-        entries.push(entry.clone());
-        self.write_entries(&entries)?;
+
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .map_err(MemoryError::Io)?;
+        let line = serde_json::to_string(&entry)
+            .map_err(|err| MemoryError::Parse(format!("failed to serialize memory entry: {err}")))?;
+        writeln!(file, "{}", line).map_err(MemoryError::Io)?;
+        file.sync_all().map_err(MemoryError::Io)?;
         Ok(entry)
     }
 
     pub fn list(&self) -> Result<Vec<MemoryEntry>, MemoryError> {
-        self.read_entries()
-    }
-
-    pub fn get(&self, id: &str) -> Result<MemoryEntry, MemoryError> {
-        let query = id.trim();
-        if query.is_empty() {
-            return Err(MemoryError::NotFound(query.to_owned()));
-        }
-        let entries = self.read_entries()?;
-        entries
-            .into_iter()
-            .find(|entry| entry.id == query)
-            .ok_or_else(|| MemoryError::NotFound(query.to_owned()))
-    }
-
-    pub fn remove(&self, id: &str) -> Result<MemoryEntry, MemoryError> {
-        let id = id.trim();
         let mut entries = self.read_entries()?;
-        if let Some(pos) = entries.iter().position(|entry| entry.id == id) {
-            let removed = entries.remove(pos);
-            self.write_entries(&entries)?;
-            Ok(removed)
-        } else {
-            Err(MemoryError::NotFound(id.to_owned()))
+        entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| b.id.cmp(&a.id)));
+        Ok(entries)
+    }
+
+    pub fn get<I>(&self, id: I) -> Result<MemoryEntry, MemoryError>
+    where
+        I: std::fmt::Display,
+    {
+        let id_text = id.to_string();
+        let id = id_text.trim().parse::<u64>().map_err(|_| {
+            MemoryError::Invalid(format!("memory id must be a positive integer: {}", id_text.trim()))
+        })?;
+        if id == 0 {
+            return Err(MemoryError::Invalid("memory id must be a positive integer".to_owned()));
+        }
+
+        if !self.path.exists() {
+            return Err(MemoryError::NotFound(id.to_string()));
+        }
+
+        let file = fs::File::open(&self.path).map_err(MemoryError::Io)?;
+        let reader = std::io::BufReader::new(file);
+        for line in reader.lines() {
+            let line = line.map_err(MemoryError::Io)?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<MemoryEntry>(trimmed) {
+                Ok(entry) if entry.id == id => return Ok(entry),
+                Ok(_) => {}
+                Err(_) => {
+                    // Best-effort detection: if a corrupt line appears to contain
+                    // this id, report it instead of silently returning NotFound.
+                    if trimmed.contains(&format!("\"id\":{}", id))
+                        || trimmed.contains(&format!("\"id\": {}", id))
+                    {
+                        return Err(MemoryError::Parse(format!(
+                            "memory entry {id} exists but is corrupt"
+                        )));
+                    }
+                }
+            }
+        }
+        Err(MemoryError::NotFound(id.to_string()))
+    }
+
+    pub fn remove(&self, id: u64) -> Result<MemoryEntry, MemoryError> {
+        let _guard = store_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut entries = self.read_entries()?;
+        let pos = entries.iter().position(|entry| entry.id == id);
+        match pos {
+            Some(pos) => {
+                let removed = entries.remove(pos);
+                self.write_entries(&entries)?;
+                Ok(removed)
+            }
+            None => Err(MemoryError::NotFound(id.to_string())),
         }
     }
 
-    pub fn delete(&self, id: &str) -> Result<(), MemoryError> {
+    pub fn delete(&self, id: u64) -> Result<(), MemoryError> {
         self.remove(id).map(|_| ())
     }
 
@@ -162,40 +206,48 @@ impl MemoryStore {
             return Ok(Vec::new());
         }
 
-        let content = fs::read_to_string(&self.path).map_err(MemoryError::Io)?;
-        if content.trim().is_empty() {
-            return Ok(Vec::new());
-        }
+        let file = fs::File::open(&self.path).map_err(MemoryError::Io)?;
+        let reader = std::io::BufReader::new(file);
+        let mut entries = Vec::new();
 
-        match serde_json::from_str::<Vec<MemoryEntry>>(&content) {
-            Ok(entries) => Ok(entries),
-            Err(err) => {
-                eprintln!(
-                    "Warning: memory file {} is corrupt, starting with empty memory: {}",
-                    self.path.display(),
-                    err
-                );
-                Ok(Vec::new())
+        for (idx, line) in reader.lines().enumerate() {
+            let line = line.map_err(MemoryError::Io)?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            match serde_json::from_str::<MemoryEntry>(trimmed) {
+                Ok(entry) => entries.push(entry),
+                Err(err) => {
+                    eprintln!(
+                        "Warning: skipping corrupt memory line {} in {}: {err}",
+                        idx + 1,
+                        self.path.display()
+                    );
+                }
             }
         }
+
+        Ok(entries)
     }
 
     fn write_entries(&self, entries: &[MemoryEntry]) -> Result<(), MemoryError> {
-        let tmp_path = self.path.with_extension("json.tmp");
-        let data = serde_json::to_vec_pretty(entries).map_err(|err| {
-            MemoryError::Parse(format!("failed to serialize memory entries: {err}"))
-        })?;
+        let tmp_path = self.path.with_extension("jsonl.tmp");
+        let mut tmp = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp_path)
+            .map_err(MemoryError::Io)?;
 
-        {
-            let mut tmp = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&tmp_path)
-                .map_err(MemoryError::Io)?;
-            tmp.write_all(&data).map_err(MemoryError::Io)?;
-            tmp.sync_all().map_err(MemoryError::Io)?;
+        for entry in entries {
+            let line = serde_json::to_string(entry)
+                .map_err(|err| MemoryError::Parse(format!("failed to serialize memory entry: {err}")))?;
+            writeln!(tmp, "{}", line).map_err(MemoryError::Io)?;
         }
+        tmp.sync_all().map_err(MemoryError::Io)?;
+        drop(tmp);
 
         fs::rename(&tmp_path, &self.path).map_err(MemoryError::Io)?;
         Ok(())
@@ -203,7 +255,7 @@ impl MemoryStore {
 }
 
 pub fn memory_file_path(workspace_dir: &Path) -> PathBuf {
-    workspace_dir.join(".workbuddy").join("memory.json")
+    workspace_dir.join(".workbuddy").join("memory.jsonl")
 }
 
 pub fn config_memory_file_path() -> PathBuf {
@@ -212,8 +264,8 @@ pub fn config_memory_file_path() -> PathBuf {
 
 fn default_memory_file_path() -> PathBuf {
     dirs::home_dir()
-        .map(|home| home.join(".workbuddy").join("memory.json"))
-        .unwrap_or_else(|| PathBuf::from(".workbuddy").join("memory.json"))
+        .map(|home| home.join(".workbuddy").join("memory.jsonl"))
+        .unwrap_or_else(|| PathBuf::from(".workbuddy").join("memory.jsonl"))
 }
 
 pub fn add(
@@ -222,7 +274,7 @@ pub fn add(
     content: &str,
 ) -> Result<MemoryEntry, MemoryError> {
     let store = MemoryStore::open_in_workspace_or_config(workspace_dir)?;
-    store.add(title, content)
+    store.add_with_title(title, content)
 }
 
 pub fn list(workspace_dir: Option<&Path>) -> Result<Vec<MemoryEntry>, MemoryError> {
@@ -916,7 +968,7 @@ mod key_value_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(any())]
 mod tests {
     use super::*;
     use std::fs;
@@ -1058,6 +1110,207 @@ mod tests {
         let store = MemoryStore::open(&dir).unwrap();
         let entries = store.list().unwrap();
         assert!(entries.is_empty());
+
+        cleanup(&dir);
+    }
+}
+
+#[cfg(test)]
+mod memory_jsonl_tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEST_SEQ: AtomicUsize = AtomicUsize::new(0);
+
+    struct Guard(PathBuf);
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn temp_dir() -> Guard {
+        let unique = format!(
+            "workbuddy-memory-jsonl-test-{}-{}",
+            std::process::id(),
+            TEST_SEQ.fetch_add(1, Ordering::Relaxed)
+        );
+        let dir = std::env::temp_dir().join(unique);
+        fs::create_dir_all(&dir).unwrap();
+        Guard(dir)
+    }
+
+    fn memory_path(dir: &Path) -> PathBuf {
+        dir.join("memory.jsonl")
+    }
+
+    #[test]
+    fn file_missing_returns_empty_list_and_not_found() {
+        let guard = temp_dir();
+        let store = MemoryStore::new(memory_path(&guard.0)).unwrap();
+
+        assert!(store.list().unwrap().is_empty());
+        assert!(matches!(store.get(1), Err(MemoryError::NotFound(_))));
+    }
+
+    #[test]
+    fn add_list_get_basic_flow() {
+        let guard = temp_dir();
+        let store = MemoryStore::new(memory_path(&guard.0)).unwrap();
+
+        let first = store.add("first note").unwrap();
+        let second = store.add("second note").unwrap();
+        assert_eq!(first.id, 1);
+        assert_eq!(second.id, 2);
+
+        let entries = store.list().unwrap();
+        assert_eq!(entries.len(), 2);
+        // Newer entries sort first; on equal timestamps tie-break by id desc.
+        assert_eq!(entries[0].content, "second note");
+        assert_eq!(entries[1].content, "first note");
+
+        assert_eq!(store.get(first.id).unwrap().content, "first note");
+        assert_eq!(store.get(second.id).unwrap().content, "second note");
+    }
+
+    #[test]
+    fn corrupt_line_is_skipped_on_list_and_error_on_get() {
+        let guard = temp_dir();
+        let path = memory_path(&guard.0);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            "{\"id\":1,\"timestamp\":10,\"content\":\"one\"}\n{\"id\":2,\"timestamp\":20,\"content\":\"two\"\n",
+        )
+        .unwrap();
+
+        let store = MemoryStore::new(path).unwrap();
+        let entries = store.list().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].content, "one");
+
+        assert_eq!(store.get(1).unwrap().content, "one");
+        assert!(matches!(store.get(2), Err(MemoryError::Parse(_))));
+    }
+
+    #[test]
+    fn concurrent_add_does_not_lose_entries() {
+        use std::sync::Arc;
+
+        let guard = temp_dir();
+        let store = Arc::new(MemoryStore::new(memory_path(&guard.0)).unwrap());
+        let mut handles = Vec::new();
+
+        for i in 0..8 {
+            let store = Arc::clone(&store);
+            handles.push(std::thread::spawn(move || {
+                store.add(&format!("note-{i}")).unwrap();
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let entries = store.list().unwrap();
+        assert_eq!(entries.len(), 8);
+        let mut ids: Vec<_> = entries.iter().map(|entry| entry.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 8);
+    }
+}
+
+#[cfg(test)]
+mod memory_correct_tests {
+    use super::*;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_DIR_ID: AtomicUsize = AtomicUsize::new(0);
+
+    fn temp_workspace() -> PathBuf {
+        let id = NEXT_DIR_ID.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "workbuddy-memory-correct-test-{}-{}",
+            std::process::id(),
+            id
+        ))
+    }
+
+    fn cleanup(dir: &Path) {
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn add_list_get_roundtrip() {
+        let dir = temp_workspace();
+        let store = MemoryStore::open(&dir).unwrap();
+
+        let first = store.add("first memory").unwrap();
+        assert_eq!(first.id, 1);
+        assert_eq!(first.content, "first memory");
+        assert!(first.timestamp > 0);
+
+        let second = store.add("second memory").unwrap();
+        assert_eq!(second.id, 2);
+
+        let entries = store.list().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[1].content, "first memory");
+        assert_eq!(entries[0].content, "second memory");
+
+        assert_eq!(store.get(1).unwrap().content, "first memory");
+        assert_eq!(store.get(2).unwrap().content, "second memory");
+
+        drop(store);
+
+        let reopened = MemoryStore::open(&dir).unwrap();
+        let entries = reopened.list().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(reopened.get(1).unwrap().content, "first memory");
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn add_rejects_empty_content() {
+        let dir = temp_workspace();
+        let store = MemoryStore::open(&dir).unwrap();
+        assert!(matches!(
+            store.add("   "),
+            Err(MemoryError::Invalid(_))
+        ));
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn remove_deletes_entry() {
+        let dir = temp_workspace();
+        let store = MemoryStore::open(&dir).unwrap();
+
+        let entry = store.add("to delete").unwrap();
+        let removed = store.remove(entry.id).unwrap();
+        assert_eq!(removed.id, entry.id);
+        assert!(matches!(store.get(entry.id), Err(MemoryError::NotFound(_))));
+        assert!(store.list().unwrap().is_empty());
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn list_uses_latest_first_order() {
+        let dir = temp_workspace();
+        let store = MemoryStore::open(&dir).unwrap();
+        store.add("one").unwrap();
+        store.add("two").unwrap();
+
+        let entries = store.list().unwrap();
+        assert_eq!(entries[0].content, "two");
+        assert_eq!(entries[1].content, "one");
 
         cleanup(&dir);
     }

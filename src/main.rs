@@ -511,7 +511,7 @@ fn run_memory_command(action: MemoryAction, cfg: &Config) -> Result<()> {
             if text.trim().is_empty() {
                 anyhow::bail!("记忆内容不能为空");
             }
-            store.add(title, &text)
+            store.add_with_title(title, &text)
                 .map_err(|e| anyhow::anyhow!("添加记忆失败: {e}"))?;
             println!("已保存记忆：{}", title);
         }

@@ -207,6 +207,12 @@ impl Workspace {
         self.dir.join("meta.json")
     }
 
+    /// 返回 memory 存储文件路径，位于 workspace 根目录下。
+    /// 文件名为 memory.jsonl，用于持久化记忆条目。
+    pub fn memory_path(root: &Path) -> PathBuf {
+        root.join("memory.jsonl")
+    }
+
     /// 返回 memory 存储文件路径，位于 workspace 根目录下的 .workbuddy 目录中。
     /// 会尝试创建父目录；创建失败时仍返回路径，由写入方报告具体错误。
     pub fn memory_file_path(root: &Path) -> PathBuf {
