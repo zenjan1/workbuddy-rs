@@ -316,12 +316,14 @@ fn history_entries_from_run(
     };
     let content = truncate_chars(&content, 80);
     let state = if success { "completed" } else { "failed" };
-    let task_id_display = format_task_id(record.id.as_str());
-    let slug_alias = TaskId::slugify(&record.goal);
-    let task_id_display = if !slug_alias.is_empty() && slug_alias != task_id_display {
-        format!("{} ({})", task_id_display, slug_alias)
+    let legacy_id = format_task_id(record.id.as_str());
+    let slug = TaskId::slugify(&record.goal);
+    let task_id_display = if slug.is_empty() {
+        legacy_id
+    } else if slug != legacy_id {
+        format!("{} ({})", slug, legacy_id)
     } else {
-        task_id_display
+        slug
     };
     let title = truncate_chars(&record.goal, 60);
     let log = format!(

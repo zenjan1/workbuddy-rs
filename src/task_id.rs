@@ -203,66 +203,65 @@ fn duplicate_or_ambiguous(query: &str, matches: Vec<(usize, String)>) -> TaskIdE
 /// 解析原始 task_id 参数。
 ///
 /// 解析顺序：
-/// 1. 如果输入可解析为数字索引，优先返回 `TaskId::Numeric`；
-/// 2. 否则按标题全称或 slug 精确匹配；
-/// 3. 如果未找到精确匹配，按标题前缀或 slug 前缀匹配；
+/// 1. 优先按标题 slug 精确匹配；
+/// 2. 如果未找到精确匹配，按 slug 前缀匹配；
+/// 3. 若 slug 匹配无结果，回退到数字索引解析，保持旧行为；
 /// 4. 所有匹配失败返回 `NotFound`，错误中包含可用任务列表；
-///    多个前缀匹配返回 `Ambiguous`，提示用户使用数字索引。
+///    多个匹配返回 `Ambiguous`，提示用户使用数字索引。
 pub fn resolve_task_id<I, S>(raw: &str, titles: I) -> Result<TaskId, TaskIdError>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    // 数字索引优先，保持旧行为，不检查索引是否存在。
-    if let Ok(index) = raw.parse::<usize>() {
-        return Ok(TaskId::Numeric(index));
-    }
-
     let title_list: Vec<String> = titles
         .into_iter()
         .map(|s| s.as_ref().to_string())
         .collect();
 
     let query_slug = TaskId::slugify(raw);
-    if query_slug.is_empty() {
-        return Err(TaskIdError::NotFound {
-            query: raw.to_string(),
-            available: title_list,
-        });
-    }
 
-    // 精确匹配：标题 slug 全称。
-    let mut exact_matches: Vec<(usize, String)> = Vec::new();
-    for (index, title) in title_list.iter().enumerate() {
-        let title_slug = TaskId::slugify(title);
-        if title_slug == query_slug {
-            exact_matches.push((index, title.clone()));
+    // 仅当 slug 非空时才可能进行 slug 匹配
+    if !query_slug.is_empty() {
+        // 精确匹配：标题 slug 全称。
+        let mut exact_matches: Vec<(usize, String)> = Vec::new();
+        for (index, title) in title_list.iter().enumerate() {
+            let title_slug = TaskId::slugify(title);
+            if title_slug == query_slug {
+                exact_matches.push((index, title.clone()));
+            }
+        }
+
+        match exact_matches.len() {
+            1 => return Ok(resolved_id_from_match(&exact_matches[0])),
+            0 => {}
+            _ => return Err(duplicate_or_ambiguous(raw, exact_matches)),
+        }
+
+        // 数字索引优先于 slug 前缀匹配，保持旧行为。
+        if let Ok(index) = raw.parse::<usize>() {
+            return Ok(TaskId::Numeric(index));
+        }
+
+        // 前缀匹配：标题 slug 前缀。
+        let mut prefix_matches: Vec<(usize, String)> = Vec::new();
+        for (index, title) in title_list.iter().enumerate() {
+            let title_slug = TaskId::slugify(title);
+            if title_slug.starts_with(&query_slug) {
+                prefix_matches.push((index, title.clone()));
+            }
+        }
+
+        match prefix_matches.len() {
+            1 => return Ok(resolved_id_from_match(&prefix_matches[0])),
+            0 => {}
+            _ => return Err(duplicate_or_ambiguous(raw, prefix_matches)),
         }
     }
 
-    match exact_matches.len() {
-        1 => return Ok(resolved_id_from_match(&exact_matches[0])),
-        0 => {}
-        _ => return Err(duplicate_or_ambiguous(raw, exact_matches)),
-    }
-
-    // 前缀匹配：标题 slug 前缀。
-    let mut prefix_matches: Vec<(usize, String)> = Vec::new();
-    for (index, title) in title_list.iter().enumerate() {
-        let title_slug = TaskId::slugify(title);
-        if title_slug.starts_with(&query_slug) {
-            prefix_matches.push((index, title.clone()));
-        }
-    }
-
-    match prefix_matches.len() {
-        0 => Err(TaskIdError::NotFound {
-            query: raw.to_string(),
-            available: title_list,
-        }),
-        1 => Ok(resolved_id_from_match(&prefix_matches[0])),
-        _ => Err(duplicate_or_ambiguous(raw, prefix_matches)),
-    }
+    Err(TaskIdError::NotFound {
+        query: raw.to_string(),
+        available: title_list,
+    })
 }
 
 /// Helper: 从“索引 + 标题”返回 TaskId。
@@ -470,10 +469,12 @@ mod tests {
     }
 
     #[test]
-    fn resolve_numeric_index_has_priority_over_slug_alias() {
+    fn resolve_slug_priority_over_numeric_when_title_matches() {
         let titles = ["Fix bug", "123"];
-        // 数字索引优先：即使存在标题 slug 为 "123" 的任务，也应按数字解析。
-        assert_eq!(resolve_task_id("123", titles), Ok(TaskId::Numeric(123)));
+        // 输入字符串 "123" 与标题 "123" 的 slug 完全匹配，应优先解析为 slug。
+        assert_eq!(resolve_task_id("123", titles), Ok(TaskId::Slug("123".to_string())));
+        // 数字回退仍然有效：输入 "1" 没有 slug 匹配，应解析为数字索引。
+        assert_eq!(resolve_task_id("1", titles), Ok(TaskId::Numeric(1)));
     }
 
     #[test]
