@@ -99,7 +99,7 @@ fn save_backlog(path: &Path, tasks: &[DevTask]) -> Result<()> {
 }
 
 /// 调用 LLM 生成 N 个新的开发任务(用于 backlog 耗尽时自补给,支撑长期运行)。
-async fn generate_tasks(llm: &Arc<dyn Llm>, repo: &Path, n: usize) -> Result<Vec<DevTask>> {
+async fn generate_tasks(llm: &Arc<dyn Llm>, repo: &Path, n: usize, done_titles: &[String]) -> Result<Vec<DevTask>> {
     // 对齐"完整 workbuddy"目标:把仓库根 VISION.md 路线图注入,让 backlog 耗尽后的自补给持续朝目标推进
     let vision = std::fs::read_to_string(repo.join("VISION.md")).unwrap_or_default();
     let base = "你是 WorkBuddy 的任务生成器。为 workbuddy-rs 这个 Rust 多智能体 CLI 项目\
@@ -116,13 +116,47 @@ async fn generate_tasks(llm: &Arc<dyn Llm>, repo: &Path, n: usize) -> Result<Vec
         vision_note,
         "只输出一个 JSON 对象: {\"tasks\": [{\"title\": \"任务名\", \"description\": \"完整说明\", \"priority\": 1}]},恰好 N 个任务,不要 markdown 围栏、不要额外文字。"
     );
-    let user = format!("请生成 {n} 个新任务(避免与 backlog 中已有的重复主题: 文档、clip 测试、--version、summary、CRLF、占位符、workspace 提示、失败报告、dry-run、--since、重试、StepRecord 统计、retry-failed、stats、--json、LLM 预算、skip 字段、提交序号、SHELL_TIMEOUT、report 命令、health、git 状态摘要、undo、hint 字段、agents.toml、worktree 并行、watch、bench、CLI 集成测试、selfcheck)。");
+    // 语义去重:把已做任务的真实标题喂给 LLM,让它生成全新方向。
+    // 旧版是硬编码主题黑名单(静态、不增长、LLM 常无视)→ 自补给反复生成同一功能,烧钱。
+    // 现在动态传入 done 标题,LLM 能理解语义、避免等价功能(换措辞/子命令名/参数名都算重复)。
+    let done_note = if done_titles.is_empty() {
+        String::new()
+    } else {
+        let shown = done_titles
+            .iter()
+            .take(60)
+            .map(|t| format!("- {}", clip(t, 50)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "【已完成的任务(共 {} 条,只列前 60)】——严禁生成与它们功能等价或重复的新任务:\
+            换措辞、换子命令名、换参数名、换大小写都算重复,必须做全新的事:\n{}\n\n",
+            done_titles.len(),
+            shown
+        )
+    };
+    let user = format!(
+        "请生成恰好 {n} 个全新的开发任务。\n{done_note}\
+         硬性要求:每个任务都必须是上面已完成清单里完全没有的、真正新的方向;宁可少而新,绝不可重复任何旧功能。"
+    );
     // 最多 2 次调用:解析失败时重试(容忍模型偶发输出围栏/前后多余文字/截断)
     let mut last_err = None;
     for attempt in 1..=2 {
         let raw = llm.chat(&system, &user).await.context("任务生成 LLM 调用失败")?;
         match extract_tasks_json(&raw.text) {
-            Ok(arr) => return parse_generated_tasks(arr, n),
+            Ok(arr) => {
+                let tasks = parse_generated_tasks(arr, n)?;
+                // 安全网:归一化精确匹配去重(防 LLM 无视语义提示、原样照抄旧任务标题)
+                let before = tasks.len();
+                let deduped = dedup_tasks(tasks, done_titles);
+                if deduped.len() < before {
+                    eprintln!(
+                        "[dev] 去重过滤掉 {} 个重复任务(归一化精确匹配)",
+                        before - deduped.len()
+                    );
+                }
+                return Ok(deduped);
+            }
             Err(e) => {
                 eprintln!("[dev] 任务生成解析失败(第 {attempt} 次): {}", clip(&e.to_string(), 120));
                 last_err = Some(e);
@@ -130,6 +164,28 @@ async fn generate_tasks(llm: &Arc<dyn Llm>, repo: &Path, n: usize) -> Result<Vec
         }
     }
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("任务生成失败")))
+}
+
+/// 归一化任务标题:小写 + 去标点/空格,用于精确匹配去重。
+fn normalize_title(s: &str) -> String {
+    s.to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect()
+}
+
+/// 安全网去重:过滤掉标题(归一化后)与已做任务精确等价的新任务。
+/// 语义去重靠 generate_tasks 把 done 标题喂给 LLM;这里只兜底防 LLM 原样照抄。
+fn dedup_tasks(mut tasks: Vec<DevTask>, done_titles: &[String]) -> Vec<DevTask> {
+    let done_norm: Vec<String> = done_titles.iter().map(|s| normalize_title(s)).collect();
+    tasks.retain(|t| {
+        let norm = normalize_title(&t.title);
+        if norm.is_empty() {
+            return true;
+        }
+        !done_norm.iter().any(|d| !d.is_empty() && *d == norm)
+    });
+    tasks
 }
 
 /// 从 LLM 原始输出提取 tasks 数组(容忍 markdown 围栏、前后文字、裸数组)。
@@ -579,7 +635,18 @@ pub async fn run_dev_loop(
                 "[dev] backlog 耗尽,第 {} 轮自动生成 {per_round} 个新任务...",
                 extend_rounds + 1
             );
-            match generate_tasks(&llm, &cfg.repo_dir, per_round).await {
+            // 语义去重:把已做任务(含本轮刚完成的)的真实标题算出来,喂给生成 LLM,
+            // 避免反复生成同一功能(旧版靠硬编码黑名单,自补给反复做同一件事、烧钱)。
+            let slug_to_title: std::collections::HashMap<String, &str> = backlog
+                .iter()
+                .enumerate()
+                .filter_map(|(i, t)| task_ids.get(i).map(|id| (id.clone(), t.title.as_str())))
+                .collect();
+            let done_titles: Vec<String> = done_set
+                .iter()
+                .filter_map(|slug| slug_to_title.get(slug).map(|t| (*t).to_string()))
+                .collect();
+            match generate_tasks(&llm, &cfg.repo_dir, per_round, &done_titles).await {
                 Ok(new_tasks) if !new_tasks.is_empty() => {
                     for task in new_tasks {
                         let id = crate::task_id::unique_slug(&task.title, &mut used_slugs);
@@ -1059,5 +1126,56 @@ mod dev_skip_tests {
         assert_eq!(active[0].title, "run");
         assert_eq!(state.history.len(), 1);
         assert!(state.history[0].contains("skip"));
+    }
+}
+
+#[cfg(test)]
+mod dedup_tests {
+    use super::*;
+
+    fn task(title: &str) -> DevTask {
+        DevTask {
+            title: title.to_string(),
+            description: String::new(),
+            verify: None,
+            priority: 0,
+            skip: false,
+        }
+    }
+
+    #[test]
+    fn normalize_title_lowercases_and_strips_punct() {
+        assert_eq!(normalize_title("实现 Config Set 子命令!"), "实现configset子命令");
+        assert_eq!(normalize_title("a b  c"), "abc");
+        assert_eq!(normalize_title("  spaced  title  "), "spacedtitle");
+    }
+
+    #[test]
+    fn dedup_filters_exact_normalized_match() {
+        let done = vec!["实现 config set 子命令".to_string()];
+        let tasks = vec![
+            task("实现 config set 子命令"),  // 精确重复 → 过滤
+            task("实现 Config Set 子命令"),  // 归一化后相同 → 过滤
+            task("新增 status 子命令"),      // 全新 → 保留
+        ];
+        let out = dedup_tasks(tasks, &done);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].title, "新增 status 子命令");
+    }
+
+    #[test]
+    fn dedup_keeps_all_when_no_done() {
+        let tasks = vec![task("a"), task("b")];
+        let out = dedup_tasks(tasks, &[]);
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn dedup_keeps_new_task_when_done_norm_is_empty() {
+        // done 标题归一化为空(纯符号)时,不应误杀任何新任务
+        let done = vec!["!!!".to_string()];
+        let tasks = vec![task("新功能 x")];
+        let out = dedup_tasks(tasks, &done);
+        assert_eq!(out.len(), 1);
     }
 }
