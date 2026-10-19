@@ -1,6 +1,6 @@
 [package]
 name = "workbuddy-rs"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "WorkBuddy 非官方 Rust 复刻:多专家 AI 智能体工作台(规划 -> 并行执行 -> 综合报告)"
 license = "MIT"

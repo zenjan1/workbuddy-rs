@@ -30,6 +30,7 @@
     { "title": "TUI:触发 run/dev + 实时日志", "description": "在 TUI 中选中任务按回车可触发 dev/run,下方面板实时显示该任务的步骤/日志(轮询读 workspace 输出);保持事件循环健壮不卡死。", "priority": 12 },
     { "title": "Web 仪表盘(serve 内嵌)", "description": "serve 增加 GET / 返回一个内嵌静态 HTML(零外部依赖,内联 CSS),列出 runs + 状态 + 最近报告链接;便于浏览器查看自进化进度。", "priority": 10 },
     { "title": "自评审:提交前审自己 diff", "description": "src/dev.rs:任务验证通过后、提交前,用 reviewer 专家对该任务 `git diff` 审一次,若发现明显问题(编译风险/越界改动)则触发一次额外修复;不影响已验证通过的任务。加单测(mock)。", "priority": 8 },
-    { "title": "质量门:feature 任务必须带测试", "description": "src/dev.rs:判定 dev 任务完成时,除验证命令通过外,额外要求该任务引入的 diff 含新增/更新的 #[test](否则视为假成功,标记失败)。防止『改了一行没加测试也算完成』。加单测。", "priority": 6 }
+    { "title": "质量门:feature 任务必须带测试", "description": "src/dev.rs:判定 dev 任务完成时,除验证命令通过外,额外要求该任务引入的 diff 含新增/更新的 #[test](否则视为假成功,标记失败)。防止『改了一行没加测试也算完成』。加单测。", "priority": 6 },
+    { "title": "版本管理:落地功能后自动 bump Cargo.toml version", "description": "实现轻量版本管理:dev 循环每成功落地 N 个新 feature 后,自动 bump Cargo.toml 的 version(如 0.1.1→0.1.2;或累计 5 个 feature bump minor 到 0.2.0),并随 feat(dev) 提交一并提交。在 dev.rs 成功路径(提交前)加逻辑:读 Cargo.toml 当前 version,按规则 bump,原子写回(临时文件+rename)。加单测(用临时 Cargo.toml 验证 bump 规则:patch+1、minor 进位)。", "priority": 25 }
   ]
 }
