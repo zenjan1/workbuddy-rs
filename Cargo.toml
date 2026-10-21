@@ -29,6 +29,8 @@ tiny_http = "0.12"
 ctrlc = "3"
 tower = { version = "0.5", features = ["util"] }
 notify = "6.0"
+hmac = "0.12"
+sha2 = "0.10"
 
 [profile.release]
 strip = true
