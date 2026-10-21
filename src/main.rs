@@ -4,6 +4,7 @@
 #![allow(unused_imports)]
 #![allow(dropping_references)]
 mod agents;
+mod bench;
 mod config;
 mod dev;
 mod edits;
