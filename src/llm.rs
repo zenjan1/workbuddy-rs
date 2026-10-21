@@ -1,5 +1,7 @@
+use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Mutex;
 
 use anyhow::{bail, Context, Result};
 use serde_json::json;
@@ -72,6 +74,7 @@ pub struct TokenUsage {
 }
 
 /// LLM 响应:文本 + 可选用量(若上游未提供 usage 则为 None/默认零)。
+#[derive(Debug)]
 pub struct LlmResponse {
     pub text: String,
     pub usage: Option<Usage>,
@@ -327,6 +330,7 @@ impl Llm for OpenAiCompat {
 
 /// 离线 Mock LLM:规划请求返回固定合法计划,dev 规划返回含 edit/shell 的计划,
 /// edits 请求返回安全的 no-op 编辑,其余返回占位输出。
+#[derive(Default)]
 pub struct MockLlm;
 
 const MOCK_PLAN: &str = r#"{"goal":"(mock) 任务目标","steps":[
@@ -348,45 +352,106 @@ const MOCK_EDITS: &str = r#"{"edits":[{"path":"autodev_note.md","old_string":"",
 /// Mock 的任务生成输出:一个可重复执行的安全 mock 任务。
 const MOCK_GEN_TASKS: &str = r#"{"tasks":[{"title":"(mock) 生成任务:补充文档注释","description":"为某个模块补充一行注释","priority":1}]}"#;
 
+/// 构造 MockLlm 的标准离线响应:按 system 提示选择固定 JSON,其余返回占位文本。
+fn mock_response(system: &str, user: &str) -> LlmResponse {
+    let input_chars = system.chars().count() + user.chars().count();
+    let output = if system.contains("输出协议") {
+        MOCK_EDITS.to_string()
+    } else if system.contains("任务生成器") {
+        MOCK_GEN_TASKS.to_string()
+    } else if system.contains("开发任务") {
+        MOCK_DEV_PLAN.to_string()
+    } else if system.contains("规划师") || system.contains("Planner") {
+        MOCK_PLAN.to_string()
+    } else {
+        let head = user
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("done");
+        format!("[mock] {}", clip(head, 60))
+    };
+    let output_chars = output.chars().count();
+    let usage = LlmUsage {
+        input_chars,
+        output_chars,
+        character_count: output_chars,
+        ..Default::default()
+    };
+    let token_usage = TokenUsage {
+        input_tokens: None,
+        output_tokens: None,
+        total_tokens: None,
+        input_chars: Some(input_chars),
+        output_chars: Some(output_chars),
+        estimated: true,
+    };
+    LlmResponse { text: output, usage: Some(usage), token_usage: Some(token_usage) }
+}
+
+/// 脚本化单次调用结果:`Ok(())` 走正常 Mock 成功响应,`Err(message)` 返回错误。
+pub type MockOutcome = std::result::Result<(), String>;
+
+impl MockLlm {
+    /// 创建默认全成功 Mock,与单元值 `MockLlm` 行为一致。
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// 按调用顺序脚本化返回 Ok/Err,供 bench 等测试确定性注入失败。
+    pub fn with_outcomes<I>(outcomes: I) -> ScriptedMockLlm
+    where
+        I: IntoIterator<Item = MockOutcome>,
+    {
+        ScriptedMockLlm {
+            outcomes: Mutex::new(outcomes.into_iter().collect()),
+        }
+    }
+}
+
+/// 带结果脚本的离线 Mock LLM。
+///
+/// 队列为空(包括 `Default::default()`/`new`)时,所有调用均回退为普通 Mock 成功响应;
+/// 内部使用 `Mutex<VecDeque<_>>`,可安全跨并发任务共享(`Send + Sync`)。
+#[derive(Default)]
+pub struct ScriptedMockLlm {
+    outcomes: Mutex<VecDeque<MockOutcome>>,
+}
+
+impl ScriptedMockLlm {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Llm for ScriptedMockLlm {
+    fn chat<'a>(
+        &'a self,
+        system: &'a str,
+        user: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<LlmResponse>> + Send + 'a>> {
+        Box::pin(async move {
+            let outcome = {
+                let mut queue = self
+                    .outcomes
+                    .lock()
+                    .expect("ScriptedMockLlm outcomes mutex poisoned");
+                queue.pop_front()
+            };
+            match outcome {
+                Some(Err(message)) => bail!("{message}"),
+                None | Some(Ok(())) => Ok(mock_response(system, user)),
+            }
+        })
+    }
+}
+
 impl Llm for MockLlm {
     fn chat<'a>(
         &'a self,
         system: &'a str,
-        _user: &'a str,
+        user: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<LlmResponse>> + Send + 'a>> {
-        Box::pin(async move {
-            let input_chars = system.chars().count() + _user.chars().count();
-            let output = if system.contains("输出协议") {
-                MOCK_EDITS.to_string()
-            } else if system.contains("任务生成器") {
-                MOCK_GEN_TASKS.to_string()
-            } else if system.contains("开发任务") {
-                MOCK_DEV_PLAN.to_string()
-            } else if system.contains("规划师") || system.contains("Planner") {
-                MOCK_PLAN.to_string()
-            } else {
-                let head = _user
-                    .lines()
-                    .find(|l| !l.trim().is_empty())
-                    .unwrap_or("done");
-                format!("[mock] {}", clip(head, 60))
-            };
-            let usage = LlmUsage {
-                input_chars,
-                output_chars: output.chars().count(),
-                character_count: output.chars().count(),
-                ..Default::default()
-            };
-            let token_usage = TokenUsage {
-                input_tokens: None,
-                output_tokens: None,
-                total_tokens: None,
-                input_chars: Some(input_chars),
-                output_chars: Some(output.chars().count()),
-                estimated: true,
-            };
-            Ok(LlmResponse { text: output, usage: Some(usage), token_usage: Some(token_usage) })
-        })
+        Box::pin(async move { Ok(mock_response(system, user)) })
     }
 }
 
@@ -516,6 +581,42 @@ mod tests {
         assert_eq!(usage.input_chars, system.chars().count() + user.chars().count());
         assert_eq!(usage.output_chars, out.text.chars().count());
         assert_eq!(usage.input_tokens, 0);
+    }
+
+    #[tokio::test]
+    async fn scripted_mock_replays_outcomes_in_order() {
+        let llm = MockLlm::with_outcomes([
+            Ok(()),
+            Err("mock failure".to_string()),
+            Ok(()),
+        ]);
+
+        let ok = llm.chat("system", "u1").await.unwrap();
+        assert!(ok.text.starts_with("[mock]"));
+
+        let err = llm
+            .chat("system", "u2")
+            .await
+            .expect_err("第二个脚本化请求应当失败");
+        assert!(err.to_string().contains("mock failure"));
+
+        assert!(llm.chat("system", "u3").await.is_ok());
+        // 脚本耗尽后回退为默认全成功行为。
+        assert!(llm.chat("system", "u4").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn scripted_mock_default_succeeds() {
+        let llm = ScriptedMockLlm::default();
+        for _ in 0..3 {
+            assert!(llm.chat("system", "user").await.is_ok());
+        }
+    }
+
+    #[test]
+    fn scripted_mock_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<ScriptedMockLlm>();
     }
 }
 
