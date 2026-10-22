@@ -61,6 +61,22 @@ enum ConfigAction {
 }
 
 #[derive(Subcommand)]
+enum AgentAction {
+    /// 生成自定义专家模板
+    Template {
+        /// 模板名称
+        #[arg(long, value_name = "name")]
+        name: String,
+        /// 专家类型
+        #[arg(long, value_name = "type", value_parser = clap::builder::PossibleValuesParser::new(["planner", "executor", "reviewer"]))]
+        agent_type: String,
+        /// 输出目录（默认 agents/）
+        #[arg(long, value_name = "path")]
+        dir: Option<std::path::PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
 enum MemoryAction {
     /// 添加一条持久记忆
     Add {
@@ -116,6 +132,11 @@ enum Cmd {
     },
     /// 列出内置专家与 skills
     Agents,
+    /// 专家管理子命令
+    Agent {
+        #[command(subcommand)]
+        action: AgentAction,
+    },
     /// 提交前自评审(只读)
     Review,
     /// 查看或修改当前生效配置
@@ -305,6 +326,22 @@ async fn main() -> Result<()> {
             cmd_show(cfg, &run.id)
         }
         Cmd::Agents => cmd_agents(),
+        Cmd::Agent { action } => {
+            match action {
+                AgentAction::Template { name, agent_type, dir } => {
+                    let typ = agents::template::AgentType::from_str(&agent_type)
+                        .ok_or_else(|| anyhow::anyhow!("无效的专家类型: {} (可选: planner, executor, reviewer)", agent_type))?;
+                    let target_dir = dir.unwrap_or_else(|| cfg.repo_dir.join("agents"));
+                    let files = agents::template::generate_template(&name, typ, &target_dir)
+                        .map_err(|e| anyhow::anyhow!("生成模板失败: {}", e))?;
+                    println!("已生成自定义专家模板:");
+                    println!("  TOML: {}", files.toml_path.display());
+                    println!("  Markdown: {}", files.md_path.display());
+                    println!("\n请编辑上述文件完善提示词，然后即可在 agents.toml 中引用。");
+                    Ok(())
+                }
+            }
+        }
         Cmd::Review => {
             let llm: Box<dyn Llm> = if cfg.mock {
                 Box::new(MockLlm)

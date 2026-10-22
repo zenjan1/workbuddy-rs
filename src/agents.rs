@@ -2,6 +2,289 @@
 pub mod reviewer;
 
 
+/// 自定义专家模板生成模块
+pub mod template {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::fmt;
+    use std::error::Error as StdError;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum AgentType {
+        Planner,
+        Executor,
+        Reviewer,
+    }
+
+    impl AgentType {
+        pub fn from_str(s: &str) -> Option<Self> {
+            match s.to_lowercase().as_str() {
+                "planner" => Some(AgentType::Planner),
+                "executor" => Some(AgentType::Executor),
+                "reviewer" => Some(AgentType::Reviewer),
+                _ => None,
+            }
+        }
+
+        pub fn as_str(&self) -> &'static str {
+            match self {
+                AgentType::Planner => "planner",
+                AgentType::Executor => "executor",
+                AgentType::Reviewer => "reviewer",
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    pub enum TemplateError {
+        DirCreate(std::io::Error),
+        FileExists(PathBuf),
+        InvalidType(String),
+        Write(std::io::Error),
+    }
+
+    impl fmt::Display for TemplateError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                TemplateError::DirCreate(e) => write!(f, "模板目录创建失败: {}", e),
+                TemplateError::FileExists(path) => write!(f, "文件已存在: {}", path.display()),
+                TemplateError::InvalidType(msg) => write!(f, "无效的专家类型: {}", msg),
+                TemplateError::Write(e) => write!(f, "模板写入失败: {}", e),
+            }
+        }
+    }
+
+    impl StdError for TemplateError {
+        fn source(&self) -> Option<&(dyn StdError + 'static)> {
+            match self {
+                TemplateError::DirCreate(e) => Some(e),
+                TemplateError::Write(e) => Some(e),
+                _ => None,
+            }
+        }
+    }
+
+    impl From<std::io::Error> for TemplateError {
+        fn from(e: std::io::Error) -> Self {
+            TemplateError::DirCreate(e)
+        }
+    }
+
+    pub type Result<T> = std::result::Result<T, TemplateError>;
+
+    /// 生成的文件路径
+    #[derive(Debug, Clone)]
+    pub struct GeneratedFiles {
+        pub toml_path: PathBuf,
+        pub md_path: PathBuf,
+    }
+
+    /// Planner 类型 TOML 模板
+    const PLANNER_TOML: &str = r#"""
+name = "{{name}}"
+type = "planner"
+description = "统筹规划师：负责目标拆解、依赖编排与最终验收"
+model = "gpt-4o-mini"
+prompt_file = "prompt.md"
+skills = [
+  { name = "task-breakdown", description = "将目标拆解为可执行步骤，明确输入输出与依赖" },
+  { name = "acceptance", description = "为每个步骤定义可检验的完成标准" },
+]
+""""#;
+
+    /// Planner 类型 Markdown 提示词模板
+    const PLANNER_MD: &str = r#"""
+# {{name}} - 统筹规划师
+
+## 系统提示词
+
+你是 WorkBuddy 的统筹规划师，负责把用户目标拆解为可执行的步骤计划，并定义验收标准。你严谨、全局观强。
+
+## 核心技能
+
+### task-breakdown - 任务拆解
+将目标拆解为 2-6 个步骤，明确每步的输入、输出与依赖。
+
+### acceptance - 验收标准
+为每个步骤给出可检验的完成标准。
+
+## 输出格式
+
+请按以下 JSON 格式输出规划结果：
+
+```json
+{
+  "steps": [
+    {
+      "id": "step-1",
+      "name": "步骤名称",
+      "description": "步骤描述",
+      "inputs": ["输入1", "输入2"],
+      "outputs": ["输出1"],
+      "depends_on": [],
+      "acceptance": ["验收标准1", "验收标准2"]
+    }
+  ]
+}
+```
+""""#;
+
+    /// Executor 类型 TOML 模板
+    const EXECUTOR_TOML: &str = r#"""
+name = "{{name}}"
+type = "executor"
+description = "执行专家：负责具体任务的实施与交付"
+model = "gpt-4o-mini"
+prompt_file = "prompt.md"
+skills = [
+  { name = "implementation", description = "按规划执行具体实现任务" },
+  { name = "validation", description = "自检交付物是否满足验收标准" },
+]
+""""#;
+
+    /// Executor 类型 Markdown 提示词模板
+    const EXECUTOR_MD: &str = r#"""
+# {{name}} - 执行专家
+
+## 系统提示词
+
+你是 WorkBuddy 的执行专家，负责按规划要求完成具体任务的实施与交付。你务实、注重细节、交付高质量成果。
+
+## 核心技能
+
+### implementation - 任务实施
+按规划步骤要求，完成具体的实现工作（代码编写、文档撰写、数据处理等）。
+
+### validation - 自检验收
+对照验收标准自检交付物，确保满足所有要求后再提交。
+
+## 输出格式
+
+请按任务类型输出相应成果：
+- 代码任务：完整可运行代码 + 说明文档
+- 文档任务：结构化 Markdown 文档
+- 数据任务：处理脚本 + 结果报告
+
+并在最后给出自检清单：
+```
+✅ 所有验收标准已满足
+✅ 代码/文档通过基础检查
+✅ 无明显遗漏或错误
+```
+""""#;
+
+    /// Reviewer 类型 TOML 模板
+    const REVIEWER_TOML: &str = r#"""
+name = "{{name}}"
+type = "reviewer"
+description = "质量审核：负责事实核查、质量把关与最终综合"
+model = "gpt-4o-mini"
+prompt_file = "prompt.md"
+skills = [
+  { name = "fact-check", description = "逐条核查关键论断，指出存疑处并给出修正建议" },
+  { name = "final-review", description = "综合所有上游产出，给出最终结论与后续建议" },
+]
+""""#;
+
+    /// Reviewer 类型 Markdown 提示词模板
+    const REVIEWER_MD: &str = r#"""
+# {{name}} - 质量审核
+
+## 系统提示词
+
+你是 WorkBuddy 的质量审核专家，负责最终把关：核查事实、检查逻辑与一致性，并产出最终结论。
+
+## 核心技能
+
+### fact-check - 事实核查
+逐条核查关键论断，指出存疑处并给出修正建议。
+
+### final-review - 终审综合
+综合所有上游步骤的产出，给出最终结论、主要发现与后续建议，形成对用户的直接答复。
+
+## 输出格式
+
+请输出结构化审核报告：
+
+```markdown
+## 审核结论
+- **整体评价**：通过 / 需修改 / 重做
+- **关键发现**：
+  1. 发现1
+  2. 发现2
+- **修正建议**：
+  1. 建议1
+  2. 建议2
+- **最终答复**：面向用户的最终回复内容
+```
+""""#;
+
+    /// 获取指定类型的模板内容
+    fn get_templates(typ: AgentType) -> (&'static str, &'static str) {
+        match typ {
+            AgentType::Planner => (PLANNER_TOML, PLANNER_MD),
+            AgentType::Executor => (EXECUTOR_TOML, EXECUTOR_MD),
+            AgentType::Reviewer => (REVIEWER_TOML, REVIEWER_MD),
+        }
+    }
+
+    /// 生成自定义专家模板文件
+    ///
+    /// # 参数
+    /// - `name`: 专家名称（小写蛇形，如 `my-planner`）
+    /// - `typ`: 专家类型（planner/executor/reviewer）
+    /// - `dir`: 目标目录（通常为 `agents/`）
+    ///
+    /// # 返回
+    /// 生成的文件路径（.toml 和 .md）
+    ///
+    /// # 错误
+    /// - 目录创建失败
+    /// - 文件已存在
+    /// - 无效的专家类型
+    /// - 文件写入失败
+    pub fn generate_template(name: &str, typ: AgentType, dir: &Path) -> Result<GeneratedFiles> {
+        // 校验名称格式
+        if name.is_empty() {
+            return Err(TemplateError::InvalidType("名称不能为空".to_string()));
+        }
+        if !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_') {
+            return Err(TemplateError::InvalidType(
+                "名称只能包含小写字母、数字、连字符和下划线".to_string(),
+            ));
+        }
+
+        // 创建目录
+        fs::create_dir_all(dir).map_err(TemplateError::DirCreate)?;
+
+        // 目标文件路径
+        let toml_path = dir.join(format!("{}.toml", name));
+        let md_path = dir.join(format!("{}.md", name));
+
+        // 检查文件是否已存在
+        if toml_path.exists() {
+            return Err(TemplateError::FileExists(toml_path));
+        }
+        if md_path.exists() {
+            return Err(TemplateError::FileExists(md_path));
+        }
+
+        // 获取模板内容
+        let (toml_template, md_template) = get_templates(typ);
+
+        // 替换占位符
+        let toml_content = toml_template.replace("{{name}}", name);
+        let md_content = md_template.replace("{{name}}", name);
+
+        // 写入文件
+        fs::write(&toml_path, toml_content).map_err(TemplateError::Write)?;
+        fs::write(&md_path, md_content).map_err(TemplateError::Write)?;
+
+        Ok(GeneratedFiles { toml_path, md_path })
+    }
+}
+
+
 #[derive(Debug, Clone, Copy)]
 pub struct Skill {
     pub name: &'static str,
