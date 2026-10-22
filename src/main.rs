@@ -272,6 +272,7 @@ enum Cmd {
         log_lines: usize,
     },
     /// 启动 TUI 界面查看 backlog(只读)
+    #[cfg(feature = "tui")]
     Tui,
     /// 启动只读 HTTP 服务（默认绑定 127.0.0.1，仅允许本机回环地址）
     Serve {
@@ -610,6 +611,7 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|_| std::path::PathBuf::from("."));
             status::run_with_log_lines(&workspace_dir, log_lines)
         },
+        #[cfg(feature = "tui")]
         Cmd::Tui => {
             let backlog_dir = cfg.repo_dir.join(".workbuddy");
             tui::run(&backlog_dir)

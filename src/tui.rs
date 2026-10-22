@@ -1,15 +1,19 @@
+#[cfg(feature = "tui")]
 use std::{io::stdout, time::Duration};
 
+#[cfg(feature = "tui")]
 use anyhow::Result;
+#[cfg(feature = "tui")]
 use crossterm::{
     event::{self, Event, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+#[cfg(feature = "tui")]
 use ratatui::{
-    backend::CrosstermBackend,
-    layout::Constraint,
-    widgets::{Block, Borders, Cell, List, ListItem, ListState, Row, Table},
+    backend::{CrosstermBackend, TestBackend},
+    layout::{Constraint, Direction, Layout},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Frame, Terminal,
 };
 
@@ -88,7 +92,7 @@ pub fn render_backlog_tasks(tasks: &[Task]) -> Vec<String> {
 /// Load backlog items from the workspace backlog file.
 ///
 /// Returns an empty list when the file does not exist.
-pub fn load_backlog(workspace_dir: &std::path::Path) -> Result<Vec<Task>> {
+pub fn load_backlog(workspace_dir: &std::path::Path) -> anyhow::Result<Vec<Task>> {
     let backlog_path = workspace_dir.join("backlog.json");
     if !backlog_path.exists() {
         return Ok(Vec::new());
@@ -156,6 +160,7 @@ pub fn refresh_backlog(_current: &BacklogState, fresh: Vec<BacklogItem>) -> Back
     BacklogState::new(sort_backlog(fresh))
 }
 
+#[cfg(feature = "tui")]
 /// Pure rendering function: sorts the backlog list by status and priority,
 /// draws it with ratatui's TestBackend, and returns the resulting static
 /// snapshot as a string. It includes the "Backlog" title and task count in
@@ -201,6 +206,7 @@ pub enum KeyAction {
     None,
 }
 
+#[cfg(feature = "tui")]
 /// Pure key-state handling.
 ///
 /// Returns the next selected index and an intent describing what the key
@@ -222,8 +228,9 @@ pub fn handle_key(key: KeyCode, selected: usize, item_count: usize) -> (usize, K
     }
 }
 
-/// Run the blocking TUI. Renders `items` as a selectable list, supports
-/// Up/Down to move the cursor and `q` to quit.
+/// Run the blocking TUI with two panels: left shows backlog list, right shows task details.
+/// Supports j/k for navigation, Enter to select, q to quit.
+#[cfg(feature = "tui")]
 pub fn run_tui(tasks: Vec<Task>) -> Result<()> {
     let tasks = sort_backlog(tasks);
     let items = &tasks;
@@ -234,16 +241,29 @@ pub fn run_tui(tasks: Vec<Task>) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut selected = 0usize;
+    let mut show_details = false;
 
     loop {
-        terminal.draw(|frame| draw_ui(frame, items, selected))?;
+        terminal.draw(|frame| draw_ui(frame, items, selected, show_details))?;
 
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
-                let (next_selected, action) = handle_key(key.code, selected, items.len());
-                selected = next_selected;
-                if action == KeyAction::Quit {
-                    break;
+                match key.code {
+                    KeyCode::Char('q') => break,
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        if selected + 1 < items.len() {
+                            selected += 1;
+                        }
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        if selected > 0 {
+                            selected -= 1;
+                        }
+                    }
+                    KeyCode::Enter => {
+                        show_details = !show_details;
+                    }
+                    _ => {}
                 }
             }
         }
@@ -256,7 +276,8 @@ pub fn run_tui(tasks: Vec<Task>) -> Result<()> {
     Ok(())
 }
 
-fn draw_ui(frame: &mut Frame, items: &[BacklogItem], selected: usize) {
+#[cfg(feature = "tui")]
+fn draw_ui(frame: &mut Frame, items: &[BacklogItem], selected: usize, show_details: bool) {
     let rows = if items.is_empty() {
         vec!["No backlog tasks".to_string()]
     } else {
@@ -279,16 +300,45 @@ fn draw_ui(frame: &mut Frame, items: &[BacklogItem], selected: usize) {
     let list = List::new(list_items).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(format!(" Backlog ({} tasks, Up/Down: move, q: quit) ", items.len())),
+            .title(format!(" Backlog ({} tasks, j/k: move, Enter: details, q: quit) ", items.len())),
     );
 
     let mut state = ListState::default();
     if !items.is_empty() {
         state.select(Some(selected));
     }
-    frame.render_stateful_widget(list, frame.area(), &mut state);
+
+    // Create two-panel layout
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(frame.area());
+
+    frame.render_stateful_widget(list, chunks[0], &mut state);
+
+    // Right panel: task details
+    if show_details && !items.is_empty() && selected < items.len() {
+        let task = &items[selected];
+        let details = format!(
+            "Title: {}\nStatus: {}\nPriority: {}\nID: {}\n\nDescription:\n{}\n\nDependencies:\n{}",
+            task.title,
+            task.status,
+            task.priority,
+            task.id,
+            "(No description available)",
+            "(No dependencies)"
+        );
+        let paragraph = Paragraph::new(details)
+            .block(Block::default().borders(Borders::ALL).title(" Task Details "));
+        frame.render_widget(paragraph, chunks[1]);
+    } else {
+        let placeholder = Paragraph::new("Press Enter to view task details")
+            .block(Block::default().borders(Borders::ALL).title(" Task Details "));
+        frame.render_widget(placeholder, chunks[1]);
+    }
 }
 
+#[cfg(feature = "tui")]
 pub fn render(frame: &mut Frame, items: &[BacklogItem]) {
     if items.is_empty() {
         let list = List::new(vec![ListItem::new("No backlog tasks")])
@@ -297,38 +347,18 @@ pub fn render(frame: &mut Frame, items: &[BacklogItem]) {
         return;
     }
 
-    let header = Row::new(vec![
-        Cell::from("Title"),
-        Cell::from("Status"),
-        Cell::from("Priority"),
-    ]);
-
-    let rows: Vec<Row> = items
+    let rows: Vec<ListItem> = items
         .iter()
         .map(|item| {
-            Row::new(vec![
-                Cell::from(item.title.clone()),
-                Cell::from(item.status.clone()),
-                Cell::from(item.priority.to_string()),
-            ])
+            ListItem::new(format!("{} [{}] (priority: {})", item.title, item.status, item.priority))
         })
         .collect();
 
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Percentage(50),
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
-        ],
-    )
-    .header(header)
-    .block(Block::default().borders(Borders::ALL).title(" Backlog "));
-
-    frame.render_widget(table, frame.area());
+    let list = List::new(rows).block(Block::default().borders(Borders::ALL).title(" Backlog "));
+    frame.render_widget(list, frame.area());
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tui"))]
 mod tests {
     use super::*;
     use crossterm::event::KeyCode;
@@ -486,6 +516,7 @@ mod tests {
     }
 }
 
+#[cfg(feature = "tui")]
 pub fn run(workspace_dir: &std::path::Path) -> Result<()> {
     let items = load_backlog(workspace_dir)?;
     run_tui(items)
