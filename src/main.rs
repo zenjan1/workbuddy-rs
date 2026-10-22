@@ -24,6 +24,7 @@ mod utils;
 mod webhook;
 mod workspace;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -57,6 +58,45 @@ enum ConfigAction {
     Get {
         /// 配置键
         key: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum RunCmd {
+    /// 执行任务
+    Execute {
+        /// 任务目标
+        goal: Vec<String>,
+        /// 使用 Mock LLM(离线,不调用真实 API)
+        #[arg(long)]
+        mock: bool,
+        /// 模型名(默认取环境变量/配置)
+        #[arg(long)]
+        model: Option<String>,
+        /// 并行度(默认取配置,4)
+        #[arg(long)]
+        parallel: Option<usize>,
+    },
+    /// 导出完整运行记录
+    Export {
+        /// 运行 ID (ULID)
+        #[arg(long, value_name = "RUN_ID")]
+        run_id: String,
+        /// 输出文件路径，默认 stdout
+        #[arg(long, short, value_name = "FILE")]
+        output: Option<PathBuf>,
+        /// 是否包含工件内容（默认仅包含路径）
+        #[arg(long)]
+        include_artifacts: bool,
+    },
+    /// 导入运行记录并分配新 RunId
+    Import {
+        /// 输入文件路径（必选）
+        #[arg(long, short, value_name = "FILE")]
+        input: PathBuf,
+        /// 导入后立即显示摘要
+        #[arg(long)]
+        show: bool,
     },
 }
 
@@ -103,19 +143,10 @@ enum MemoryAction {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// 规划并执行一个任务
+    /// 运行任务相关子命令
     Run {
-        /// 任务目标
-        goal: Vec<String>,
-        /// 使用 Mock LLM(离线,不调用真实 API)
-        #[arg(long)]
-        mock: bool,
-        /// 模型名(默认取环境变量/配置)
-        #[arg(long)]
-        model: Option<String>,
-        /// 并行度(默认取配置,4)
-        #[arg(long)]
-        parallel: Option<usize>,
+        #[command(subcommand)]
+        cmd: RunCmd,
     },
     /// 列出历史任务
     List {
@@ -281,31 +312,38 @@ async fn main() -> Result<()> {
     }
     let mut cfg = Config::load()?;
     match cli.cmd {
-        Cmd::Run {
-            goal,
-            mock,
-            model,
-            parallel,
-        } => {
-            let input = goal.join(" ");
-            if input.trim().is_empty() {
-                anyhow::bail!("任务目标不能为空");
-            }
+        Cmd::Run { cmd } => {
+            match cmd {
+                RunCmd::Execute { goal, mock, model, parallel } => {
+                    let input = goal.join(" ");
+                    if input.trim().is_empty() {
+                        anyhow::bail!("任务目标不能为空");
+                    }
 
-            let runs = Workspace::root(&cfg.workspace_dir);
-            let goal = match resolve_task_run(&runs, &input)? {
-                Some(run) => run.goal.clone(),
-                None => input,
-            };
+                    let runs = Workspace::root(&cfg.workspace_dir);
+                    let goal = match resolve_task_run(&runs, &input)? {
+                        Some(run) => run.goal.clone(),
+                        None => input,
+                    };
 
-            if let Some(m) = model {
-                cfg.model = m;
+                    if let Some(m) = model {
+                        cfg.model = m;
+                    }
+                    if let Some(p) = parallel {
+                        cfg.max_parallel = p.max(1);
+                    }
+                    cfg.mock = mock;
+                    run_task(cfg, &goal).await
+                }
+                RunCmd::Export { run_id, output, include_artifacts } => {
+                    // TODO: 实现导出逻辑 (步骤4)
+                    todo!("run export 业务逻辑待实现: run_id={}, output={:?}, include_artifacts={}", run_id, output, include_artifacts)
+                }
+                RunCmd::Import { input, show } => {
+                    // TODO: 实现导入逻辑 (步骤4)
+                    todo!("run import 业务逻辑待实现: input={:?}, show={}", input, show)
+                }
             }
-            if let Some(p) = parallel {
-                cfg.max_parallel = p.max(1);
-            }
-            cfg.mock = mock;
-            run_task(cfg, &goal).await
         }
         Cmd::List { since, id } => {
             if let Some(id) = id {
