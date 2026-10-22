@@ -3,6 +3,89 @@ pub mod reviewer;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use std::collections::HashMap;
+use serde_json::Value;
+
+/// 工具类型分类
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum ToolType {
+    /// 内置工具
+    Builtin,
+    /// 自定义工具
+    Custom,
+    /// MCP 协议工具
+    Mcp,
+}
+
+/// 工具规格定义
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ToolSpec {
+    pub name: String,
+    pub description: String,
+    pub parameters: Value,
+    pub tool_type: ToolType,
+}
+
+/// 工具执行结果类型
+pub type ToolResult = Result<Value, ToolError>;
+
+/// 工具错误类型
+#[derive(Debug, Clone)]
+pub enum ToolError {
+    Execution(String),
+    InvalidArgs(String),
+    NotFound(String),
+}
+
+impl std::fmt::Display for ToolError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ToolError::Execution(msg) => write!(f, "Execution failed: {}", msg),
+            ToolError::InvalidArgs(msg) => write!(f, "Invalid arguments: {}", msg),
+            ToolError::NotFound(msg) => write!(f, "Tool not found: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for ToolError {}
+
+/// 工具特征定义
+pub trait Tool: Send + Sync {
+    fn spec(&self) -> ToolSpec;
+    fn execute(&self, args: Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send>>;
+}
+
+/// 工具注册表
+#[derive(Default)]
+pub struct ToolRegistry {
+    tools: HashMap<String, Arc<dyn Tool>>,
+}
+
+impl ToolRegistry {
+    pub fn new() -> Self {
+        Self {
+            tools: HashMap::new(),
+        }
+    }
+
+    pub fn register(&mut self, tool: Arc<dyn Tool>) -> Result<(), ToolError> {
+        let spec = tool.spec();
+        if self.tools.contains_key(&spec.name) {
+            return Err(ToolError::Execution(format!("Tool '{}' already registered", spec.name)));
+        }
+        self.tools.insert(spec.name.clone(), tool);
+        Ok(())
+    }
+
+    pub fn list(&self) -> Vec<ToolSpec> {
+        self.tools.values().map(|t| t.spec()).collect()
+    }
+
+    pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.tools.get(name).cloned()
+    }
+}
 
 /// 自定义专家模板生成模块
 pub mod template {
@@ -543,9 +626,77 @@ pub fn catalog_text() -> String {
     s
 }
 
+impl Agent {
+    /// 构建包含可用工具列表的完整系统提示词
+    ///
+    /// # 参数
+    /// - `registry`: 工具注册表，用于获取所有已注册工具
+    ///
+    /// # 返回
+    /// 完整的系统提示词字符串，包含原始系统提示和 "Available Tools" 章节
+    pub fn build_system_prompt(&self, registry: &ToolRegistry) -> String {
+        let tools = registry.list();
+        let mut prompt = String::new();
+        prompt.push_str(self.system);
+        prompt.push_str("\n\n## Available Tools\n\n");
+        
+        if tools.is_empty() {
+            prompt.push_str("*No tools available.*\n");
+        } else {
+            // Markdown 表格格式
+            prompt.push_str("| Tool | Description | Parameters |\n");
+            prompt.push_str("|------|-------------|------------|\n");
+            for tool in tools {
+                let name = tool.name;
+                let desc = tool.description;
+                let params_json = serde_json::to_string_pretty(&tool.parameters)
+                    .unwrap_or_else(|_| "{}".to_string());
+                // 转义管道符以保持表格格式
+                let desc_escaped = desc.replace('|', "\\|");
+                let params_escaped = params_json.replace('|', "\\|").replace('\n', "<br>");
+                prompt.push_str(&format!("| `{}` | {} | {} |\n", name, desc_escaped, params_escaped));
+            }
+        }
+        
+        prompt
+    }
+
+    /// 获取基础系统提示词（不包含工具列表）
+    pub fn base_system_prompt(&self) -> &str {
+        self.system
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::{ToolRegistry, ToolSpec, ToolType, Tool, ToolResult};
+    use std::sync::Arc;
+    use serde_json::json;
+
+    // 测试用的简单内置工具
+    struct DummyTool;
+
+    impl Tool for DummyTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "dummy_tool".to_string(),
+                description: "A dummy tool for testing".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "input": {"type": "string"}
+                    },
+                    "required": ["input"]
+                }),
+                tool_type: ToolType::Builtin,
+            }
+        }
+
+        fn execute(&self, _args: Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send>> {
+            Box::pin(async { Ok(json!({"result": "ok"})) })
+        }
+    }
 
     #[test]
     fn catalog_is_complete_and_unique() {
@@ -652,6 +803,45 @@ mod tests {
         let roots: Vec<_> = events.iter().filter(|e| e.parent_agent_id.is_none()).collect();
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].agent_id, "planner-1");
+    }
+
+    #[tokio::test]
+    async fn agent_build_system_prompt_includes_tools() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(DummyTool)).unwrap();
+        
+        let agent = by_id("coder").expect("coder agent should exist");
+        let prompt = agent.build_system_prompt(&registry);
+        
+        // 验证基础系统提示词存在
+        assert!(prompt.contains("软件工程师"));
+        // 验证工具章节存在
+        assert!(prompt.contains("## Available Tools"));
+        // 验证工具表格包含注册的工具
+        assert!(prompt.contains("dummy_tool"));
+        assert!(prompt.contains("A dummy tool for testing"));
+        assert!(prompt.contains("input"));
+    }
+
+    #[test]
+    fn agent_build_system_prompt_empty_registry() {
+        let registry = ToolRegistry::new();
+        let agent = by_id("coder").expect("coder agent should exist");
+        let prompt = agent.build_system_prompt(&registry);
+        
+        assert!(prompt.contains("## Available Tools"));
+        assert!(prompt.contains("*No tools available.*"));
+    }
+
+    #[tokio::test]
+    async fn tool_registry_register_and_list() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(DummyTool)).unwrap();
+        
+        let tools = registry.list();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "dummy_tool");
+        assert_eq!(tools[0].tool_type, ToolType::Builtin);
     }
 
     #[test]
