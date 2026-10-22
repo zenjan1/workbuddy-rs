@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use clap::Args;
+use keyring::Entry;
 
 /// Webhook 通知配置。每个 URL 可独立扩展超时、重试等选项。
 #[derive(Debug, Clone, Deserialize)]
@@ -126,6 +127,75 @@ const RESTART_REQUIRED_KEYS: &[&str] = &[
     "cost_per_1k_tokens",
 ];
 
+/// Resolve `${secret:name}` placeholders in a string by querying the system keyring.
+/// Returns the resolved string, or an error if the secret is not found.
+fn resolve_secret_placeholders(value: &str) -> Result<String> {
+    let mut result = String::new();
+    let mut chars = value.chars().peekable();
+    
+    while let Some(c) = chars.next() {
+        if c == '$' && chars.peek() == Some(&'{') {
+            chars.next(); // consume '{'
+            let mut secret_name = String::new();
+            let mut found_close = false;
+            
+            for c in chars.by_ref() {
+                if c == '}' {
+                    found_close = true;
+                    break;
+                }
+                secret_name.push(c);
+            }
+            
+            if !found_close {
+                anyhow::bail!("Unclosed ${{secret:...}} placeholder");
+            }
+            
+            if secret_name.starts_with("secret:") {
+                let name = &secret_name["secret:".len()..];
+                let entry = Entry::new("workbuddy", name)
+                    .with_context(|| format!("Failed to create keyring entry for secret: {name}"))?;
+                match entry.get_password() {
+                    Ok(password) => result.push_str(&password),
+                    Err(keyring::Error::NoEntry) => {
+                        anyhow::bail!("Secret not found in keyring: {name}");
+                    }
+                    Err(e) => {
+                        anyhow::bail!("Failed to read secret '{name}' from keyring: {e}");
+                    }
+                }
+            } else {
+                // Not a secret placeholder, keep as-is
+                result.push('$');
+                result.push('{');
+                result.push_str(&secret_name);
+                result.push('}');
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    
+    Ok(result)
+}
+
+/// Resolve secret placeholders in a FileConfig, returning a new FileConfig with resolved values.
+fn resolve_file_config_secrets(mut file: FileConfig) -> Result<FileConfig> {
+    file.api_key = file.api_key.map(|v| resolve_secret_placeholders(&v)).transpose()?;
+    file.base_url = file.base_url.map(|v| resolve_secret_placeholders(&v)).transpose()?;
+    file.model = file.model.map(|v| resolve_secret_placeholders(&v)).transpose()?;
+    file.workspace_dir = file.workspace_dir.map(|v| resolve_secret_placeholders(&v.to_string_lossy())).transpose()?.map(PathBuf::from);
+    file.repo_dir = file.repo_dir.map(|v| resolve_secret_placeholders(&v.to_string_lossy())).transpose()?.map(PathBuf::from);
+    file.webhook_url = file.webhook_url.map(|v| resolve_secret_placeholders(&v)).transpose()?;
+    
+    // Resolve webhooks URLs
+    for webhook in &mut file.webhooks {
+        webhook.url = resolve_secret_placeholders(&webhook.url)?;
+    }
+    
+    Ok(file)
+}
+
 fn ensure_not_sensitive_config_key(key: &str) -> Result<()> {
     let normalized_key = key.to_ascii_lowercase().replace('-', "_");
     let sensitive_segments = [
@@ -150,6 +220,8 @@ fn ensure_not_sensitive_config_key(key: &str) -> Result<()> {
 impl Config {
     pub fn load() -> Result<Self> {
         let file = Self::load_file()?;
+        // Resolve secret placeholders in the file config
+        let file = resolve_file_config_secrets(file)?;
         let home = env::var_os("HOME").context("环境变量 HOME 未设置")?;
         let home = Path::new(&home);
 

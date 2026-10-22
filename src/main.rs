@@ -33,6 +33,7 @@ use config::Config;
 use executor::Executor;
 use llm::{Llm, MockLlm, OpenAiCompat};
 use workspace::{RunRecord, StepRecord, Workspace};
+use keyring::Entry;
 
 #[derive(Parser)]
 #[command(
@@ -142,6 +143,18 @@ enum MemoryAction {
 }
 
 #[derive(Subcommand)]
+enum SecretAction {
+    /// 从系统密钥环获取密钥值
+    Get {
+        /// 密钥名称
+        #[arg(value_name = "name")]
+        name: String,
+    },
+    /// 列出已知的密钥名称（注意：系统密钥环不支持枚举，此功能受限）
+    List,
+}
+
+#[derive(Subcommand)]
 enum Cmd {
     /// 运行任务相关子命令
     Run {
@@ -245,6 +258,15 @@ enum Cmd {
     Memory {
         #[command(subcommand)]
         action: MemoryAction,
+    },
+    /// 系统密钥环只读访问：获取或列出密钥
+    ///
+    /// 示例：
+    ///   workbuddy secret get OPENAI_API_KEY
+    ///   workbuddy secret list
+    Secret {
+        #[command(subcommand)]
+        action: SecretAction,
     },
     /// 推进路线图:扫描 VISION.md 已完成条目,更新未完成项并追加日志
     RoadmapAdvance,
@@ -511,6 +533,9 @@ async fn main() -> Result<()> {
         Cmd::Memory { action } => {
             run_memory_command(action, &cfg)
         }
+        Cmd::Secret { action } => {
+            run_secret_command(action)
+        }
         Cmd::Status { log_lines } => {
             let workspace_dir = std::env::current_dir()
                 .unwrap_or_else(|_| std::path::PathBuf::from("."));
@@ -623,6 +648,44 @@ fn run_memory_command(action: MemoryAction, cfg: &Config) -> Result<()> {
                 Err(memory::MemoryError::NotFound(_)) => anyhow::bail!("未找到记忆条目: {}", id),
                 Err(e) => anyhow::bail!("获取记忆失败: {e}"),
             }
+        }
+    }
+    Ok(())
+}
+
+fn run_secret_command(action: SecretAction) -> Result<()> {
+    match action {
+        SecretAction::Get { name } => {
+            let name = name.trim();
+            if name.is_empty() {
+                anyhow::bail!("密钥名称不能为空");
+            }
+            // 使用 keyring crate 从系统密钥环读取
+            // 服务名固定为 "workbuddy"，账户名为用户提供的名称
+            let entry = Entry::new("workbuddy", name)
+                .map_err(|e| anyhow::anyhow!("创建密钥环条目失败: {e}"))?;
+            match entry.get_password() {
+                Ok(password) => {
+                    println!("{}", password);
+                }
+                Err(keyring::Error::NoEntry) => {
+                    anyhow::bail!("未找到密钥: {}", name);
+                }
+                Err(e) => {
+                    anyhow::bail!("读取密钥失败: {e}");
+                }
+            }
+        }
+        SecretAction::List => {
+            // 注意：keyring crate 不支持枚举所有条目
+            // 这是一个平台限制，大多数系统密钥环不提供列出所有条目的 API
+            println!("注意：系统密钥环不支持枚举所有条目。");
+            println!("请使用 `workbuddy secret get <name>` 获取特定密钥。");
+            println!("常用密钥名称示例：");
+            println!("  OPENAI_API_KEY");
+            println!("  ANTHROPIC_API_KEY");
+            println!("  GITHUB_TOKEN");
+            println!("  GITLAB_TOKEN");
         }
     }
     Ok(())

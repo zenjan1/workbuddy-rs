@@ -34,6 +34,7 @@ hmac = "0.12"
 sha2 = "0.10"
 tar = "0.4"
 zstd = "0.13"
+keyring = "4.2.0"
 
 [profile.release]
 strip = true
