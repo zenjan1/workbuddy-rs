@@ -24,7 +24,9 @@ pub async fn plan_task(llm: &Arc<dyn Llm>, goal: &str) -> Result<Plan> {
         .replace("{catalog}", &agents::catalog_text());
     let user = format!("用户目标:\n{}\n\n请输出 JSON 计划。", goal);
     let raw = llm.chat(&system, &user).await?;
-    Plan::from_llm(goal, &raw.text)
+    let mut plan = Plan::from_llm(goal, &raw.text)?;
+    inject_tools_from_keywords(&mut plan);
+    Ok(plan)
 }
 
 /// dev 模式规划提示词:针对"在代码仓库里完成一个开发任务"。
@@ -60,7 +62,26 @@ pub async fn plan_dev_task(llm: &Arc<dyn Llm>, goal: &str, filelist: &str) -> Re
     let raw = llm.chat(&system, &user).await?;
     let mut plan = Plan::parse_from_llm(goal, &raw.text)?;
     repair_dev_plan(&mut plan)?;
+    inject_tools_from_keywords(&mut plan);
     Ok(plan)
+}
+
+/// 根据步骤描述中的关键词自动注入 tool 字段。
+/// - 包含"修改文件"或"编辑文件" → ToolType::Edit
+/// - 包含"执行命令"或"运行脚本" → ToolType::Shell
+/// - 包含"读取文件"或"查看文件" → ToolType::Read
+fn inject_tools_from_keywords(plan: &mut Plan) {
+    use crate::plan::ToolType;
+    for step in &mut plan.steps {
+        let text = format!("{} {}", step.name, step.prompt);
+        if text.contains("修改文件") || text.contains("编辑文件") {
+            step.tool = Some(ToolType::Edit);
+        } else if text.contains("执行命令") || text.contains("运行脚本") {
+            step.tool = Some(ToolType::Shell);
+        } else if text.contains("读取文件") || text.contains("查看文件") {
+            step.tool = Some(ToolType::Read);
+        }
+    }
 }
 
 /// 容忍修复 dev 计划:模型偶发漏给 read/edit 步骤 path。

@@ -31,6 +31,14 @@ impl StepKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolType {
+    Edit,
+    Shell,
+    Read,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Step {
     pub id: usize,
@@ -47,6 +55,9 @@ pub struct Step {
     pub path: Option<String>,
     #[serde(default)]
     pub needs: Vec<usize>,
+    /// 关联的工具类型,用于 run 模式直接调用 executor
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<ToolType>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +144,7 @@ impl Plan {
                 command,
                 path,
                 needs,
+                tool: None,
             });
         }
 
