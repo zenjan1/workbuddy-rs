@@ -9,6 +9,7 @@ mod config;
 mod dev;
 mod edits;
 mod executor;
+mod hooks;
 mod llm;
 mod memory;
 mod plan;
@@ -270,6 +271,18 @@ enum Cmd {
     },
     /// 推进路线图:扫描 VISION.md 已完成条目,更新未完成项并追加日志
     RoadmapAdvance,
+    /// 安装/卸载 Git 钩子
+    InstallHooks {
+        /// 安装 pre-commit 钩子
+        #[arg(long)]
+        pre_commit: bool,
+        /// 安装 pre-push 钩子
+        #[arg(long)]
+        pre_push: bool,
+        /// 卸载已安装的钩子
+        #[arg(long)]
+        uninstall: bool,
+    },
 }
 
 fn resolve_task_run<'a>(
@@ -595,6 +608,12 @@ async fn main() -> Result<()> {
             workspace::advance_roadmap(&cfg.repo_dir)
                 .map_err(|e| anyhow::anyhow!("推进路线图失败: {e:#}"))?;
             Ok(())
+        }
+        Cmd::InstallHooks { pre_commit, pre_push, uninstall } => {
+            if !pre_commit && !pre_push && !uninstall {
+                anyhow::bail!("请指定 --pre-commit、--pre-push 或 --uninstall");
+            }
+            hooks::install_hooks(pre_commit, pre_push, uninstall, &cfg.repo_dir)
         },
     }
 }
