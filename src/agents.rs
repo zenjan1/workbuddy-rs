@@ -2,6 +2,7 @@
 pub mod reviewer;
 
 use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 /// 自定义专家模板生成模块
 pub mod template {
@@ -418,6 +419,118 @@ pub fn by_id(id: &str) -> Option<&'static Agent> {
     AGENTS.iter().find(|a| a.id == id)
 }
 
+/// Agent 孵化事件记录，用于血统追踪。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct AgentSpawnEvent {
+    /// 子 Agent 的唯一标识
+    pub agent_id: String,
+    /// 子 Agent 的类型（planner/executor/reviewer 等）
+    pub agent_type: String,
+    /// 直接父 Agent 的 ID，根节点为 None
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_agent_id: Option<String>,
+    /// 触发 spawn 的原因：task_decomposition / tool_call / user_request 等
+    #[serde(default = "default_spawn_reason")]
+    pub spawn_reason: String,
+    /// 孵化时间戳（Unix 毫秒）
+    pub timestamp_ms: u64,
+}
+
+fn default_spawn_reason() -> String {
+    String::new()
+}
+
+impl AgentSpawnEvent {
+    /// 创建根节点事件（无父 Agent）
+    pub fn new_root(agent_id: String, agent_type: String, spawn_reason: String, timestamp_ms: u64) -> Self {
+        Self {
+            agent_id,
+            agent_type,
+            parent_agent_id: None,
+            spawn_reason,
+            timestamp_ms,
+        }
+    }
+
+    /// 创建子节点事件
+    pub fn new_child(
+        agent_id: String,
+        agent_type: String,
+        parent_agent_id: String,
+        spawn_reason: String,
+        timestamp_ms: u64,
+    ) -> Self {
+        Self {
+            agent_id,
+            agent_type,
+            parent_agent_id: Some(parent_agent_id),
+            spawn_reason,
+            timestamp_ms,
+        }
+    }
+}
+
+/// 单次运行的完整记录，包含血统所需字段。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RunRecord {
+    /// 运行唯一 ID
+    pub run_id: String,
+    /// 所属 Agent ID
+    pub agent_id: String,
+    /// Agent 类型
+    pub agent_type: String,
+    /// 父 Agent ID，根节点为 None
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_agent_id: Option<String>,
+    /// 触发原因
+    #[serde(default = "default_spawn_reason")]
+    pub spawn_reason: String,
+    /// 开始时间（Unix 毫秒）
+    pub started_at_ms: u64,
+    /// 结束时间（Unix 毫秒），未结束为 0
+    pub finished_at_ms: u64,
+    /// 总 token 消耗
+    pub total_tokens: u64,
+    /// 是否成功
+    pub success: bool,
+    /// 错误信息（失败时）
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error: String,
+}
+
+impl RunRecord {
+    /// 创建新的运行记录
+    pub fn new(
+        run_id: String,
+        agent_id: String,
+        agent_type: String,
+        parent_agent_id: Option<String>,
+        spawn_reason: String,
+        started_at_ms: u64,
+    ) -> Self {
+        Self {
+            run_id,
+            agent_id,
+            agent_type,
+            parent_agent_id,
+            spawn_reason,
+            started_at_ms,
+            finished_at_ms: 0,
+            total_tokens: 0,
+            success: false,
+            error: String::new(),
+        }
+    }
+
+    /// 标记运行完成
+    pub fn finish(&mut self, finished_at_ms: u64, total_tokens: u64, success: bool, error: String) {
+        self.finished_at_ms = finished_at_ms;
+        self.total_tokens = total_tokens;
+        self.success = success;
+        self.error = error;
+    }
+}
+
 /// 供规划器提示词使用的目录文本。
 pub fn catalog_text() -> String {
     let mut s = String::new();
@@ -446,5 +559,133 @@ mod tests {
         }
         assert!(by_id("researcher").is_some());
         assert!(by_id("nope").is_none());
+    }
+
+    #[test]
+    fn agent_spawn_event_serialization_roundtrip() {
+        // 根节点
+        let root = AgentSpawnEvent::new_root(
+            "planner-1".to_string(),
+            "planner".to_string(),
+            "user_request".to_string(),
+            1000,
+        );
+        let json = serde_json::to_string(&root).unwrap();
+        let deserialized: AgentSpawnEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.agent_id, "planner-1");
+        assert_eq!(deserialized.parent_agent_id, None);
+        assert_eq!(deserialized.spawn_reason, "user_request");
+
+        // 子节点
+        let child = AgentSpawnEvent::new_child(
+            "executor-1".to_string(),
+            "executor".to_string(),
+            "planner-1".to_string(),
+            "task_decomposition".to_string(),
+            2000,
+        );
+        let json = serde_json::to_string(&child).unwrap();
+        let deserialized: AgentSpawnEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.agent_id, "executor-1");
+        assert_eq!(deserialized.parent_agent_id, Some("planner-1".to_string()));
+        assert_eq!(deserialized.spawn_reason, "task_decomposition");
+
+        // 兼容旧数据：缺少 parent_agent_id 和 spawn_reason 的 JSON
+        let old_json = r#"{"agent_id":"old-1","agent_type":"planner","timestamp_ms":1000}"#;
+        let deserialized: AgentSpawnEvent = serde_json::from_str(old_json).unwrap();
+        assert_eq!(deserialized.agent_id, "old-1");
+        assert_eq!(deserialized.parent_agent_id, None);
+        assert_eq!(deserialized.spawn_reason, "");
+    }
+
+    #[test]
+    fn run_record_serialization_roundtrip() {
+        let mut record = RunRecord::new(
+            "run-1".to_string(),
+            "planner-1".to_string(),
+            "planner".to_string(),
+            None,
+            "user_request".to_string(),
+            1000,
+        );
+        record.finish(2000, 500, true, String::new());
+
+        let json = serde_json::to_string(&record).unwrap();
+        let deserialized: RunRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.run_id, "run-1");
+        assert_eq!(deserialized.parent_agent_id, None);
+        assert_eq!(deserialized.spawn_reason, "user_request");
+        assert_eq!(deserialized.total_tokens, 500);
+        assert!(deserialized.success);
+
+        // 兼容旧数据
+        let old_json = r#"{"run_id":"old-run","agent_id":"old-agent","agent_type":"executor","started_at_ms":1000,"finished_at_ms":2000,"total_tokens":100,"success":true,"error":""}"#;
+        let deserialized: RunRecord = serde_json::from_str(old_json).unwrap();
+        assert_eq!(deserialized.parent_agent_id, None);
+        assert_eq!(deserialized.spawn_reason, "");
+    }
+
+    #[test]
+    fn lineage_tree_construction() {
+        // 构造多层 spawn 场景：planner -> executor -> reviewer
+        let events = vec![
+            AgentSpawnEvent::new_root("planner-1".into(), "planner".into(), "user_request".into(), 1000),
+            AgentSpawnEvent::new_child("executor-1".into(), "executor".into(), "planner-1".into(), "task_decomposition".into(), 1500),
+            AgentSpawnEvent::new_child("executor-2".into(), "executor".into(), "planner-1".into(), "task_decomposition".into(), 1600),
+            AgentSpawnEvent::new_child("reviewer-1".into(), "reviewer".into(), "executor-1".into(), "tool_call".into(), 2000),
+        ];
+
+        // 验证父子关系
+        let mut children: std::collections::HashMap<String, Vec<&AgentSpawnEvent>> = std::collections::HashMap::new();
+        for e in &events {
+            if let Some(parent) = &e.parent_agent_id {
+                children.entry(parent.clone()).or_default().push(e);
+            }
+        }
+
+        assert_eq!(children.get("planner-1").map(|v| v.len()), Some(2));
+        assert_eq!(children.get("executor-1").map(|v| v.len()), Some(1));
+        assert_eq!(children.get("executor-2"), None);
+        assert_eq!(children.get("reviewer-1"), None);
+
+        // 验证根节点
+        let roots: Vec<_> = events.iter().filter(|e| e.parent_agent_id.is_none()).collect();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].agent_id, "planner-1");
+    }
+
+    #[test]
+    fn impact_analysis() {
+        let records = vec![
+            RunRecord::new("run-1".into(), "planner-1".into(), "planner".into(), None, "user_request".into(), 1000),
+            RunRecord::new("run-2".into(), "executor-1".into(), "executor".into(), Some("planner-1".into()), "task_decomposition".into(), 1500),
+            RunRecord::new("run-3".into(), "executor-2".into(), "executor".into(), Some("planner-1".into()), "task_decomposition".into(), 1600),
+            RunRecord::new("run-4".into(), "reviewer-1".into(), "reviewer".into(), Some("executor-1".into()), "tool_call".into(), 2000),
+        ];
+        // 模拟完成
+        let mut records_mut = records;
+        records_mut[0].finish(1200, 100, true, String::new());
+        records_mut[1].finish(1800, 500, true, String::new());
+        records_mut[2].finish(1900, 400, false, "timeout".into());
+        records_mut[3].finish(2200, 200, true, String::new());
+
+        // 统计 planner-1 的影响力
+        let mut descendant_count = 0;
+        let mut total_tokens = 0;
+        let mut failure_count = 0;
+        for r in &records_mut {
+            // 简单判断：是否为 planner-1 或其后代（这里仅演示直接子级）
+            if r.agent_id == "planner-1" || r.parent_agent_id == Some("planner-1".into()) {
+                descendant_count += 1;
+                total_tokens += r.total_tokens;
+                if !r.success {
+                    failure_count += 1;
+                }
+            }
+        }
+        // planner-1 自身 + 2 个直接子任务
+        assert_eq!(descendant_count, 3);
+        assert_eq!(total_tokens, 1000); // 100 + 500 + 400
+        assert_eq!(failure_count, 1); // executor-2 失败
     }
 }

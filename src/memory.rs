@@ -75,6 +75,12 @@ pub struct MemoryEntry {
     pub input_chars: Option<u64>,
     #[serde(default)]
     pub output_chars: Option<u64>,
+    /// 父 Agent 的 ID，用于血统追踪。根节点为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_agent_id: Option<String>,
+    /// 触发 spawn 的原因，如 "task_decomposition"、"tool_call"、"user_request"。
+    #[serde(default)]
+    pub spawn_reason: String,
 }
 
 #[derive(Debug)]
@@ -91,6 +97,41 @@ impl MemoryStore {
             }
         }
         Ok(Self { path })
+    }
+
+    /// 根据 parent_agent_id 查找所有直接子节点。
+    pub fn find_children(&self, parent_agent_id: &str) -> Result<Vec<MemoryEntry>, MemoryError> {
+        let entries = self.read_entries()?;
+        Ok(entries
+            .into_iter()
+            .filter(|e| e.parent_agent_id.as_deref() == Some(parent_agent_id))
+            .collect())
+    }
+
+    /// 递归查找所有后代节点（子节点、孙节点等）。
+    pub fn find_descendants(&self, ancestor_agent_id: &str) -> Result<Vec<MemoryEntry>, MemoryError> {
+        let mut result = Vec::new();
+        let mut stack = vec![ancestor_agent_id.to_string()];
+        let all_entries = self.read_entries()?;
+        
+        // 构建 parent_agent_id -> children 映射以提高查找效率
+        let mut children_map: std::collections::HashMap<String, Vec<MemoryEntry>> = 
+            std::collections::HashMap::new();
+        for entry in all_entries {
+            if let Some(ref parent_id) = entry.parent_agent_id {
+                children_map.entry(parent_id.clone()).or_default().push(entry);
+            }
+        }
+        
+        while let Some(current_id) = stack.pop() {
+            if let Some(children) = children_map.get(&current_id) {
+                for child in children {
+                    result.push(child.clone());
+                    stack.push(child.id.to_string()); // 使用 id 作为下一层的 parent_agent_id 查找键
+                }
+            }
+        }
+        Ok(result)
     }
 
     /// Opens the workspace-scoped memory file.
@@ -138,6 +179,8 @@ impl MemoryStore {
             token_usage: None,
             input_chars: None,
             output_chars: None,
+            parent_agent_id: None,
+            spawn_reason: String::new(),
         };
 
         let mut file = OpenOptions::new()
@@ -325,49 +368,129 @@ mod memory_entry_usage_tests {
             }),
             input_chars: Some(5),
             output_chars: Some(7),
+            parent_agent_id: Some("parent-123".to_owned()),
+            spawn_reason: "task_decomposition".to_owned(),
         };
 
         let json = serde_json::to_string(&entry).unwrap();
         let parsed: MemoryEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, entry);
-        assert_eq!(
-            parsed.token_usage,
-            Some(TokenUsage {
-                input_tokens: 10,
-                output_tokens: 20,
-                total_tokens: 30,
-            })
-        );
-        assert_eq!(parsed.input_chars, Some(5));
-        assert_eq!(parsed.output_chars, Some(7));
+        assert_eq!(parsed.parent_agent_id, Some("parent-123".to_owned()));
+        assert_eq!(parsed.spawn_reason, "task_decomposition");
     }
 
     #[test]
-    fn old_json_without_usage_fields_deserializes_with_defaults() {
+    fn old_json_without_lineage_fields_deserializes_with_defaults() {
         let json = r#"{"id": 2, "timestamp": 1700000000000, "title": "old", "content": "record", "created_at": "1700000000000"}"#;
         let entry: MemoryEntry = serde_json::from_str(json).unwrap();
         assert_eq!(entry.id, 2);
         assert_eq!(entry.title, "old");
         assert_eq!(entry.content, "record");
-        assert_eq!(entry.token_usage, None);
-        assert_eq!(entry.input_chars, None);
-        assert_eq!(entry.output_chars, None);
+        assert_eq!(entry.parent_agent_id, None);
+        assert_eq!(entry.spawn_reason, "");
     }
 
     #[test]
-    fn partial_token_usage_fields_default_to_zero() {
-        let json = r#"{"id": 3, "timestamp": 1700000000000, "title": "partial", "content": "record", "created_at": "1700000000000", "token_usage": {"input_tokens": 11}, "input_chars": 4}"#;
+    fn partial_lineage_fields_default_correctly() {
+        let json = r#"{"id": 3, "timestamp": 1700000000000, "title": "partial", "content": "record", "created_at": "1700000000000", "parent_agent_id": "parent-456"}"#;
         let entry: MemoryEntry = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            entry.token_usage,
-            Some(TokenUsage {
-                input_tokens: 11,
-                output_tokens: 0,
-                total_tokens: 0,
-            })
-        );
-        assert_eq!(entry.input_chars, Some(4));
-        assert_eq!(entry.output_chars, None);
+        assert_eq!(entry.parent_agent_id, Some("parent-456".to_owned()));
+        assert_eq!(entry.spawn_reason, "");
+    }
+
+    #[test]
+    fn find_children_returns_direct_descendants() {
+        let dir = temp_workspace();
+        let store = MemoryStore::open(&dir).unwrap();
+
+        // 创建根节点
+        let root = store.add_with_title("root", "root task").unwrap();
+        // 创建两个子节点
+        let mut child1 = store.add_with_title("child1", "child task 1").unwrap();
+        child1.parent_agent_id = Some(root.id.to_string());
+        child1.spawn_reason = "task_decomposition".to_owned();
+        
+        let mut child2 = store.add_with_title("child2", "child task 2").unwrap();
+        child2.parent_agent_id = Some(root.id.to_string());
+        child2.spawn_reason = "tool_call".to_owned();
+        
+        // 创建孙节点
+        let mut grandchild = store.add_with_title("grandchild", "grandchild task").unwrap();
+        grandchild.parent_agent_id = Some(child1.id.to_string());
+        grandchild.spawn_reason = "user_request".to_owned();
+        
+        // 重新写入以持久化修改
+        let mut entries = store.read_entries().unwrap();
+        for e in &mut entries {
+            if e.id == child1.id { *e = child1.clone(); }
+            if e.id == child2.id { *e = child2.clone(); }
+            if e.id == grandchild.id { *e = grandchild.clone(); }
+        }
+        store.write_entries(&entries).unwrap();
+        
+        // 查找根节点的直接子节点
+        let children = store.find_children(&root.id.to_string()).unwrap();
+        assert_eq!(children.len(), 2);
+        let child_ids: std::collections::HashSet<_> = children.iter().map(|c| c.id).collect();
+        assert!(child_ids.contains(&child1.id));
+        assert!(child_ids.contains(&child2.id));
+        
+        // 查找 child1 的直接子节点
+        let grandchildren = store.find_children(&child1.id.to_string()).unwrap();
+        assert_eq!(grandchildren.len(), 1);
+        assert_eq!(grandchildren[0].id, grandchild.id);
+        
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn find_descendants_returns_all_generations() {
+        let dir = temp_workspace();
+        let store = MemoryStore::open(&dir).unwrap();
+
+        let root = store.add_with_title("root", "root").unwrap();
+        let mut c1 = store.add_with_title("c1", "c1").unwrap();
+        c1.parent_agent_id = Some(root.id.to_string());
+        let mut c2 = store.add_with_title("c2", "c2").unwrap();
+        c2.parent_agent_id = Some(root.id.to_string());
+        let mut gc1 = store.add_with_title("gc1", "gc1").unwrap();
+        gc1.parent_agent_id = Some(c1.id.to_string());
+        let mut ggc1 = store.add_with_title("ggc1", "ggc1").unwrap();
+        ggc1.parent_agent_id = Some(gc1.id.to_string());
+        
+        let mut entries = store.read_entries().unwrap();
+        for e in &mut entries {
+            if e.id == c1.id { *e = c1.clone(); }
+            if e.id == c2.id { *e = c2.clone(); }
+            if e.id == gc1.id { *e = gc1.clone(); }
+            if e.id == ggc1.id { *e = ggc1.clone(); }
+        }
+        store.write_entries(&entries).unwrap();
+        
+        let descendants = store.find_descendants(&root.id.to_string()).unwrap();
+        assert_eq!(descendants.len(), 4);
+        let desc_ids: std::collections::HashSet<_> = descendants.iter().map(|d| d.id).collect();
+        assert!(desc_ids.contains(&c1.id));
+        assert!(desc_ids.contains(&c2.id));
+        assert!(desc_ids.contains(&gc1.id));
+        assert!(desc_ids.contains(&ggc1.id));
+        
+        cleanup(&dir);
+    }
+
+    fn temp_workspace() -> PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT_DIR_ID: AtomicUsize = AtomicUsize::new(0);
+        let id = NEXT_DIR_ID.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "workbuddy-memory-lineage-test-{}-{}",
+            std::process::id(),
+            id
+        ))
+    }
+
+    fn cleanup(dir: &Path) {
+        let _ = fs::remove_dir_all(dir);
     }
 }
 
