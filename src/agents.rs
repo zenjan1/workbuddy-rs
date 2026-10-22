@@ -1,6 +1,7 @@
 /// 内置专家智能体目录(对应 WorkBuddy 的"多专家协同"范式)。
 pub mod reviewer;
 
+use schemars::JsonSchema;
 
 /// 自定义专家模板生成模块
 pub mod template {
@@ -8,8 +9,9 @@ pub mod template {
     use std::path::{Path, PathBuf};
     use std::fmt;
     use std::error::Error as StdError;
+    use schemars::JsonSchema;
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema)]
     pub enum AgentType {
         Planner,
         Executor,
@@ -73,7 +75,7 @@ pub mod template {
     pub type Result<T> = std::result::Result<T, TemplateError>;
 
     /// 生成的文件路径
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, JsonSchema)]
     pub struct GeneratedFiles {
         pub toml_path: PathBuf,
         pub md_path: PathBuf,
@@ -285,14 +287,14 @@ skills = [
 }
 
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, JsonSchema)]
 pub struct Skill {
     pub name: &'static str,
     pub desc: &'static str,
     pub prompt: &'static str,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, JsonSchema)]
 pub struct Agent {
     pub id: &'static str,
     pub name: &'static str,

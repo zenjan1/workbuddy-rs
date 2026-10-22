@@ -29,12 +29,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, Args};
 use config::Config;
 use executor::Executor;
 use llm::{Llm, MockLlm, OpenAiCompat};
 use workspace::{RunRecord, StepRecord, Workspace};
 use keyring::Entry;
+use schemars::schema_for;
+use serde_json;
 
 #[derive(Parser)]
 #[command(
@@ -61,6 +63,19 @@ enum ConfigAction {
         /// 配置键
         key: String,
     },
+    /// 导出 JSON Schema (Draft 2020-12)
+    Schema(SchemaArgs),
+}
+
+#[derive(Args)]
+#[group(required = false, multiple = false)]
+struct SchemaArgs {
+    /// 导出主配置 config.toml 的 JSON Schema (默认)
+    #[arg(long)]
+    config: bool,
+    /// 导出 agents.toml 的 JSON Schema
+    #[arg(long)]
+    agents: bool,
 }
 
 #[derive(Subcommand)]
@@ -487,6 +502,17 @@ async fn main() -> Result<()> {
                     if needs_restart {
                         println!("提示：修改 {} 需要重启 WorkBuddy 才能生效。", key);
                     }
+                    Ok(())
+                }
+                Some(ConfigAction::Schema(args)) => {
+                    let schema = if args.agents {
+                        schema_for!(config::AgentsConfig)
+                    } else {
+                        schema_for!(Config)
+                    };
+                    let json = serde_json::to_string_pretty(&schema)
+                        .map_err(|e| anyhow::anyhow!("序列化 JSON Schema 失败: {}", e))?;
+                    println!("{}", json);
                     Ok(())
                 }
             }

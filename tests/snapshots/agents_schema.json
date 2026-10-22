@@ -1,0 +1,72 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "AgentConfig": {
+      "description": "单个专家配置，对应 agents.toml 中的条目。",
+      "properties": {
+        "description": {
+          "description": "简短描述",
+          "type": "string"
+        },
+        "id": {
+          "description": "专家唯一标识符",
+          "type": "string"
+        },
+        "model": {
+          "description": "使用的模型",
+          "type": "string"
+        },
+        "name": {
+          "description": "显示名称",
+          "type": "string"
+        },
+        "prompt_file": {
+          "description": "系统提示词文件路径",
+          "type": "string"
+        },
+        "skills": {
+          "description": "技能列表",
+          "items": {
+            "$ref": "#/definitions/SkillConfig"
+          },
+          "type": "array"
+        },
+        "type": {
+          "description": "专家类型",
+          "type": "string"
+        }
+      },
+      "required": [
+        "description",
+        "id",
+        "model",
+        "name",
+        "prompt_file",
+        "skills",
+        "type"
+      ],
+      "type": "object"
+    },
+    "SkillConfig": {
+      "description": "技能配置",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "description",
+        "name"
+      ],
+      "type": "object"
+    }
+  },
+  "items": {
+    "$ref": "#/definitions/AgentConfig"
+  },
+  "title": "Array_of_AgentConfig",
+  "type": "array"
+}

@@ -1,0 +1,95 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "运行时配置。优先级:命令行 > 环境变量 > 配置文件 > 默认值。",
+  "properties": {
+    "api_key": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "base_url": {
+      "type": "string"
+    },
+    "cost_per_1k_tokens": {
+      "format": "double",
+      "type": "number"
+    },
+    "max_budget": {
+      "format": "double",
+      "type": "number"
+    },
+    "max_parallel": {
+      "format": "uint",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "mock": {
+      "type": "boolean"
+    },
+    "model": {
+      "type": "string"
+    },
+    "pre_commit_review": {
+      "description": "提交前自评审开关，默认关闭。",
+      "type": "boolean"
+    },
+    "price": {
+      "format": "double",
+      "type": "number"
+    },
+    "repo_dir": {
+      "description": "dev 模式的操作仓库(默认当前目录)",
+      "type": "string"
+    },
+    "request_timeout_secs": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "review_enabled": {
+      "type": "boolean"
+    },
+    "webhook_enabled": {
+      "type": "boolean"
+    },
+    "webhook_retry": {
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "webhook_timeout_secs": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "webhook_url": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "workspace_dir": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "base_url",
+    "cost_per_1k_tokens",
+    "max_budget",
+    "max_parallel",
+    "mock",
+    "model",
+    "pre_commit_review",
+    "price",
+    "repo_dir",
+    "request_timeout_secs",
+    "review_enabled",
+    "webhook_enabled",
+    "webhook_retry",
+    "webhook_timeout_secs",
+    "workspace_dir"
+  ],
+  "title": "Config",
+  "type": "object"
+}

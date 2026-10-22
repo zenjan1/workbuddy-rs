@@ -3,12 +3,13 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use clap::Args;
 use keyring::Entry;
 
 /// Webhook 通知配置。每个 URL 可独立扩展超时、重试等选项。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct WebhookConfig {
     /// Webhook URL，必须是 http/https。
     pub url: String,
@@ -16,7 +17,7 @@ pub struct WebhookConfig {
 }
 
 /// 按 token 单价计费的配置。单位：美元/token。
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default, JsonSchema)]
 #[serde(default)]
 pub struct TokenPrices {
     /// 输入 token 单价。
@@ -26,7 +27,7 @@ pub struct TokenPrices {
 }
 
 /// 运行时配置。优先级:命令行 > 环境变量 > 配置文件 > 默认值。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, JsonSchema)]
 pub struct Config {
     pub api_key: Option<String>,
     pub base_url: String,
@@ -49,8 +50,40 @@ pub struct Config {
     pub webhook_timeout_secs: u64,
 }
 
+/// agents.toml 的配置结构，用于 JSON Schema 导出。
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(transparent)]
+pub struct AgentsConfig(pub Vec<AgentConfig>);
+
+/// 单个专家配置，对应 agents.toml 中的条目。
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct AgentConfig {
+    /// 专家唯一标识符
+    pub id: String,
+    /// 显示名称
+    pub name: String,
+    /// 简短描述
+    pub description: String,
+    /// 专家类型
+    #[serde(rename = "type")]
+    pub agent_type: String,
+    /// 使用的模型
+    pub model: String,
+    /// 系统提示词文件路径
+    pub prompt_file: String,
+    /// 技能列表
+    pub skills: Vec<SkillConfig>,
+}
+
+/// 技能配置
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct SkillConfig {
+    pub name: String,
+    pub description: String,
+}
+
 /// `config set` 更新后的生效摘要。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema)]
 pub struct ConfigUpdateSummary {
     /// 规范化后的配置键名。
     pub key: String,
@@ -89,6 +122,7 @@ struct FileConfig {
     #[serde(default)]
     webhooks: Vec<WebhookConfig>,
     #[serde(flatten)]
+    #[allow(dead_code)]
     extra: std::collections::BTreeMap<String, toml::Value>,
 }
 
