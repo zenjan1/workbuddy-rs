@@ -24,6 +24,7 @@ mod util;
 mod utils;
 mod webhook;
 mod workspace;
+mod replay;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -33,6 +34,7 @@ use clap::{Parser, Subcommand, Args};
 use config::Config;
 use executor::Executor;
 use llm::{Llm, MockLlm, OpenAiCompat};
+use replay::{run_replay, ReplayOptions, ComparisonReport};
 use workspace::{RunRecord, StepRecord, Workspace};
 use keyring::Entry;
 use schemars::schema_for;
@@ -114,6 +116,24 @@ enum RunCmd {
         /// 导入后立即显示摘要
         #[arg(long)]
         show: bool,
+    },
+    /// 重放历史运行：替换 LLM 后端重新生成决策步骤
+    Replay {
+        /// 运行 ID (ULID)
+        #[arg(value_name = "RUN_ID")]
+        run_id: String,
+        /// 替换的模型名称
+        #[arg(long, value_name = "MODEL")]
+        model: String,
+        /// 生成对比报告
+        #[arg(long)]
+        compare: bool,
+        /// 基准模型名称（默认使用原运行的模型）
+        #[arg(long, value_name = "MODEL")]
+        baseline_model: Option<String>,
+        /// 对比报告输出文件路径（默认 stdout）
+        #[arg(long, short, value_name = "FILE")]
+        output: Option<PathBuf>,
     },
 }
 
@@ -392,6 +412,16 @@ async fn main() -> Result<()> {
                 RunCmd::Import { input, show } => {
                     // TODO: 实现导入逻辑 (步骤4)
                     todo!("run import 业务逻辑待实现: input={:?}, show={}", input, show)
+                }
+                RunCmd::Replay { run_id, model, compare, baseline_model, output } => {
+                    let options = ReplayOptions {
+                        run_id,
+                        new_model: model,
+                        compare,
+                        baseline_model,
+                        output,
+                    };
+                    run_replay(cfg, options).await
                 }
             }
         }
