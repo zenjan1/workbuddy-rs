@@ -689,3 +689,63 @@ mod tests {
         assert_eq!(failure_count, 1); // executor-2 失败
     }
 }
+
+/// 项目配额 CLI 子命令定义模块
+///
+/// 该模块定义了 `project quota` 子命令的 CLI 结构，
+/// 实际的命令处理逻辑在 `src/cli/quota.rs` 中实现。
+pub mod quota_cli {
+    use clap::{Args, Subcommand, ValueEnum};
+    use serde::{Deserialize, Serialize};
+
+    /// 超限处理策略
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum, Default)]
+    #[serde(rename_all = "lowercase")]
+    pub enum QuotaPolicy {
+        /// 排队等待（默认）
+        #[default]
+        Queue,
+        /// 直接拒绝
+        Reject,
+        /// 杀掉正在运行的任务腾出位置
+        Kill,
+    }
+
+    /// `project quota` 子命令集合
+    #[derive(Debug, Subcommand)]
+    pub enum QuotaCommand {
+        /// 设置项目配额限制
+        Set(QuotaSetArgs),
+        /// 查看项目配额实时用量仪表盘
+        Status(QuotaStatusArgs),
+    }
+
+    /// `project quota set` 参数
+    #[derive(Debug, Args)]
+    pub struct QuotaSetArgs {
+        /// 项目名称
+        pub name: String,
+        /// 最大预算（元），设为 0 表示不限制
+        #[arg(long, default_value = "0")]
+        pub max_budget: f64,
+        /// 最大并发任务数，设为 0 表示不限制
+        #[arg(long, default_value = "0")]
+        pub max_parallel: usize,
+        /// 速率限制（请求/秒），设为 0 表示不限制
+        #[arg(long, default_value = "0")]
+        pub rate_limit: u32,
+        /// 超限处理策略
+        #[arg(long, value_enum, default_value = "queue")]
+        pub policy: QuotaPolicy,
+    }
+
+    /// `project quota status` 参数
+    #[derive(Debug, Args)]
+    pub struct QuotaStatusArgs {
+        /// 项目名称
+        pub name: String,
+        /// 以 JSON 格式输出
+        #[arg(long)]
+        pub json: bool,
+    }
+}
