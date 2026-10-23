@@ -95,6 +95,9 @@ enum RunCmd {
         /// 并行度(默认取配置,4)
         #[arg(long)]
         parallel: Option<usize>,
+        /// 启用共识投票模式(针对 critical=true 的任务)
+        #[arg(long)]
+        consensus: bool,
     },
     /// 导出完整运行记录
     Export {
@@ -409,7 +412,7 @@ async fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Run { cmd } => {
             match cmd {
-                RunCmd::Execute { goal, mock, model, parallel } => {
+                RunCmd::Execute { goal, mock, model, parallel, consensus } => {
                     let input = goal.join(" ");
                     if input.trim().is_empty() {
                         anyhow::bail!("任务目标不能为空");

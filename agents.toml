@@ -21,3 +21,12 @@ description = "Read the contents of a file. Returns the file content as text. Su
 parameters = { type = "object", properties = { path = { type = "string", description = "Absolute or relative path to the file to read" }, offset = { type = "integer", description = "Byte offset to start reading from (default: 0)", minimum = 0 }, limit = { type = "integer", description = "Maximum number of bytes to read (default: entire file)", minimum = 1 } }, required = ["path"] }
 timeout_ms = 10000
 safety = { path_restrictions = ["**"], require_confirmation = false, max_file_size = 104857600 }
+
+# Agent configurations
+# Each agent defines a model and optional consensus group for critical tasks
+
+[agents.default]
+model = "gpt-4o"
+# Consensus group for critical tasks (exactly 3 models: primary + 2 fallbacks)
+# The first model should match the agent's model field
+consensus_group = ["gpt-4o", "claude-3-opus", "gemini-1.5-pro"]
