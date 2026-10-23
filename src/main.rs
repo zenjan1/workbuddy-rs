@@ -147,6 +147,18 @@ enum RunCmd {
         #[arg(long, short, value_name = "FILE")]
         output: Option<PathBuf>,
     },
+    /// 导出自包含 HTML 报告（离线可用）
+    Bundle {
+        /// 运行 ID (ULID)
+        #[arg(value_name = "RUN_ID")]
+        run_id: String,
+        /// 输出文件路径（默认 run-<id>.html）
+        #[arg(long, short, value_name = "FILE")]
+        output: Option<PathBuf>,
+        /// 包含完整日志内容
+        #[arg(long)]
+        include_logs: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -435,6 +447,10 @@ async fn main() -> Result<()> {
                         output,
                     };
                     run_replay(cfg, options).await
+                }
+                RunCmd::Bundle { run_id, output, include_logs } => {
+                    // TODO: 实现自包含 HTML 报告导出逻辑
+                    todo!("run bundle 业务逻辑待实现: run_id={}, output={:?}, include_logs={}", run_id, output, include_logs)
                 }
             }
         }
