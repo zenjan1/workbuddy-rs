@@ -107,6 +107,18 @@ enum RunCmd {
         /// 是否包含工件内容（默认仅包含路径）
         #[arg(long)]
         include_artifacts: bool,
+        /// 导出格式
+        #[arg(long, value_name = "FORMAT", value_parser = clap::builder::PossibleValuesParser::new(["csv", "parquet", "json"]), default_value = "json")]
+        format: String,
+        /// 仅导出该时间（含）之后的记录 (RFC3339, 如 2024-01-15T00:00:00Z)
+        #[arg(long, value_name = "DATETIME")]
+        since: Option<String>,
+        /// 仅导出该时间（含）之前的记录 (RFC3339, 如 2024-01-15T23:59:59Z)
+        #[arg(long, value_name = "DATETIME")]
+        until: Option<String>,
+        /// 仅导出指定 agent 的记录
+        #[arg(long, value_name = "AGENT")]
+        agent: Option<String>,
     },
     /// 导入运行记录并分配新 RunId
     Import {
@@ -406,9 +418,9 @@ async fn main() -> Result<()> {
                     cfg.mock = mock;
                     run_task(cfg, &goal).await
                 }
-                RunCmd::Export { run_id, output, include_artifacts } => {
+                RunCmd::Export { run_id, output, include_artifacts, format, since, until, agent } => {
                     // TODO: 实现导出逻辑 (步骤4)
-                    todo!("run export 业务逻辑待实现: run_id={}, output={:?}, include_artifacts={}", run_id, output, include_artifacts)
+                    todo!("run export 业务逻辑待实现: run_id={}, output={:?}, include_artifacts={}, format={}, since={:?}, until={:?}, agent={:?}", run_id, output, include_artifacts, format, since, until, agent)
                 }
                 RunCmd::Import { input, show } => {
                     // TODO: 实现导入逻辑 (步骤4)
