@@ -9,6 +9,7 @@ use crate::executor::{Executor, RunResult, ExecutionConfig};
 use crate::planner::{PlanStep, Plan, generate_roles};
 use crate::agent_factory::DynamicAgentFactory;
 use crate::role_matcher::RoleMatcher;
+use crate::vector_search::{generate_and_store_embedding, Embedder};
 
 /// Configuration for temporary workspace behavior
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -309,6 +310,26 @@ pub fn orchestrate_with_config(goal: &str, workspace_config: TempWorkspaceConfig
         .context("Orchestration run failed")?;
     
     let success = run_result.success;
+    
+    // Step 9: Generate and store embeddings for the run (if successful)
+    // Use a default embedder for production; errors are logged but don't break run completion
+    if success {
+        // Create a summary from the run result for embedding
+        let run_summary = format!("Goal: {}. Roles: {}. Steps: {}. Success: {}",
+            goal,
+            required_roles.join(", "),
+            plan_steps.iter().map(|s| s.task.as_str()).collect::<Vec<_>>().join("; "),
+            success
+        );
+        
+        // Use default embedder (local model placeholder) for production
+        // In tests, a mock embedder will be injected via the vector_search module
+        let embedder = Embedder::default();
+        if let Err(e) = generate_and_store_embedding(&run_summary, &run_result, &embedder) {
+            eprintln!("Warning: Failed to generate embedding for run: {}", e);
+            // Don't fail the orchestration if embedding generation fails
+        }
+    }
     
     Ok(OrchestrateResult {
         goal: goal.to_string(),
