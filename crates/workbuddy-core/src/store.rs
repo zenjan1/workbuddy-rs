@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
+use uuid::Uuid;
+use chrono::{DateTime, Utc};
 
 #[derive(Error, Debug)]
 pub enum StoreError {
@@ -222,6 +224,244 @@ pub fn load_runs(runs_dir: &Path) -> Result<Vec<Run>> {
     Ok(runs)
 }
 
+/// Snapshot of a single execution step for deterministic replay
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StepSnapshot {
+    /// Unique identifier for this snapshot
+    pub snapshot_id: Uuid,
+    /// Run ID this snapshot belongs to
+    pub run_id: String,
+    /// Step index (0-based)
+    pub step_index: u64,
+    /// Timestamp when snapshot was created
+    pub created_at: DateTime<Utc>,
+    /// Complete executor internal state at this step
+    pub executor_state: ExecutorInternalState,
+    /// Input that triggered this step (user prompt, tool result, etc.)
+    pub step_input: StepInput,
+    /// Output produced by this step
+    pub step_output: StepOutput,
+    /// Checksum for integrity verification
+    pub checksum: String,
+}
+
+/// Metadata for a step snapshot (lightweight, for listing)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StepMeta {
+    pub snapshot_id: Uuid,
+    pub step_index: u64,
+    pub created_at: DateTime<Utc>,
+    pub step_type: StepType,
+    pub summary: String,
+}
+
+/// Type of step for categorization
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StepType {
+    UserPrompt,
+    ToolCall,
+    ToolResult,
+    LlmResponse,
+    BranchPoint,
+}
+
+/// Input that triggered a step
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StepInput {
+    UserPrompt { prompt: String },
+    ToolCall { name: String, args: serde_json::Value },
+    ToolResult { tool_call_id: String, result: serde_json::Value },
+    BranchResume { parent_snapshot_id: Uuid, modified_input: serde_json::Value },
+}
+
+/// Output produced by a step
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StepOutput {
+    LlmResponse { content: String, tool_calls: Vec<ToolCallRecord> },
+    ToolResult { success: bool, result: serde_json::Value, error: Option<String> },
+    StateChange { description: String },
+}
+
+/// Tool call record for serialization
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolCallRecord {
+    pub id: String,
+    pub name: String,
+    pub arguments: serde_json::Value,
+    pub result: Option<serde_json::Value>,
+    pub error: Option<String>,
+    pub started_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+/// Chat message for conversation history
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
+    pub tool_calls: Option<Vec<ToolCallRecord>>,
+    pub tool_call_id: Option<String>,
+    pub timestamp: DateTime<Utc>,
+}
+
+/// Executor internal state for deterministic recovery
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ExecutorInternalState {
+    pub step_index: u64,
+    pub conversation_history: Vec<ChatMessage>,
+    pub tool_call_chain: Vec<ToolCallRecord>,
+    pub env_snapshot: HashMap<String, String>,
+    pub memory_state: MemoryStateSnapshot,
+    pub rng_state: Option<RngState>,
+    pub working_dir: String,
+}
+
+/// Memory state snapshot for RAG context recovery
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemoryStateSnapshot {
+    pub vector_store_id: Option<String>,
+    pub relevant_doc_ids: Vec<String>,
+    pub embedding_model: String,
+}
+
+/// RNG state for deterministic sampling
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RngState {
+    pub algorithm: String,
+    pub state_bytes: Vec<u8>,
+}
+
+/// Get the directory path for a run's snapshots
+fn snapshots_dir(runs_dir: &Path, run_id: &str) -> PathBuf {
+    runs_dir.join(run_id).join("snapshots")
+}
+
+/// Get the file path for a specific step snapshot
+fn snapshot_path(runs_dir: &Path, run_id: &str, step_index: u64) -> PathBuf {
+    snapshots_dir(runs_dir, run_id).join(format!("step-{:06}.json", step_index))
+}
+
+/// Get the index file path for a run's snapshots
+fn snapshots_index_path(runs_dir: &Path, run_id: &str) -> PathBuf {
+    snapshots_dir(runs_dir, run_id).join("index.json")
+}
+
+/// Load the snapshots index for a run
+fn load_snapshots_index(runs_dir: &Path, run_id: &str) -> Result<Vec<StepMeta>> {
+    let path = snapshots_index_path(runs_dir, run_id);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content = fs::read_to_string(&path)?;
+    if content.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(serde_json::from_str(&content)?)
+}
+
+/// Save the snapshots index for a run
+fn save_snapshots_index(runs_dir: &Path, run_id: &str, index: &[StepMeta]) -> Result<()> {
+    let path = snapshots_index_path(runs_dir, run_id);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let content = serde_json::to_string_pretty(index)?;
+    fs::write(&path, content)?;
+    Ok(())
+}
+
+/// Compute a deterministic checksum for a snapshot
+fn compute_checksum(snapshot: &StepSnapshot) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    // Use a stable serialization for checksum
+    let bytes = serde_json::to_vec(snapshot).unwrap_or_default();
+    bytes.hash(&mut hasher);
+    format!("{:x}", hasher.finish())
+}
+
+/// Save a step snapshot for deterministic replay
+pub fn save_step_snapshot(runs_dir: &Path, run_id: &str, step_index: u64, snapshot: &StepSnapshot) -> Result<()> {
+    let dir = snapshots_dir(runs_dir, run_id);
+    fs::create_dir_all(&dir)?;
+
+    let path = snapshot_path(runs_dir, run_id, step_index);
+    let content = serde_json::to_string_pretty(snapshot)?;
+    fs::write(&path, content)?;
+
+    // Update index
+    let mut index = load_snapshots_index(runs_dir, run_id)?;
+    let meta = StepMeta {
+        snapshot_id: snapshot.snapshot_id,
+        step_index,
+        created_at: snapshot.created_at,
+        step_type: infer_step_type(&snapshot.step_input, &snapshot.step_output),
+        summary: generate_summary(&snapshot.step_input, &snapshot.step_output),
+    };
+    
+    // Update or insert
+    if let Some(pos) = index.iter().position(|m| m.step_index == step_index) {
+        index[pos] = meta;
+    } else {
+        index.push(meta);
+    }
+    index.sort_by_key(|m| m.step_index);
+    save_snapshots_index(runs_dir, run_id, &index)?;
+
+    Ok(())
+}
+
+/// Load a step snapshot by run ID and step index
+pub fn load_step_snapshot(runs_dir: &Path, run_id: &str, step_index: u64) -> Result<Option<StepSnapshot>> {
+    let path = snapshot_path(runs_dir, run_id, step_index);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(&path)?;
+    if content.trim().is_empty() {
+        return Ok(None);
+    }
+    let snapshot: StepSnapshot = serde_json::from_str(&content)?;
+    // Verify checksum
+    if snapshot.checksum != compute_checksum(&snapshot) {
+        return Err(StoreError::Serde(serde_json::Error::custom("checksum mismatch")));
+    }
+    Ok(Some(snapshot))
+}
+
+/// List all step snapshots for a run
+pub fn list_snapshots(runs_dir: &Path, run_id: &str) -> Result<Vec<StepMeta>> {
+    load_snapshots_index(runs_dir, run_id)
+}
+
+/// Infer step type from input/output
+fn infer_step_type(input: &StepInput, output: &StepOutput) -> StepType {
+    match (input, output) {
+        (StepInput::UserPrompt { .. }, _) => StepType::UserPrompt,
+        (StepInput::ToolCall { .. }, _) => StepType::ToolCall,
+        (StepInput::ToolResult { .. }, _) => StepType::ToolResult,
+        (_, StepOutput::LlmResponse { .. }) => StepType::LlmResponse,
+        (StepInput::BranchResume { .. }, _) => StepType::BranchPoint,
+        _ => StepType::StateChange,
+    }
+}
+
+/// Generate a human-readable summary for a step
+fn generate_summary(input: &StepInput, output: &StepOutput) -> String {
+    match (input, output) {
+        (StepInput::UserPrompt { prompt }, _) => format!("User: {}", prompt.chars().take(80).collect::<String>()),
+        (StepInput::ToolCall { name, .. }, _) => format!("Tool call: {}", name),
+        (StepInput::ToolResult { tool_call_id, .. }, _) => format!("Tool result: {}", tool_call_id),
+        (_, StepOutput::LlmResponse { content, .. }) => format!("LLM: {}", content.chars().take(80).collect::<String>()),
+        (StepInput::BranchResume { .. }, _) => "Branch resume".to_string(),
+        _ => "State change".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,5 +610,147 @@ mod tests {
         let loaded = load_annotations(runs_dir, "old-run").unwrap();
         assert_eq!(loaded.tags.get("old_key"), Some(&"old_value".to_string()));
         assert_eq!(loaded.note, Some("Old note".to_string()));
+    }
+
+    #[test]
+    fn test_save_and_load_step_snapshot() {
+        let dir = tempdir().unwrap();
+        let runs_dir = dir.path();
+        
+        let snapshot = StepSnapshot {
+            snapshot_id: Uuid::new_v4(),
+            run_id: "run-123".to_string(),
+            step_index: 0,
+            created_at: Utc::now(),
+            executor_state: ExecutorInternalState {
+                step_index: 0,
+                conversation_history: vec![],
+                tool_call_chain: vec![],
+                env_snapshot: HashMap::new(),
+                memory_state: MemoryStateSnapshot {
+                    vector_store_id: None,
+                    relevant_doc_ids: vec![],
+                    embedding_model: "text-embedding-3-small".to_string(),
+                },
+                rng_state: None,
+                working_dir: "/tmp".to_string(),
+            },
+            step_input: StepInput::UserPrompt { prompt: "Hello".to_string() },
+            step_output: StepOutput::LlmResponse { content: "Hi there!".to_string(), tool_calls: vec![] },
+            checksum: String::new(), // Will be computed
+        };
+        
+        // Need to compute checksum after creation
+        let mut snapshot = snapshot;
+        snapshot.checksum = compute_checksum(&snapshot);
+        
+        save_step_snapshot(runs_dir, "run-123", 0, &snapshot).unwrap();
+        let loaded = load_step_snapshot(runs_dir, "run-123", 0).unwrap().unwrap();
+        
+        assert_eq!(loaded.snapshot_id, snapshot.snapshot_id);
+        assert_eq!(loaded.step_index, 0);
+        assert_eq!(loaded.step_input, snapshot.step_input);
+        assert_eq!(loaded.step_output, snapshot.step_output);
+    }
+
+    #[test]
+    fn test_load_nonexistent_snapshot() {
+        let dir = tempdir().unwrap();
+        let runs_dir = dir.path();
+        
+        let loaded = load_step_snapshot(runs_dir, "run-123", 0).unwrap();
+        assert!(loaded.is_none());
+    }
+
+    #[test]
+    fn test_list_snapshots() {
+        let dir = tempdir().unwrap();
+        let runs_dir = dir.path();
+        
+        // Create multiple snapshots
+        for i in 0..3 {
+            let snapshot = StepSnapshot {
+                snapshot_id: Uuid::new_v4(),
+                run_id: "run-123".to_string(),
+                step_index: i,
+                created_at: Utc::now(),
+                executor_state: ExecutorInternalState {
+                    step_index: i,
+                    conversation_history: vec![],
+                    tool_call_chain: vec![],
+                    env_snapshot: HashMap::new(),
+                    memory_state: MemoryStateSnapshot {
+                        vector_store_id: None,
+                        relevant_doc_ids: vec![],
+                        embedding_model: "text-embedding-3-small".to_string(),
+                    },
+                    rng_state: None,
+                    working_dir: "/tmp".to_string(),
+                },
+                step_input: StepInput::UserPrompt { prompt: format!("Prompt {}", i) },
+                step_output: StepOutput::LlmResponse { content: format!("Response {}", i), tool_calls: vec![] },
+                checksum: String::new(),
+            };
+            let mut snapshot = snapshot;
+            snapshot.checksum = compute_checksum(&snapshot);
+            save_step_snapshot(runs_dir, "run-123", i, &snapshot).unwrap();
+        }
+        
+        let snapshots = list_snapshots(runs_dir, "run-123").unwrap();
+        assert_eq!(snapshots.len(), 3);
+        assert_eq!(snapshots[0].step_index, 0);
+        assert_eq!(snapshots[1].step_index, 1);
+        assert_eq!(snapshots[2].step_index, 2);
+    }
+
+    #[test]
+    fn test_snapshot_checksum_verification() {
+        let dir = tempdir().unwrap();
+        let runs_dir = dir.path();
+        
+        let mut snapshot = StepSnapshot {
+            snapshot_id: Uuid::new_v4(),
+            run_id: "run-123".to_string(),
+            step_index: 0,
+            created_at: Utc::now(),
+            executor_state: ExecutorInternalState {
+                step_index: 0,
+                conversation_history: vec![],
+                tool_call_chain: vec![],
+                env_snapshot: HashMap::new(),
+                memory_state: MemoryStateSnapshot {
+                    vector_store_id: None,
+                    relevant_doc_ids: vec![],
+                    embedding_model: "text-embedding-3-small".to_string(),
+                },
+                rng_state: None,
+                working_dir: "/tmp".to_string(),
+            },
+            step_input: StepInput::UserPrompt { prompt: "Test".to_string() },
+            step_output: StepOutput::LlmResponse { content: "Response".to_string(), tool_calls: vec![] },
+            checksum: String::new(),
+        };
+        snapshot.checksum = compute_checksum(&snapshot);
+        
+        save_step_snapshot(runs_dir, "run-123", 0, &snapshot).unwrap();
+        
+        // Corrupt the file
+        let path = snapshot_path(runs_dir, "run-123", 0);
+        let mut content = fs::read_to_string(&path).unwrap();
+        content = content.replace("Test", "Corrupted");
+        fs::write(&path, content).unwrap();
+        
+        // Should fail checksum verification
+        let result = load_step_snapshot(runs_dir, "run-123", 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_step_meta_summary() {
+        let input = StepInput::UserPrompt { prompt: "This is a very long prompt that should be truncated in the summary to keep it readable and concise for display purposes".to_string() };
+        let output = StepOutput::LlmResponse { content: "Short response".to_string(), tool_calls: vec![] };
+        let summary = generate_summary(&input, &output);
+        assert!(summary.starts_with("User: "));
+        assert!(summary.len() <= 90); // "User: " + 80 chars
     }
 }
