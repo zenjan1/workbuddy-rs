@@ -6,6 +6,18 @@ use crate::llm::Llm;
 use crate::plan::{Plan, StepKind, MAX_STEPS};
 use crate::util::clip;
 
+/// Detect if a task goal indicates a feature task.
+/// Feature tasks are identified by naming convention:
+/// - Goal starts with "feat:" or "feature:" (case-insensitive)
+/// - Goal contains a "feature" tag (e.g., "[feature]" or "#feature")
+fn is_feature_task(goal: &str) -> bool {
+    let lower = goal.to_lowercase();
+    lower.starts_with("feat:")
+        || lower.starts_with("feature:")
+        || lower.contains("[feature]")
+        || lower.contains("#feature")
+}
+
 pub const PLANNER_SYSTEM: &str = "你是 WorkBuddy 的总规划师(Planner),负责把用户目标拆解为可执行的多智能体协作计划。\n\
 只输出一个 JSON 对象(不要 markdown 代码块、不要任何额外文字),结构如下:\n\
 {\n  \"goal\": \"一句话任务目标\",\n  \"steps\": [\n    {\"id\": 1, \"name\": \"步骤名\", \"agent\": \"专家id\", \"skill\": \"skill名\", \"prompt\": \"给该专家的完整任务说明\", \"kind\": \"llm\", \"needs\": []}\n  ]\n}\n\n\
@@ -24,9 +36,7 @@ pub async fn plan_task(llm: &Arc<dyn Llm>, goal: &str) -> Result<Plan> {
         .replace("{catalog}", &agents::catalog_text());
     let user = format!("用户目标:\n{}\n\n请输出 JSON 计划。", goal);
     let raw = llm.chat(&system, &user).await?;
-    let mut plan = Plan::from_llm(goal, &raw.text)?;
-    inject_tools_from_keywords(&mut plan);
-    Ok(plan)
+    Plan::from_llm(goal, &raw.text)
 }
 
 /// dev 模式规划提示词:针对"在代码仓库里完成一个开发任务"。
@@ -60,10 +70,7 @@ pub async fn plan_dev_task(llm: &Arc<dyn Llm>, goal: &str, filelist: &str) -> Re
         .replace("{catalog}", &agents::catalog_text());
     let user = format!("开发任务(在当前代码仓库中完成):\n{}\n\n请输出 JSON 计划。", goal);
     let raw = llm.chat(&system, &user).await?;
-    let mut plan = Plan::parse_from_llm(goal, &raw.text)?;
-    repair_dev_plan(&mut plan)?;
-    inject_tools_from_keywords(&mut plan);
-    Ok(plan)
+    Plan::from_llm(goal, &raw.text)
 }
 
 /// 根据步骤描述中的关键词自动注入 tool 字段。

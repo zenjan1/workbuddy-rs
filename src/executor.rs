@@ -595,6 +595,46 @@ fn run_read_step(step: &Step, cfg: &Config) -> Result<String> {
 
 /// edit 步骤:LLM 产出 edits JSON(文件操作协议),解析并应用到仓库,
 /// 输出应用了哪些动作供下游/审计。
+/// Check if the current git diff includes any test files.
+/// Runs `git diff --name-only` and checks for common test file patterns:
+/// - ends with `_test.rs`
+/// - contains `/tests/`
+/// - starts with `test_`
+/// Returns true if at least one test file is modified.
+pub fn diff_includes_tests() -> Result<bool> {
+    let output = std::process::Command::new("git")
+        .args(["diff", "--name-only"])
+        .output()
+        .context("failed to run git diff --name-only")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("git diff failed: {}", stderr);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let path = line.trim();
+        if path.is_empty() {
+            continue;
+        }
+        // Check common test file patterns
+        if path.ends_with("_test.rs")
+            || path.contains("/tests/")
+            || path.starts_with("test_")
+            || path.ends_with("_test.go")
+            || path.ends_with(".test.ts")
+            || path.ends_with(".test.js")
+            || path.ends_with("_test.py")
+            || path.contains("/test/")
+            && path.ends_with(".rs")
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 async fn run_edit_step(
     step: &Step,
     agent: &Agent,
