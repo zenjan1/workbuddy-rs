@@ -2,14 +2,47 @@
 use std::path::{Path, PathBuf};
 use std::fs;
 use std::io::Write;
+use std::process::Command;
+use std::time::Duration;
 use tempfile::TempDir;
 use serde::{Deserialize, Serialize};
-use anyhow::{Result, Context};
+use serde_json::{json, Value};
+use anyhow::{Result, Context, anyhow};
 use crate::executor::{Executor, RunResult, ExecutionConfig};
 use crate::planner::{PlanStep, Plan, generate_roles};
 use crate::agent_factory::DynamicAgentFactory;
 use crate::role_matcher::RoleMatcher;
 use crate::vector_search::{generate_and_store_embedding, Embedder};
+use crate::audit::{log_tool_use, ToolAuditEntry};
+
+/// Configuration for tool execution
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolConfig {
+    /// Default timeout for tool execution in milliseconds
+    pub tool_timeout_ms: u64,
+    /// Allowlist of commands that can be executed via shell tool
+    pub shell_allowlist: Vec<String>,
+    /// Root directory for path sandboxing (edit/read tools)
+    pub sandbox_root: Option<PathBuf>,
+}
+
+impl Default for ToolConfig {
+    fn default() -> Self {
+        Self {
+            tool_timeout_ms: 30000, // 30 seconds default
+            shell_allowlist: vec![
+                "cargo".to_string(),
+                "rustc".to_string(),
+                "git".to_string(),
+                "ls".to_string(),
+                "cat".to_string(),
+                "grep".to_string(),
+                "find".to_string(),
+            ],
+            sandbox_root: None,
+        }
+    }
+}
 
 /// Configuration for temporary workspace behavior
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,6 +53,8 @@ pub struct TempWorkspaceConfig {
     pub retain_on_success: bool,
     /// Prefix for the temporary directory name
     pub dir_prefix: String,
+    /// Tool execution configuration
+    pub tool_config: ToolConfig,
 }
 
 impl Default for TempWorkspaceConfig {
@@ -28,8 +63,108 @@ impl Default for TempWorkspaceConfig {
             retain_on_failure: true,
             retain_on_success: false,
             dir_prefix: "workbuddy-orchestrate-".to_string(),
+            tool_config: ToolConfig::default(),
         }
     }
+}
+
+/// Tool schema definition from agents.toml
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolSchema {
+    pub name: String,
+    pub description: String,
+    pub parameters: Value, // JSON Schema
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+/// Tool registry holding all available tool schemas
+#[derive(Debug, Clone, Default)]
+pub struct ToolRegistry {
+    tools: std::collections::HashMap<String, ToolSchema>,
+}
+
+impl ToolRegistry {
+    /// Create a new empty tool registry
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Load tool schemas from agents.toml content
+    pub fn load_from_toml(&mut self, toml_content: &str) -> Result<()> {
+        #[derive(Deserialize)]
+        struct AgentsToml {
+            #[serde(default)]
+            tools: Vec<ToolSchema>,
+        }
+        
+        let parsed: AgentsToml = toml::from_str(toml_content)
+            .context("Failed to parse agents.toml for tool schemas")?;
+        
+        for tool in parsed.tools {
+            self.tools.insert(tool.name.clone(), tool);
+        }
+        Ok(())
+    }
+
+    /// Get a tool schema by name
+    pub fn get(&self, name: &str) -> Option<&ToolSchema> {
+        self.tools.get(name)
+    }
+
+    /// List all available tool names
+    pub fn list_tools(&self) -> Vec<String> {
+        self.tools.keys().cloned().collect()
+    }
+
+    /// Validate tool arguments against the schema
+    pub fn validate_args(&self, tool_name: &str, args: &Value) -> Result<()> {
+        let schema = self.get(tool_name)
+            .ok_or_else(|| anyhow!("Tool '{}' not found in registry", tool_name))?;
+        
+        // Basic JSON schema validation (required fields, types)
+        if let Value::Object(obj) = &schema.parameters {
+            if let Some(Value::Array(required)) = obj.get("required") {
+                for req in required {
+                    if let Value::String(field) = req {
+                        if !args.get(field).is_some() {
+                            return Err(anyhow!("Missing required parameter: {}", field));
+                        }
+                    }
+                }
+            }
+            
+            // Type validation for properties
+            if let Some(Value::Object(props)) = obj.get("properties") {
+                for (key, value) in args.as_object().unwrap_or(&serde_json::Map::new()) {
+                    if let Some(prop_schema) = props.get(key) {
+                        if let Some(Value::String(expected_type)) = prop_schema.get("type") {
+                            let actual_type = match value {
+                                Value::String(_) => "string",
+                                Value::Number(_) => "number",
+                                Value::Bool(_) => "boolean",
+                                Value::Array(_) => "array",
+                                Value::Object(_) => "object",
+                                Value::Null => "null",
+                            };
+                            if actual_type != expected_type {
+                                return Err(anyhow!("Parameter '{}' expects type '{}', got '{}'", key, expected_type, actual_type));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Result of a tool execution
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolResult {
+    pub success: bool,
+    pub output: String,
+    pub error: Option<String>,
 }
 
 /// Temporary workspace for isolated orchestration execution
@@ -42,6 +177,8 @@ pub struct TempWorkspace {
     has_run: bool,
     /// Track if the run was successful
     run_success: bool,
+    /// Tool registry loaded from agents.toml
+    tool_registry: ToolRegistry,
 }
 
 impl TempWorkspace {
@@ -66,7 +203,25 @@ impl TempWorkspace {
             agents_path,
             has_run: false,
             run_success: false,
+            tool_registry: ToolRegistry::new(),
         })
+    }
+
+    /// Get the tool registry
+    pub fn tool_registry(&self) -> &ToolRegistry {
+        &self.tool_registry
+    }
+
+    /// Get mutable reference to tool registry
+    pub fn tool_registry_mut(&mut self) -> &mut ToolRegistry {
+        &mut self.tool_registry
+    }
+
+    /// Load tool schemas from the agents.toml file in the workspace
+    pub fn load_tool_schemas(&mut self) -> Result<()> {
+        let content = fs::read_to_string(&self.agents_path)
+            .context("Failed to read agents.toml for tool schemas")?;
+        self.tool_registry.load_from_toml(&content)
     }
 
     /// Get the path to the temporary workspace root
@@ -114,6 +269,208 @@ impl TempWorkspace {
             .with_context(|| format!("Failed to flush agents config at {:?}", self.agents_path))?;
         
         Ok(())
+    }
+
+    /// Execute a tool with the given name and arguments
+    /// Returns the tool result and logs the invocation via audit
+    pub fn execute_tool(&self, tool_name: &str, args: Value, agent_id: &str, step_id: &str) -> Result<ToolResult> {
+        let start_time = std::time::Instant::now();
+        
+        // Validate tool exists and arguments match schema
+        self.tool_registry.validate_args(tool_name, &args)?;
+        let schema = self.tool_registry.get(tool_name).unwrap();
+        
+        // Determine timeout
+        let timeout_ms = schema.timeout_ms.unwrap_or(self.config.tool_config.tool_timeout_ms);
+        let timeout = Duration::from_millis(timeout_ms);
+        
+        // Execute the tool based on its name
+        let result = match tool_name {
+            "edit" => self.execute_edit_tool(&args, timeout)?,
+            "shell" => self.execute_shell_tool(&args, timeout)?,
+            "read" => self.execute_read_tool(&args, timeout)?,
+            _ => return Err(anyhow!("Unknown tool: {}", tool_name)),
+        };
+        
+        let duration_ms = start_time.elapsed().as_millis() as u64;
+        
+        // Log tool use via audit
+        let audit_entry = ToolAuditEntry {
+            timestamp: chrono::Utc::now(),
+            agent_id: agent_id.to_string(),
+            step_id: step_id.to_string(),
+            tool_name: tool_name.to_string(),
+            arguments: args,
+            result: result.clone(),
+            duration_ms,
+            success: result.success,
+        };
+        
+        if let Err(e) = log_tool_use(&audit_entry) {
+            eprintln!("Warning: Failed to log tool use to audit: {}", e);
+        }
+        
+        Ok(result)
+    }
+
+    /// Execute the edit tool: apply a unified diff to a file
+    fn execute_edit_tool(&self, args: &Value, timeout: Duration) -> Result<ToolResult> {
+        let path = args.get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("edit tool requires 'path' parameter"))?;
+        let diff = args.get("diff")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("edit tool requires 'diff' parameter"))?;
+        
+        // Sandbox path validation
+        let target_path = self.resolve_sandboxed_path(path)?;
+        
+        // Apply the unified diff using the `patch` command
+        let output = Command::new("patch")
+            .arg("-p1")
+            .arg("-i")
+            .arg("-")
+            .current_dir(target_path.parent().unwrap_or(Path::new(".")))
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .context("Failed to spawn patch command")?;
+        
+        // Write diff to stdin
+        if let Some(mut stdin) = output.stdin {
+            use std::io::Write;
+            stdin.write_all(diff.as_bytes())?;
+        }
+        
+        // Wait with timeout
+        let result = self.wait_with_timeout(output, timeout)?;
+        
+        Ok(ToolResult {
+            success: result.status.success(),
+            output: String::from_utf8_lossy(&result.stdout).to_string(),
+            error: if result.status.success() { None } else { Some(String::from_utf8_lossy(&result.stderr).to_string()) },
+        })
+    }
+
+    /// Execute the shell tool: run a command from the allowlist
+    fn execute_shell_tool(&self, args: &Value, timeout: Duration) -> Result<ToolResult> {
+        let command = args.get("command")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("shell tool requires 'command' parameter"))?;
+        let args_list = args.get("args")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        
+        // Validate command against allowlist
+        let cmd_parts: Vec<&str> = command.split_whitespace().collect();
+        let base_cmd = cmd_parts.first().ok_or_else(|| anyhow!("Empty command"))?;
+        
+        if !self.config.tool_config.shell_allowlist.contains(&base_cmd.to_string()) {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(format!("Command '{}' not in allowlist", base_cmd)),
+            });
+        }
+        
+        // Execute command
+        let mut cmd = Command::new(base_cmd);
+        cmd.args(&args_list)
+            .current_dir(self.path())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        
+        let mut child = cmd.spawn().context("Failed to spawn shell command")?;
+        let result = self.wait_with_timeout(child, timeout)?;
+        
+        Ok(ToolResult {
+            success: result.status.success(),
+            output: String::from_utf8_lossy(&result.stdout).to_string(),
+            error: if result.status.success() { None } else { Some(String::from_utf8_lossy(&result.stderr).to_string()) },
+        })
+    }
+
+    /// Execute the read tool: read file contents
+    fn execute_read_tool(&self, args: &Value, _timeout: Duration) -> Result<ToolResult> {
+        let path = args.get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("read tool requires 'path' parameter"))?;
+        
+        // Sandbox path validation
+        let target_path = self.resolve_sandboxed_path(path)?;
+        
+        let content = fs::read_to_string(&target_path)
+            .with_context(|| format!("Failed to read file: {:?}", target_path))?;
+        
+        Ok(ToolResult {
+            success: true,
+            output: content,
+            error: None,
+        })
+    }
+
+    /// Resolve a path within the sandbox root
+    fn resolve_sandboxed_path(&self, path: &str) -> Result<PathBuf> {
+        let requested = PathBuf::from(path);
+        
+        // If sandbox_root is configured, ensure path is within it
+        if let Some(sandbox_root) = &self.config.tool_config.sandbox_root {
+            let canonical_root = sandbox_root.canonicalize()
+                .context("Failed to canonicalize sandbox root")?;
+            let canonical_requested = requested.canonicalize()
+                .or_else(|_| Ok(self.path().join(&requested)))?;
+            
+            if !canonical_requested.starts_with(&canonical_root) {
+                return Err(anyhow!("Path '{}' is outside sandbox root '{:?}'", path, sandbox_root));
+            }
+            Ok(canonical_requested)
+        } else {
+            // Default: restrict to workspace directory
+            let workspace_root = self.path().canonicalize()
+                .context("Failed to canonicalize workspace root")?;
+            let resolved = if requested.is_absolute() {
+                requested.canonicalize()
+                    .context("Failed to canonicalize requested path")?
+            } else {
+                workspace_root.join(&requested)
+            };
+            
+            if !resolved.starts_with(&workspace_root) {
+                return Err(anyhow!("Path '{}' is outside workspace root", path));
+            }
+            Ok(resolved)
+        }
+    }
+
+    /// Wait for a child process with timeout
+    fn wait_with_timeout(&self, mut child: std::process::Child, timeout: Duration) -> Result<std::process::Output> {
+        let start = std::time::Instant::now();
+        loop {
+            match child.try_wait()? {
+                Some(status) => {
+                    let stdout = child.stdout.take().map(|mut s| {
+                        let mut buf = Vec::new();
+                        std::io::Read::read_to_end(&mut s, &mut buf).unwrap_or_default();
+                        buf
+                    }).unwrap_or_default();
+                    let stderr = child.stderr.take().map(|mut s| {
+                        let mut buf = Vec::new();
+                        std::io::Read::read_to_end(&mut s, &mut buf).unwrap_or_default();
+                        buf
+                    }).unwrap_or_default();
+                    return Ok(std::process::Output { status, stdout, stderr });
+                }
+                None => {
+                    if start.elapsed() >= timeout {
+                        child.kill()?;
+                        return Err(anyhow!("Tool execution timed out after {:?}", timeout));
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+        }
     }
 
     /// Execute the orchestration plan in the temporary workspace
@@ -298,6 +655,10 @@ pub fn orchestrate_with_config(goal: &str, workspace_config: TempWorkspaceConfig
         .context("Failed to generate agents configuration")?;
     workspace.write_agents_config(&agents_config)
         .context("Failed to write agents configuration")?;
+    
+    // Load tool schemas from agents.toml
+    workspace.load_tool_schemas()
+        .context("Failed to load tool schemas")?;
     
     // Write backlog
     workspace.write_backlog(plan_steps.clone())

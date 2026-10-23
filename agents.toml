@@ -1,0 +1,23 @@
+# Tool definitions for the agent loop
+# Each tool defines a callable function that the LLM can invoke
+
+[[tools]]
+name = "edit"
+description = "Modify a file using a unified diff. Provide the file path and a unified diff to apply. The diff must be valid and apply cleanly."
+parameters = { type = "object", properties = { path = { type = "string", description = "Absolute or relative path to the file to edit" }, diff = { type = "string", description = "Unified diff format patch to apply to the file" } }, required = ["path", "diff"] }
+timeout_ms = 30000
+safety = { path_restrictions = ["**"], require_confirmation = false, max_diff_size = 1048576 }
+
+[[tools]]
+name = "shell"
+description = "Execute a shell command. Only commands matching the allowlist patterns are permitted. Returns stdout, stderr, and exit code."
+parameters = { type = "object", properties = { command = { type = "string", description = "The shell command to execute" }, args = { type = "array", items = { type = "string" }, description = "Arguments to pass to the command" }, cwd = { type = "string", description = "Working directory for the command (defaults to current directory)" } }, required = ["command"] }
+timeout_ms = 60000
+safety = { allowlist = [], deny_glob_patterns = ["rm -rf *", "dd if=*", ":(){ :|:& };:", "mkfs.*", "> /dev/sd*"], require_confirmation = true, max_output_size = 1048576 }
+
+[[tools]]
+name = "read"
+description = "Read the contents of a file. Returns the file content as text. Supports optional offset and limit for large files."
+parameters = { type = "object", properties = { path = { type = "string", description = "Absolute or relative path to the file to read" }, offset = { type = "integer", description = "Byte offset to start reading from (default: 0)", minimum = 0 }, limit = { type = "integer", description = "Maximum number of bytes to read (default: entire file)", minimum = 1 } }, required = ["path"] }
+timeout_ms = 10000
+safety = { path_restrictions = ["**"], require_confirmation = false, max_file_size = 104857600 }
