@@ -6,6 +6,17 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::collections::HashMap;
 use serde_json::Value;
+use std::path::Path;
+
+/// 复杂度等级
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Complexity {
+    #[default]
+    Med,
+    Low,
+    High,
+}
 
 /// 工具类型分类
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -387,6 +398,23 @@ pub struct Agent {
     pub skills: &'static [Skill],
 }
 
+/// 从 TOML 加载的 Agent 配置（拥有所有权的数据，用于反序列化）
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct AgentConfig {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub system: String,
+    #[serde(default)]
+    pub skills: Vec<String>,
+    #[serde(default)]
+    pub complexity: Complexity,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub prompt_file: String,
+}
+
 pub const AGENTS: &[Agent] = &[
     Agent {
         id: "planner",
@@ -500,6 +528,41 @@ pub const AGENTS: &[Agent] = &[
 
 pub fn by_id(id: &str) -> Option<&'static Agent> {
     AGENTS.iter().find(|a| a.id == id)
+}
+
+/// 从 agents.toml 文件加载 Agent 配置列表
+///
+/// # 参数
+/// - `path`: agents.toml 文件路径
+///
+/// # 返回
+/// AgentConfig 列表，如果文件不存在或解析失败返回空列表
+///
+/// # 向后兼容
+/// - 如果 skills 字段缺失，默认为空数组
+/// - 如果 complexity 字段缺失，默认为 Complexity::Med
+pub fn load_agents(path: &Path) -> Result<Vec<AgentConfig>, Box<dyn std::error::Error>> {
+    let content = std::fs::read_to_string(path)?;
+    let agents: Vec<AgentConfig> = toml::from_str(&content)?;
+    Ok(agents)
+}
+
+/// 从目录加载所有 .toml 文件中的 Agent 配置
+pub fn load_agents_from_dir(dir: &Path) -> Result<Vec<AgentConfig>, Box<dyn std::error::Error>> {
+    let mut all_agents = Vec::new();
+    if dir.exists() {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("toml") {
+                match load_agents(&path) {
+                    Ok(mut agents) => all_agents.append(&mut agents),
+                    Err(e) => eprintln!("Warning: failed to load {}: {}", path.display(), e),
+                }
+            }
+        }
+    }
+    Ok(all_agents)
 }
 
 /// Agent 孵化事件记录，用于血统追踪。
