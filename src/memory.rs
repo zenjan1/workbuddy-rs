@@ -83,6 +83,59 @@ pub struct MemoryEntry {
     pub spawn_reason: String,
 }
 
+/// 权限检查结果记录
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionCheckResult {
+    /// 是否允许执行
+    pub allowed: bool,
+    /// 拒绝原因（如果不允许）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// 沙箱隔离信息记录
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxInfo {
+    /// 沙箱唯一标识
+    pub sandbox_id: String,
+    /// 工作目录
+    pub working_dir: String,
+    /// 环境变量快照
+    #[serde(default)]
+    pub env_vars: std::collections::HashMap<String, String>,
+}
+
+/// 单次工具调用的记录
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolCallRecord {
+    /// 工具名称，如 "edit"、"shell"、"read"
+    pub tool_name: String,
+    /// 工具输入参数（JSON 格式）
+    pub input: serde_json::Value,
+    /// 工具输出结果（JSON 格式）
+    pub output: serde_json::Value,
+    /// 权限检查结果
+    pub permission_check: PermissionCheckResult,
+    /// 沙箱隔离信息
+    pub sandbox_info: SandboxInfo,
+    /// 调用时间戳（毫秒）
+    pub timestamp: u128,
+}
+
+/// 执行步骤记录，包含该步骤内的所有工具调用
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StepRecord {
+    /// 步骤唯一标识
+    pub step_id: u64,
+    /// 步骤开始时间戳（毫秒）
+    pub timestamp: u128,
+    /// 步骤描述
+    pub description: String,
+    /// 本步骤内的工具调用记录列表
+    #[serde(default)]
+    pub tool_calls: Vec<ToolCallRecord>,
+}
+
 #[derive(Debug)]
 pub struct MemoryStore {
     path: PathBuf,
