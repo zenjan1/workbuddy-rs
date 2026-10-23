@@ -521,3 +521,460 @@ pub fn run(workspace_dir: &std::path::Path) -> Result<()> {
     let items = load_backlog(workspace_dir)?;
     run_tui(items)
 }
+
+/// A run entry used by the TUI run list. Construct these from
+/// workspace run records with their annotations before calling `run_runs_tui`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunItem {
+    pub id: String,
+    pub status: String,
+    pub started_at: String,
+    pub tags: Vec<(String, String)>, // (key, value) pairs
+    pub has_note: bool,
+}
+
+impl RunItem {
+    pub fn new(
+        id: impl Into<String>,
+        status: impl Into<String>,
+        started_at: impl Into<String>,
+        tags: Vec<(String, String)>,
+        has_note: bool,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            status: status.into(),
+            started_at: started_at.into(),
+            tags,
+            has_note,
+        }
+    }
+}
+
+/// Aggregated state for the runs TUI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunsState {
+    pub runs: Vec<RunItem>,
+}
+
+impl RunsState {
+    pub fn new(runs: Vec<RunItem>) -> Self {
+        Self { runs }
+    }
+}
+
+/// Format tags as a compact string: key1=val1,key2=val2
+pub fn format_tags(tags: &[(String, String)]) -> String {
+    if tags.is_empty() {
+        String::new()
+    } else {
+        tags.iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+/// Pure mapping from runs data to list row strings.
+/// Shows: ID, status, started_at, tags, note indicator
+pub fn map_runs_to_rows(items: &[RunItem]) -> Vec<String> {
+    items
+        .iter()
+        .map(|item| {
+            let tags_str = format_tags(&item.tags);
+            let note_indicator = if item.has_note { " 📝" } else { "" };
+            let tags_display = if tags_str.is_empty() {
+                "(no tags)".to_string()
+            } else {
+                tags_str
+            };
+            format!(
+                "{} | {:<8} | {} | {}{}",
+                item.id, item.status, item.started_at, tags_display, note_indicator
+            )
+        })
+        .collect()
+}
+
+/// Pure function: formats runs as terminal rows without touching global state.
+pub fn render_runs_tasks(runs: &[RunItem]) -> Vec<String> {
+    map_runs_to_rows(runs)
+}
+
+/// Load runs with annotations from the workspace.
+/// This uses local annotation loading logic (mirroring store.rs).
+pub fn load_runs_with_annotations(
+    workspace_dir: &std::path::Path,
+) -> anyhow::Result<Vec<RunItem>> {
+    let runs_dir = workspace_dir.join("runs");
+    let run_ids = list_run_ids_local(&runs_dir)?;
+    let mut items = Vec::new();
+    
+    for run_id in run_ids {
+        let annotations = load_annotations_local(&runs_dir, &run_id)?;
+        let tags: Vec<(String, String)> = annotations
+            .tags
+            .into_iter()
+            .collect();
+        let has_note = annotations.note.is_some();
+        
+        // Try to load run metadata for status and started_at
+        let (status, started_at) = load_run_metadata(&runs_dir, &run_id)
+            .unwrap_or(("unknown".to_string(), "unknown".to_string()));
+        
+        items.push(RunItem::new(
+            run_id,
+            status,
+            started_at,
+            tags,
+            has_note,
+        ));
+    }
+    
+    Ok(items)
+}
+
+/// Local copy of Annotations struct from store.rs
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+struct LocalAnnotations {
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub tags: std::collections::HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// Local copy of sidecar_path from store.rs
+fn sidecar_path_local(runs_dir: &std::path::Path, run_id: &str) -> std::path::PathBuf {
+    runs_dir.join(format!("{}.meta.json", run_id))
+}
+
+/// Local copy of list_run_ids from store.rs
+fn list_run_ids_local(runs_dir: &std::path::Path) -> anyhow::Result<Vec<String>> {
+    let mut run_ids = Vec::new();
+    
+    if !runs_dir.exists() {
+        return Ok(run_ids);
+    }
+
+    for entry in std::fs::read_dir(runs_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        
+        if let Some(filename) = path.file_name().and_then(|f| f.to_str()) {
+            if filename.ends_with(".meta.json") {
+                let run_id = filename.strip_suffix(".meta.json").unwrap();
+                run_ids.push(run_id.to_string());
+            }
+        }
+    }
+
+    run_ids.sort();
+    Ok(run_ids)
+}
+
+/// Local copy of load_annotations from store.rs
+fn load_annotations_local(runs_dir: &std::path::Path, run_id: &str) -> anyhow::Result<LocalAnnotations> {
+    let path = sidecar_path_local(runs_dir, run_id);
+    
+    if !path.exists() {
+        return Ok(LocalAnnotations::default());
+    }
+
+    let content = std::fs::read_to_string(&path)?;
+    if content.trim().is_empty() {
+        return Ok(LocalAnnotations::default());
+    }
+
+    // Try to parse as Annotations directly (new format)
+    if let Ok(annotations) = serde_json::from_str::<LocalAnnotations>(&content) {
+        return Ok(annotations);
+    }
+
+    // Backward compatibility: try to parse as generic JSON and extract tags/note
+    let value: serde_json::Value = serde_json::from_str(&content)?;
+    let mut annotations = LocalAnnotations::default();
+    
+    if let Some(tags_obj) = value.get("tags").and_then(|v| v.as_object()) {
+        for (k, v) in tags_obj {
+            if let Some(s) = v.as_str() {
+                annotations.tags.insert(k.clone(), s.to_string());
+            }
+        }
+    }
+    
+    if let Some(note_str) = value.get("note").and_then(|v| v.as_str()) {
+        annotations.note = Some(note_str.to_string());
+    }
+
+    Ok(annotations)
+}
+
+/// Load run metadata (status, started_at) from run.json
+fn load_run_metadata(runs_dir: &std::path::Path, run_id: &str) -> anyhow::Result<(String, String)> {
+    let run_path = runs_dir.join(run_id).join("run.json");
+    if !run_path.exists() {
+        return Err(anyhow::anyhow!("run.json not found"));
+    }
+    
+    let content = std::fs::read_to_string(&run_path)?;
+    let value: serde_json::Value = serde_json::from_str(&content)?;
+    
+    let status = value.get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let started_at = value.get("started_at")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    
+    Ok((status, started_at))
+}
+
+#[cfg(feature = "tui")]
+/// Pure rendering function for runs list: draws it with ratatui's TestBackend,
+/// and returns the resulting static snapshot as a string.
+pub fn render_runs(state: &RunsState) -> String {
+    let rows = if state.runs.is_empty() {
+        vec!["No runs found".to_string()]
+    } else {
+        render_runs_tasks(&state.runs)
+    };
+
+    let list_items: Vec<ListItem> = rows.iter().map(|row| ListItem::new(row.clone())).collect();
+    let title = format!(" Runs ({} runs) ", state.runs.len());
+    let list = List::new(list_items).block(Block::default().borders(Borders::ALL).title(title));
+
+    let height = (rows.len() as u16 + 4).max(10);
+    let backend = ratatui::backend::TestBackend::new(120, height);
+    let mut terminal = Terminal::new(backend).expect("failed to create test terminal");
+    terminal
+        .draw(|frame| {
+            frame.render_widget(list, frame.area());
+        })
+        .expect("failed to draw runs snapshot");
+
+    let buffer = terminal.backend().buffer();
+    let mut output = String::new();
+    for y in 0..buffer.area.height {
+        for x in 0..buffer.area.width {
+            output.push_str(buffer[(x, y)].symbol());
+        }
+        output.push('\n');
+    }
+    output.trim().to_string()
+}
+
+#[cfg(feature = "tui")]
+/// Run the blocking TUI for runs list with tags and notes display.
+/// Supports j/k for navigation, q to quit.
+pub fn run_runs_tui(runs: Vec<RunItem>) -> Result<()> {
+    let items = runs;
+    enable_raw_mode()?;
+    let mut stdout = stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let mut selected = 0usize;
+
+    loop {
+        terminal.draw(|frame| draw_runs_ui(frame, &items, selected))?;
+
+        if event::poll(Duration::from_millis(100))? {
+            if let Event::Key(key) = event::read()? {
+                match key.code {
+                    KeyCode::Char('q') => break,
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        if selected + 1 < items.len() {
+                            selected += 1;
+                        }
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        if selected > 0 {
+                            selected -= 1;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+
+    Ok(())
+}
+
+#[cfg(feature = "tui")]
+fn draw_runs_ui(frame: &mut Frame, items: &[RunItem], selected: usize) {
+    let rows = if items.is_empty() {
+        vec!["No runs found".to_string()]
+    } else {
+        render_runs_tasks(items)
+    };
+
+    let list_items: Vec<ListItem> = rows
+        .iter()
+        .enumerate()
+        .map(|(idx, row)| {
+            let cursor = if idx == selected && !items.is_empty() {
+                ">> "
+            } else {
+                "   "
+            };
+            ListItem::new(format!("{}{}", cursor, row))
+        })
+        .collect();
+
+    let list = List::new(list_items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!(
+                " Runs ({} runs, j/k: move, q: quit) ",
+                items.len()
+            )),
+    );
+
+    let mut state = ListState::default();
+    if !items.is_empty() {
+        state.select(Some(selected));
+    }
+
+    frame.render_stateful_widget(list, frame.area(), &mut state);
+}
+
+#[cfg(feature = "tui")]
+/// Entry point for runs TUI from workspace directory.
+pub fn run_runs(workspace_dir: &std::path::Path) -> Result<()> {
+    let items = load_runs_with_annotations(workspace_dir)?;
+    run_runs_tui(items)
+}
+
+#[cfg(all(test, feature = "tui"))]
+mod runs_tests {
+    use super::*;
+
+    fn sample_runs() -> Vec<RunItem> {
+        vec![
+            RunItem::new(
+                "run-001",
+                "completed",
+                "2024-01-15 10:30",
+                vec![("env".to_string(), "prod".to_string()), ("team".to_string(), "backend".to_string())],
+                true,
+            ),
+            RunItem::new(
+                "run-002",
+                "failed",
+                "2024-01-15 11:00",
+                vec![("env".to_string(), "staging".to_string())],
+                false,
+            ),
+            RunItem::new(
+                "run-003",
+                "running",
+                "2024-01-15 11:30",
+                vec![],
+                true,
+            ),
+        ]
+    }
+
+    #[test]
+    fn format_tags_empty() {
+        assert_eq!(format_tags(&[]), "");
+    }
+
+    #[test]
+    fn format_tags_single() {
+        assert_eq!(format_tags(&[("key".to_string(), "val".to_string())]), "key=val");
+    }
+
+    #[test]
+    fn format_tags_multiple() {
+        let tags = vec![
+            ("key1".to_string(), "val1".to_string()),
+            ("key2".to_string(), "val2".to_string()),
+        ];
+        assert_eq!(format_tags(&tags), "key1=val1,key2=val2");
+    }
+
+    #[test]
+    fn maps_runs_to_rows_content_and_count() {
+        let rows = map_runs_to_rows(&sample_runs());
+
+        assert_eq!(rows.len(), 3);
+        assert!(rows[0].contains("run-001"));
+        assert!(rows[0].contains("completed"));
+        assert!(rows[0].contains("env=prod,team=backend"));
+        assert!(rows[0].contains("📝"));
+        assert!(rows[1].contains("run-002"));
+        assert!(rows[1].contains("failed"));
+        assert!(rows[1].contains("env=staging"));
+        assert!(!rows[1].contains("📝"));
+        assert!(rows[2].contains("run-003"));
+        assert!(rows[2].contains("running"));
+        assert!(rows[2].contains("(no tags)"));
+        assert!(rows[2].contains("📝"));
+    }
+
+    #[test]
+    fn maps_runs_to_rows_empty_list() {
+        let items: Vec<RunItem> = vec![];
+        let rows = map_runs_to_rows(&items);
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn render_runs_contains_title_and_count() {
+        let state = RunsState::new(sample_runs());
+        let output = render_runs(&state);
+
+        assert!(output.contains("Runs"), "output should contain title: {output}");
+        assert!(output.contains("3"), "output should contain run count: {output}");
+        assert!(output.contains("run-001"), "output should contain first run: {output}");
+        assert!(output.contains("env=prod,team=backend"), "output should contain tags: {output}");
+        assert!(output.contains("📝"), "output should contain note indicator: {output}");
+    }
+
+    #[test]
+    fn render_runs_empty_shows_placeholder() {
+        let state = RunsState::new(vec![]);
+        let output = render_runs(&state);
+
+        assert!(output.contains("Runs"), "output should contain title: {output}");
+        assert!(output.contains("0"), "output should contain zero run count: {output}");
+        assert!(output.contains("No runs found"), "output should contain empty placeholder: {output}");
+    }
+
+    #[test]
+    fn render_runs_tasks_formats_expected_rows() {
+        let rows = render_runs_tasks(&sample_runs());
+
+        assert_eq!(rows.len(), 3);
+        assert!(rows[0].contains("env=prod,team=backend"));
+        assert!(rows[0].contains("📝"));
+        assert!(rows[1].contains("env=staging"));
+        assert!(!rows[1].contains("📝"));
+        assert!(rows[2].contains("(no tags)"));
+        assert!(rows[2].contains("📝"));
+    }
+
+    #[test]
+    fn render_static_runs_does_not_panic() {
+        let items = sample_runs();
+        let backend = ratatui::backend::TestBackend::new(120, 20);
+        let mut terminal = Terminal::new(backend).expect("failed to create terminal");
+        terminal
+            .draw(|frame| {
+                let rows = render_runs_tasks(&items);
+                let list_items: Vec<ListItem> = rows.iter().map(|r| ListItem::new(r.clone())).collect();
+                let list = List::new(list_items).block(Block::default().borders(Borders::ALL).title(" Runs "));
+                frame.render_widget(list, frame.area());
+            })
+            .expect("draw failed");
+    }
+}
