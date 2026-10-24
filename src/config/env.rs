@@ -96,6 +96,38 @@ fn set_nested_value(table: &mut Table, path: &str, value: Value) {
     }
 }
 
+/// 深度合并两个 TOML Value
+///
+/// # 参数
+/// - `base`: 基础配置，将被原地修改
+/// - `overlay`: 覆盖层配置（环境特定配置）
+///
+/// # 合并规则
+/// - Table: 递归合并，同名键递归处理，新键直接插入
+/// - Array: 直接替换（不合并元素）
+/// - 标量值: 直接覆盖
+/// - 其他: overlay 覆盖 base
+pub fn deep_merge(base: &mut Value, overlay: &Value) {
+    match (base, overlay) {
+        (Value::Table(base_map), Value::Table(overlay_map)) => {
+            for (k, v) in overlay_map {
+                match base_map.entry(k.clone()) {
+                    std::collections::hash_map::Entry::Occupied(mut e) => {
+                        deep_merge(e.get_mut(), v);
+                    }
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        e.insert(v.clone());
+                    }
+                }
+            }
+        }
+        (base_val, overlay_val) => {
+            // 数组、标量值等直接替换
+            *base_val = overlay_val.clone();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
