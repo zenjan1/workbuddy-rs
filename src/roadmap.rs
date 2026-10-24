@@ -158,6 +158,74 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (year, m as u32, d as u32)
 }
 
+pub fn advance_milestone(content: &str, milestone_id: &str) -> Result<String, RoadmapError> {
+    let target = milestone_id.trim();
+    if target.is_empty() {
+        return Err(RoadmapError::NotFound(milestone_id.to_string()));
+    }
+
+    let mut found = false;
+    let mut milestone_text = String::new();
+    let mut lines: Vec<String> = Vec::new();
+    let mut in_log = false;
+    let mut log_header_index = None;
+
+    for (idx, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if is_log_header(trimmed) {
+            in_log = true;
+            log_header_index = Some(idx);
+        }
+
+        if !found && !in_log {
+            if let Some(rest) = line.strip_prefix("- [ ] ") {
+                let item_text = rest.trim_end();
+                if item_text == target || item_text.starts_with(&format!("{}: ", target)) {
+                    lines.push(format!("- [x] {}", rest));
+                    found = true;
+                    milestone_text = item_text.to_string();
+                    continue;
+                }
+            }
+        }
+
+        lines.push(line.to_string());
+    }
+
+    if !found {
+        return Err(RoadmapError::NotFound(milestone_id.to_string()));
+    }
+
+    let date = utc_today();
+    let log_line = format!("{} 完成:{}", date, milestone_text);
+
+    let mut out = lines.join("\n");
+    if content.ends_with('\n') {
+        out.push('\n');
+    }
+
+    if !has_log_header(content) {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str("## 日志\n");
+    } else if !out.ends_with('\n') {
+        out.push('\n');
+    }
+
+    out.push_str(&log_line);
+    out.push('\n');
+
+    Ok(out)
+}
+
+pub fn advance_milestone_file(path: &Path, milestone_id: &str) -> Result<String, RoadmapError> {
+    let content = std::fs::read_to_string(path).map_err(|e| RoadmapError::Io(e.to_string()))?;
+    let updated = advance_milestone(&content, milestone_id)?;
+    std::fs::write(path, &updated).map_err(|e| RoadmapError::Io(e.to_string()))?;
+    Ok(format!("chore(vision): advance {}", milestone_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,6 +242,24 @@ mod tests {
             "",
             "## 日志",
             "2024-01-01 完成:旧任务",
+            "",
+        ]
+        .join("\n")
+    }
+
+    fn vision_sample() -> String {
+        [
+            "# workbuddy VISION",
+            "",
+            "## 路线图(按里程碑,顺序即大方向)",
+            "",
+            "### M0 地基:循环可靠性与可观测性",
+            "- [ ] 每 run 记录 token/字符用量并在 show 显示",
+            "- [ ] `status` 子命令:supervisor 是否在跑 + 已完成/失败数 + 最近日志(无人值守命脉)",
+            "- [x] `health` 子命令:探测 LLM 端点连通性",
+            "",
+            "### M1 核心使用功能",
+            "- [ ] `stats` 子命令:运行历史统计",
             "",
         ]
         .join("\n")
