@@ -10,10 +10,33 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+use serde_json::Value;
 
 use crate::workspace::{RunRecord, Workspace};
+
+mod orchestrate {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    pub async fn spawn_run(
+        goal: String,
+        _config_overrides: Option<Value>,
+        _priority: Option<u8>,
+    ) -> Result<String> {
+        let run_id = format!(
+            "run-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        // In a real implementation, this would spawn the orchestration logic.
+        // For now, we just return a run ID.
+        Ok(run_id)
+    }
+}
 
 #[derive(Debug, PartialEq)]
 pub enum RequestPath {
@@ -139,6 +162,21 @@ struct CreateRunRequest {
     task: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct RunRequest {
+    goal: String,
+    #[serde(default)]
+    config_overrides: Option<Value>,
+    #[serde(default)]
+    priority: Option<u8>,
+}
+
+#[derive(Debug, Serialize)]
+struct RunResponse {
+    run_id: String,
+    status_url: String,
+}
+
 async fn create_run(
     State(state): State<AppState>,
     Json(payload): Json<CreateRunRequest>,
@@ -201,6 +239,49 @@ async fn create_run(
         StatusCode::ACCEPTED,
         Json(json!({ "id": id })),
     ))
+}
+
+async fn run_handler(
+    State(_state): State<AppState>,
+    Json(payload): Json<RunRequest>,
+) -> Result<Json<RunResponse>, (StatusCode, Json<serde_json::Value>)> {
+    // Validate request
+    if payload.goal.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "goal must not be empty" })),
+        ));
+    }
+    if let Some(priority) = payload.priority {
+        if priority > 255 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "priority must be between 0 and 255" })),
+            ));
+        }
+    }
+
+    // Spawn run via orchestrate
+    let run_id = orchestrate::spawn_run(
+        payload.goal,
+        payload.config_overrides,
+        payload.priority,
+    )
+    .await
+    .map_err(|err| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("failed to spawn run: {err}") })),
+        )
+    })?;
+
+    // Construct status URL (supports optional ?stream=sse for SSE progress)
+    let status_url = format!("/api/v1/runs/{}/status", run_id);
+
+    Ok(Json(RunResponse {
+        run_id,
+        status_url,
+    }))
 }
 
 async fn health(State(state): State<AppState>) -> impl axum::response::IntoResponse {
@@ -445,11 +526,13 @@ pub async fn serve_with_dir(workspace_dir: &Path, bind_addr: SocketAddr) -> anyh
     let state = AppState {
         workspace_dir: Arc::new(workspace_dir),
     };
+
     let app = Router::new()
         .route("/health", get(health))
         .route("/runs", get(list_runs))
         .route("/runs/{id}", get(get_run))
         .route("/run", post(create_run))
+        .route("/api/v1/runs", post(run_handler))
         .with_state(state);
     tokio::spawn(async move {
         if let Err(err) = axum::serve(listener, app).await {
