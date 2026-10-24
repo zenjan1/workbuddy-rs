@@ -734,3 +734,282 @@ mod tests {
         write_export(&export_data, None).unwrap();
     }
 }
+use anyhow::{Context, Result};
+use clap::Args;
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::PathBuf;
+use uuid::Uuid;
+use workbuddy_core::store::RunStore;
+use workspace::{RunRecord, StepRecord};
+
+/// Export a run to a JSON file
+#[derive(Args, Debug)]
+pub struct ExportArgs {
+    /// Run ID to export
+    pub run_id: Uuid,
+    /// Output file path
+    #[arg(short, long, default_value = "run.json")]
+    pub output: PathBuf,
+}
+
+/// Exported run data structure
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportedRun {
+    /// Schema version for compatibility checking
+    pub schema_version: u32,
+    /// The run record
+    pub run_record: RunRecord,
+    /// All step records for this run
+    pub steps: Vec<StepRecord>,
+    /// Total cost information
+    pub costs: RunCosts,
+    /// Log entries
+    pub logs: Vec<LogEntry>,
+}
+
+/// Cost information for the run
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RunCosts {
+    /// Total input tokens
+    pub input_tokens: u64,
+    /// Total output tokens
+    pub output_tokens: u64,
+    /// Total cost in USD
+    pub total_cost_usd: f64,
+    /// Cost breakdown by model
+    pub by_model: std::collections::HashMap<String, ModelCost>,
+}
+
+/// Cost per model
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ModelCost {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cost_usd: f64,
+}
+
+/// Log entry structure
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogEntry {
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub level: String,
+    pub message: String,
+    pub step_id: Option<Uuid>,
+}
+
+/// Current schema version for exported runs
+pub const SCHEMA_VERSION: u32 = 1;
+
+pub async fn run_export(args: ExportArgs, store: &RunStore) -> Result<()> {
+    // Fetch the run record
+    let run_record = store
+        .get_run(&args.run_id)
+        .await
+        .with_context(|| format!("Run not found: {}", args.run_id))?;
+
+    // Fetch all steps for this run
+    let steps = store
+        .get_steps(&args.run_id)
+        .await
+        .with_context(|| format!("Failed to get steps for run: {}", args.run_id))?;
+
+    // Calculate costs from steps
+    let costs = calculate_costs(&steps);
+
+    // Read logs from the run directory
+    let logs = read_logs(&run_record).await?;
+
+    // Build exported data
+    let exported = ExportedRun {
+        schema_version: SCHEMA_VERSION,
+        run_record,
+        steps,
+        costs,
+        logs,
+    };
+
+    // Serialize to JSON
+    let json = serde_json::to_string_pretty(&exported)
+        .context("Failed to serialize exported run to JSON")?;
+
+    // Write to output file
+    fs::write(&args.output, json)
+        .with_context(|| format!("Failed to write export file: {}", args.output.display()))?;
+
+    println!("Run exported to: {}", args.output.display());
+    Ok(())
+}
+
+fn calculate_costs(steps: &[StepRecord]) -> RunCosts {
+    let mut costs = RunCosts::default();
+    
+    for step in steps {
+        if let Some(usage) = &step.token_usage {
+            costs.input_tokens += usage.input_tokens as u64;
+            costs.output_tokens += usage.output_tokens as u64;
+            costs.total_cost_usd += usage.cost_usd.unwrap_or(0.0);
+            
+            let model_cost = costs.by_model.entry(step.model.clone()).or_default();
+            model_cost.input_tokens += usage.input_tokens as u64;
+            model_cost.output_tokens += usage.output_tokens as u64;
+            model_cost.cost_usd += usage.cost_usd.unwrap_or(0.0);
+        }
+    }
+    
+    costs
+}
+
+async fn read_logs(run_record: &RunRecord) -> Result<Vec<LogEntry>> {
+    let log_path = run_record.workdir.join("run.log");
+    
+    if !log_path.exists() {
+        return Ok(Vec::new());
+    }
+    
+    let content = fs::read_to_string(&log_path)
+        .with_context(|| format!("Failed to read log file: {}", log_path.display()))?;
+    
+    let mut logs = Vec::new();
+    for line in content.lines() {
+        if let Ok(entry) = parse_log_line(line) {
+            logs.push(entry);
+        }
+    }
+    
+    Ok(logs)
+}
+
+fn parse_log_line(line: &str) -> Result<LogEntry> {
+    // Expected format: TIMESTAMP LEVEL [STEP_ID] MESSAGE
+    // Example: 2024-01-15T10:30:00.123Z INFO [abc-123] Starting step
+    let parts: Vec<&str> = line.splitn(4, ' ').collect();
+    if parts.len() < 3 {
+        anyhow::bail!("Invalid log line format");
+    }
+    
+    let timestamp = chrono::DateTime::parse_from_rfc3339(parts[0])?
+        .with_timezone(&chrono::Utc);
+    let level = parts[1].to_string();
+    
+    let (step_id, message) = if parts[2].starts_with('[') && parts[2].ends_with(']') {
+        let step_id_str = &parts[2][1..parts[2].len()-1];
+        let step_id = Uuid::parse_str(step_id_str).ok();
+        let message = parts.get(3).unwrap_or(&"").to_string();
+        (step_id, message)
+    } else {
+        (None, parts[2..].join(" "))
+    };
+    
+    Ok(LogEntry {
+        timestamp,
+        level,
+        message,
+        step_id,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+    use workbuddy_core::store::RunStore;
+    use workspace::{RunRecord, RunStatus, StepRecord, StepStatus, TokenUsage};
+    use std::sync::Arc;
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    async fn create_test_store() -> (RunStore, TempDir) {
+        let temp_dir = TempDir::new().unwrap();
+        let store = RunStore::new(temp_dir.path().to_path_buf()).await.unwrap();
+        (store, temp_dir)
+    }
+
+    #[tokio::test]
+    async fn test_export_roundtrip() {
+        let (store, _temp_dir) = create_test_store().await;
+        
+        // Create a test run
+        let run_id = Uuid::new_v4();
+        let run_record = RunRecord {
+            run_id,
+            task_id: Uuid::new_v4(),
+            status: RunStatus::Completed,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            workdir: store.runs_dir.join(run_id.to_string()),
+            metadata: Default::default(),
+        };
+        
+        store.create_run(&run_record).await.unwrap();
+        
+        // Add a step
+        let step_id = Uuid::new_v4();
+        let step = StepRecord {
+            step_id,
+            run_id,
+            name: "test_step".to_string(),
+            status: StepStatus::Completed,
+            model: "gpt-4".to_string(),
+            started_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+            input: serde_json::json!({"prompt": "test"}),
+            output: Some(serde_json::json!({"result": "ok"})),
+            error: None,
+            token_usage: Some(TokenUsage {
+                input_tokens: 100,
+                output_tokens: 50,
+                cost_usd: Some(0.01),
+            }),
+            metadata: Default::default(),
+        };
+        store.save_step(&step).await.unwrap();
+        
+        // Create a log file
+        let log_content = format!(
+            "{} INFO [{}] Starting step\n{} INFO [{}] Step completed\n",
+            Utc::now().to_rfc3339(),
+            step_id,
+            Utc::now().to_rfc3339(),
+            step_id
+        );
+        fs::write(run_record.workdir.join("run.log"), log_content).unwrap();
+        
+        // Export
+        let output_path = _temp_dir.path().join("exported.json");
+        let args = ExportArgs {
+            run_id,
+            output: output_path.clone(),
+        };
+        
+        run_export(args, &store).await.unwrap();
+        
+        // Verify exported file exists and has correct content
+        assert!(output_path.exists());
+        let content = fs::read_to_string(&output_path).unwrap();
+        let exported: ExportedRun = serde_json::from_str(&content).unwrap();
+        
+        assert_eq!(exported.schema_version, SCHEMA_VERSION);
+        assert_eq!(exported.run_record.run_id, run_id);
+        assert_eq!(exported.steps.len(), 1);
+        assert_eq!(exported.steps[0].step_id, step_id);
+        assert_eq!(exported.costs.input_tokens, 100);
+        assert_eq!(exported.costs.output_tokens, 50);
+        assert!((exported.costs.total_cost_usd - 0.01).abs() < f64::EPSILON);
+        assert_eq!(exported.logs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_export_nonexistent_run() {
+        let (store, _temp_dir) = create_test_store().await;
+        
+        let args = ExportArgs {
+            run_id: Uuid::new_v4(),
+            output: _temp_dir.path().join("exported.json"),
+        };
+        
+        let result = run_export(args, &store).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Run not found"));
+    }
+}
