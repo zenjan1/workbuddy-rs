@@ -167,6 +167,31 @@ pub struct ToolResult {
     pub error: Option<String>,
 }
 
+/// Status of an orchestration run
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunStatus {
+    /// Run completed successfully
+    Success,
+    /// Run failed due to an error
+    Failed,
+    /// Run was cancelled by user
+    Cancelled,
+    /// Run exceeded the configured budget
+    BudgetExceeded,
+}
+
+impl std::fmt::Display for RunStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RunStatus::Success => write!(f, "success"),
+            RunStatus::Failed => write!(f, "failed"),
+            RunStatus::Cancelled => write!(f, "cancelled"),
+            RunStatus::BudgetExceeded => write!(f, "budget_exceeded"),
+        }
+    }
+}
+
 /// Temporary workspace for isolated orchestration execution
 pub struct TempWorkspace {
     temp_dir: TempDir,
