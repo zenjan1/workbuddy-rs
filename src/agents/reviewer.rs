@@ -1,9 +1,12 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
+use std::process::Command;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use tokio::time::timeout;
 
 use crate::llm::LlmClient;
 
@@ -93,6 +96,81 @@ pub async fn run_reviewer<C: LlmClient + ?Sized>(
     }
     save_review(run_log_path, &review)?;
     Ok(review)
+}
+
+/// 非交互模式评审：仅评审暂存区 diff，超时 60s，输出简要建议，返回退出码
+/// 返回: Ok(0) = 通过, Ok(1) = 不通过, Err = 错误(退出码 2)
+pub async fn run_reviewer_non_interactive<C: LlmClient + ?Sized>(
+    client: &C,
+    run_log_path: &Path,
+    task_description: &str,
+    timeout_secs: u64,
+) -> Result<i32> {
+    // 获取暂存区 diff
+    let diff = get_staged_diff().context("failed to get staged diff")?;
+    if diff.trim().is_empty() {
+        println!("暂存区为空，跳过评审");
+        return Ok(0);
+    }
+
+    let user_prompt = format!(
+        "Task description:\n{}\n\nGit diff:\n{}",
+        task_description, diff
+    );
+
+    // 带超时的 LLM 调用
+    let response = match timeout(Duration::from_secs(timeout_secs), client.chat(REVIEWER_SYSTEM, &user_prompt)).await {
+        Ok(Ok(resp)) => resp,
+        Ok(Err(e)) => anyhow::bail!("LLM reviewer call failed: {}", e),
+        Err(_) => anyhow::bail!("LLM reviewer timed out after {} seconds", timeout_secs),
+    };
+
+    let review = parse_review_output(&response);
+    
+    // 验证 risk_level
+    if review.risk_level != "low" && review.risk_level != "medium" && review.risk_level != "high" {
+        anyhow::bail!(
+            "LLM reviewer returned invalid risk_level: {:?}",
+            review.risk_level
+        );
+    }
+    save_review(run_log_path, &review)?;
+
+    // 输出简要建议
+    print_brief_review(&review);
+
+    // 根据风险等级决定退出码
+    match review.risk_level.as_str() {
+        "low" => Ok(0),
+        "medium" | "high" => Ok(1),
+        _ => Ok(2),
+    }
+}
+
+fn get_staged_diff() -> Result<String> {
+    let output = Command::new("git")
+        .args(["diff", "--staged"])
+        .output()
+        .context("failed to execute git diff --staged")?;
+    
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("git diff --staged failed: {}", stderr);
+    }
+    
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn print_brief_review(review: &ReviewResult) {
+    if !review.suggestions.is_empty() {
+        println!("建议：{}", review.suggestions.join("; "));
+    }
+    if !review.key_issues.is_empty() {
+        println!("风险：{}", review.key_issues.join("; "));
+    }
+    if review.suggestions.is_empty() && review.key_issues.is_empty() {
+        println!("评审通过，无明显问题");
+    }
 }
 
 #[cfg(test)]
