@@ -415,6 +415,17 @@ pub struct AgentConfig {
     pub prompt_file: String,
 }
 
+/// 自定义专家配置（对应 agents.toml 中的 [[custom_agents]]）
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct CustomAgentConfig {
+    pub name: String,
+    pub prompt_template: String,
+    #[serde(default)]
+    pub tools: Vec<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
 pub const AGENTS: &[Agent] = &[
     Agent {
         id: "planner",
@@ -547,6 +558,24 @@ pub fn load_agents(path: &Path) -> Result<Vec<AgentConfig>, Box<dyn std::error::
     Ok(agents)
 }
 
+/// 从 agents.toml 文件加载自定义专家配置列表
+///
+/// # 参数
+/// - `path`: agents.toml 文件路径
+///
+/// # 返回
+/// CustomAgentConfig 列表，如果文件不存在、解析失败或无 custom_agents 段则返回空列表
+pub fn load_custom_agents(path: &Path) -> Result<Vec<CustomAgentConfig>, Box<dyn std::error::Error>> {
+    let content = std::fs::read_to_string(path)?;
+    #[derive(Deserialize)]
+    struct CustomAgentsWrapper {
+        #[serde(default)]
+        custom_agents: Vec<CustomAgentConfig>,
+    }
+    let wrapper: CustomAgentsWrapper = toml::from_str(&content)?;
+    Ok(wrapper.custom_agents)
+}
+
 /// 从目录加载所有 .toml 文件中的 Agent 配置
 pub fn load_agents_from_dir(dir: &Path) -> Result<Vec<AgentConfig>, Box<dyn std::error::Error>> {
     let mut all_agents = Vec::new();
@@ -563,6 +592,24 @@ pub fn load_agents_from_dir(dir: &Path) -> Result<Vec<AgentConfig>, Box<dyn std:
         }
     }
     Ok(all_agents)
+}
+
+/// 从目录加载所有 .toml 文件中的自定义专家配置
+pub fn load_custom_agents_from_dir(dir: &Path) -> Result<Vec<CustomAgentConfig>, Box<dyn std::error::Error>> {
+    let mut all_custom = Vec::new();
+    if dir.exists() {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("toml") {
+                match load_custom_agents(&path) {
+                    Ok(mut agents) => all_custom.append(&mut agents),
+                    Err(e) => eprintln!("Warning: failed to load custom agents from {}: {}", path.display(), e),
+                }
+            }
+        }
+    }
+    Ok(all_custom)
 }
 
 /// Agent 孵化事件记录，用于血统追踪。
@@ -677,13 +724,28 @@ impl RunRecord {
     }
 }
 
-/// 供规划器提示词使用的目录文本。
-pub fn catalog_text() -> String {
+/// 供规划器提示词使用的目录文本（包含内置与自定义专家）。
+///
+/// # 参数
+/// - `custom_agents`: 可选的自定义专家列表，将被追加到目录中
+pub fn catalog_text(custom_agents: Option<&[CustomAgentConfig]>) -> String {
     let mut s = String::new();
     for a in AGENTS {
         s.push_str(&format!("- {}({}): {}\n", a.id, a.name, a.desc));
         for sk in a.skills {
             s.push_str(&format!("  - skill `{}`: {}\n", sk.name, sk.desc));
+        }
+    }
+    if let Some(custom) = custom_agents {
+        for ca in custom {
+            s.push_str(&format!("- {}(custom): 自定义专家\n", ca.name));
+            s.push_str(&format!("  - prompt_template: {}\n", ca.prompt_template));
+            if !ca.tools.is_empty() {
+                s.push_str(&format!("  - tools: {}\n", ca.tools.join(", ")));
+            }
+            if let Some(model) = &ca.model {
+                s.push_str(&format!("  - model: {}\n", model));
+            }
         }
     }
     s

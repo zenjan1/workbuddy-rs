@@ -33,7 +33,7 @@ pub const PLANNER_SYSTEM: &str = "你是 WorkBuddy 的总规划师(Planner),负�
 pub async fn plan_task(llm: &Arc<dyn Llm>, goal: &str) -> Result<Plan> {
     let system = PLANNER_SYSTEM
         .replace("{MAX_STEPS}", &MAX_STEPS.to_string())
-        .replace("{catalog}", &agents::catalog_text());
+        .replace("{catalog}", &agents::catalog_text(None));
     let user = format!("用户目标:\n{}\n\n请输出 JSON 计划。", goal);
     let raw = llm.chat(&system, &user).await?;
     Plan::from_llm(goal, &raw.text)
@@ -67,7 +67,7 @@ pub async fn plan_dev_task(llm: &Arc<dyn Llm>, goal: &str, filelist: &str) -> Re
         .replace("{MAX_STEPS}", &MAX_STEPS.to_string())
         .replace("{filecount}", &filelist.lines().count().to_string())
         .replace("{filelist}", filelist)
-        .replace("{catalog}", &agents::catalog_text());
+        .replace("{catalog}", &agents::catalog_text(None));
     let user = format!("开发任务(在当前代码仓库中完成):\n{}\n\n请输出 JSON 计划。", goal);
     let raw = llm.chat(&system, &user).await?;
     Plan::from_llm(goal, &raw.text)
@@ -244,7 +244,7 @@ mod tests {
     async fn test_dev_planner_system_replacement() {
         let system = DEV_PLANNER_SYSTEM
             .replace("{MAX_STEPS}", &MAX_STEPS.to_string())
-            .replace("{catalog}", &agents::catalog_text());
+            .replace("{catalog}", &agents::catalog_text(None));
         assert!(!system.contains("{MAX_STEPS}"));
         assert!(!system.contains("{catalog}"));
     }

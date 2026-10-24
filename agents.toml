@@ -41,3 +41,39 @@ model = "gpt-4o"
 # 3. Minor issues (style, naming, comments) - suggest improvements
 # Output JSON: {"critical": [...], "major": [...], "minor": [...], "summary": ""}
 # """
+
+# Custom agent definitions
+# Uncomment and customize the following section to define your own specialized agents
+# Each custom agent can have its own prompt template, tool set, and model
+# [[custom_agents]]
+# name = "my-specialist"
+# prompt_template = """
+# You are a specialized agent for [domain].
+# Your role: [describe the agent's purpose and capabilities]
+# Guidelines:
+# - [guideline 1]
+# - [guideline 2]
+# """
+# tools = ["read", "edit", "shell"]  # Subset of available tools
+# model = "gpt-4o"  # Override the default model for this agent
+
+# Example: A security audit specialist
+# [[custom_agents]]
+# name = "security-auditor"
+# prompt_template = """
+# You are a security auditor specializing in code review for vulnerabilities.
+# Focus on: OWASP Top 10, injection flaws, authentication issues, data exposure.
+# Output findings as structured JSON with severity levels.
+# """
+# tools = ["read", "shell"]
+# model = "gpt-4o"
+
+# Example: A documentation writer
+# [[custom_agents]]
+# name = "doc-writer"
+# prompt_template = """
+# You are a technical writer creating clear, concise documentation.
+# Follow the project's style guide and use examples liberally.
+# """
+# tools = ["read", "edit"]
+# model = "gpt-4o-mini"
