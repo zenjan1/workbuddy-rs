@@ -14,7 +14,8 @@ use crate::llm::{Llm, Usage};
 use crate::plan::{Plan, Step, StepKind};
 use crate::util::clip;
 use crate::workspace::Workspace;
-use crate::status;
+use chrono::{DateTime, Utc};
+use tokio::time::timeout;
 // use crate::store::{Snapshot, save_snapshot}; // TODO: fix snapshot integration
 
 /// Step snapshot for executor-level checkpointing
@@ -322,6 +323,7 @@ impl Executor {
 
     /// 执行单个步骤:LLM 步骤组装 专家角色+skill+依赖上下文 后调用 LLM,
     /// shell 步骤在 workspace 下运行命令(60s 超时)。
+    /// 支持通过 Step 的 timeout_sec 和 deadline 字段设置超时/截止时间。
     async fn run_step(
         step: &Step,
         plan: &Plan,
@@ -329,6 +331,9 @@ impl Executor {
         llm: &Arc<dyn Llm>,
         cfg: &Config,
     ) -> StepOutcome {
+        // 从 Step 读取超时配置
+        let timeout_sec = step.timeout_sec;
+        let deadline = step.deadline;
         let agent = match agents::by_id(&step.agent) {
             Some(a) => a,
             None => {
@@ -345,50 +350,99 @@ impl Executor {
                 }
             }
         };
+        
         let start = std::time::Instant::now();
-        let (result, usage) = match step.kind {
-            StepKind::Llm => {
-                match run_llm_step(step, agent, plan, outputs, llm, cfg).await {
-                    Ok((text, usage)) => (Ok(text), usage),
-                    Err(e) => (Err(e), None),
+        
+        // 构造原始任务 future
+        let task_future = async {
+            let (result, usage) = match step.kind {
+                StepKind::Llm => {
+                    match run_llm_step(step, agent, plan, outputs, llm, cfg).await {
+                        Ok((text, usage)) => (Ok(text), usage),
+                        Err(e) => (Err(e), None),
+                    }
                 }
-            }
-            StepKind::Shell => (run_shell_step(step).await, None),
-            StepKind::Read => (run_read_step(step, cfg), None),
-            StepKind::Edit => {
-                match run_edit_step(step, agent, plan, outputs, llm, cfg).await {
-                    Ok((text, usage)) => (Ok(text), usage),
-                    Err(e) => (Err(e), None),
+                StepKind::Shell => (run_shell_step(step).await, None),
+                StepKind::Read => (run_read_step(step, cfg), None),
+                StepKind::Edit => {
+                    match run_edit_step(step, agent, plan, outputs, llm, cfg).await {
+                        Ok((text, usage)) => (Ok(text), usage),
+                        Err(e) => (Err(e), None),
+                    }
                 }
-            }
+            };
+            (result, usage)
         };
+        
+        // 计算超时持续时间：优先使用 deadline，其次使用 timeout_sec
+        let timeout_duration = if let Some(deadline) = deadline {
+            let now = chrono::Utc::now();
+            if deadline <= now {
+                Duration::from_secs(0)
+            } else {
+                let diff = deadline - now;
+                Duration::from_millis(diff.num_milliseconds().max(0) as u64)
+            }
+        } else if let Some(secs) = timeout_sec {
+            Duration::from_secs(secs)
+        } else {
+            Duration::from_secs(SHELL_TIMEOUT_SECS) // 默认超时
+        };
+        
+        // 使用 tokio::time::timeout 执行任务
+        let timed_future = timeout(timeout_duration, task_future);
+        let result = timed_future.await;
+        
         let seconds = start.elapsed().as_secs_f64();
         match result {
-            Ok(text) => {
-                let char_usage = Some(text.chars().count() as u64);
-                StepOutcome {
-                    id: step.id,
-                    ok: true,
-                    error: None,
-                    seconds,
-                    output: Some(text),
-                    token_usage: usage.as_ref().map(|u| u.total_tokens),
-                    prompt_tokens: usage.as_ref().map(|u| u.prompt_tokens),
-                    completion_tokens: usage.as_ref().map(|u| u.completion_tokens),
-                    char_usage,
+            Ok((result, usage)) => {
+                match result {
+                    Ok(text) => {
+                        let char_usage = Some(text.chars().count() as u64);
+                        StepOutcome {
+                            id: step.id,
+                            ok: true,
+                            error: None,
+                            seconds,
+                            output: Some(text),
+                            token_usage: usage.as_ref().map(|u| u.total_tokens),
+                            prompt_tokens: usage.as_ref().map(|u| u.prompt_tokens),
+                            completion_tokens: usage.as_ref().map(|u| u.completion_tokens),
+                            char_usage,
+                        }
+                    }
+                    Err(e) => StepOutcome {
+                        id: step.id,
+                        ok: false,
+                        error: Some(e.to_string()),
+                        seconds,
+                        output: None,
+                        token_usage: usage.as_ref().map(|u| u.total_tokens),
+                        prompt_tokens: usage.as_ref().map(|u| u.prompt_tokens),
+                        completion_tokens: usage.as_ref().map(|u| u.completion_tokens),
+                        char_usage: None,
+                    },
                 }
             }
-            Err(e) => StepOutcome {
-                id: step.id,
-                ok: false,
-                error: Some(e.to_string()),
-                seconds,
-                output: None,
-                token_usage: usage.as_ref().map(|u| u.total_tokens),
-                prompt_tokens: usage.as_ref().map(|u| u.prompt_tokens),
-                completion_tokens: usage.as_ref().map(|u| u.completion_tokens),
-                char_usage: None,
-            },
+            Err(_elapsed) => {
+                eprintln!(
+                    "[执行] 步骤 {} [{}] 超时中止 ({:.1}s)",
+                    step.id,
+                    plan.step_name(step.id),
+                    seconds
+                );
+                StepOutcome {
+                    id: step.id,
+                    ok: false,
+                    error: Some("执行超时 (Timeout)".to_string()),
+                    seconds,
+                    output: None,
+                    token_usage: None,
+                    prompt_tokens: None,
+                    completion_tokens: None,
+                    char_usage: None,
+                }
+            }
         }
     }
 
@@ -723,7 +777,7 @@ fn read_workspace_file(repo_dir: &std::path::Path, path: &str) -> Result<String>
 
     let metadata = std::fs::metadata(&cand)
         .with_context(|| format!("读取元数据失败: {}", cand.display()))?;
-    let mut file = std::fs::File::open(&cand)
+    let file = std::fs::File::open(&cand)
         .with_context(|| format!("读取失败: {}", cand.display()))?;
     let mut buf = Vec::new();
     file.take(MAX_READ_BYTES as u64)

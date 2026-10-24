@@ -1,4 +1,5 @@
 use anyhow::Context;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 pub const MAX_STEPS: usize = 8;
@@ -58,6 +59,22 @@ pub struct Step {
     /// 关联的工具类型,用于 run 模式直接调用 executor
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool: Option<ToolType>,
+    /// 任务执行的最大秒数，超时将发送 SIGTERM 并标记为 Timeout
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_sec: Option<u64>,
+    /// 绝对截止时间（UTC），超过即取消
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskSpec {
+    /// 任务执行的最大秒数，超时将发送 SIGTERM 并标记为 Timeout
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_sec: Option<u64>,
+    /// 绝对截止时间（UTC），超过即取消
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,6 +162,8 @@ impl Plan {
                 path,
                 needs,
                 tool: None,
+                timeout_sec: None,
+                deadline: None,
             });
         }
 
