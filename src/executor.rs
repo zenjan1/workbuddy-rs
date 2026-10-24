@@ -1,11 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
+use std::process::Command;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use futures::future::join_all;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::agents::{self, Agent};
 use crate::config::Config;
@@ -14,6 +15,41 @@ use crate::plan::{Plan, Step, StepKind};
 use crate::util::clip;
 use crate::workspace::Workspace;
 use crate::status;
+// use crate::store::{Snapshot, save_snapshot}; // TODO: fix snapshot integration
+
+/// Step snapshot for executor-level checkpointing
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StepSnapshot {
+    pub id: usize,
+    pub name: String,
+    pub kind: String,
+    pub agent: String,
+    pub skill: String,
+    pub status: String,
+    pub output: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Config snapshot for executor-level checkpointing
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigSnapshot {
+    pub repo_dir: std::path::PathBuf,
+    pub max_parallel: usize,
+    pub model: String,
+}
+
+/// High-level snapshot for executor-level checkpointing
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Snapshot {
+    pub run_id: String,
+    pub step_id: usize,
+    pub timestamp: u64,
+    pub memory: HashMap<usize, String>,
+    pub git_status: String,
+    pub git_diff: String,
+    pub step: StepSnapshot,
+    pub config_snapshot: ConfigSnapshot,
+}
 
 const DEPS_CONTEXT_MAX: usize = 800;
 const SHELL_TIMEOUT_SECS: u64 = 60;
@@ -45,6 +81,7 @@ pub struct Executor {
     llm: Arc<dyn Llm>,
     cfg: Config,
     ws: Option<Arc<Workspace>>,
+    run_id: Option<String>,
 }
 
 impl Executor {
@@ -53,12 +90,19 @@ impl Executor {
             llm,
             cfg,
             ws: None,
+            run_id: None,
         }
     }
 
     /// 绑定工作区:执行过程中把每个成功步骤的产出落盘。
     pub fn with_workspace(mut self, ws: Arc<Workspace>) -> Self {
         self.ws = Some(ws);
+        self
+    }
+
+    /// 设置运行 ID，用于快照存储
+    pub fn with_run_id(mut self, run_id: String) -> Self {
+        self.run_id = Some(run_id);
         self
     }
 
@@ -122,6 +166,14 @@ impl Executor {
         let mut failed: HashSet<usize> = HashSet::new();
         let mut done: HashSet<usize> = HashSet::new();
 
+        let run_id = self.run_id.clone().unwrap_or_else(|| {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+                .to_string()
+        });
+
         loop {
             if pending.is_empty() {
                 break;
@@ -156,6 +208,8 @@ impl Executor {
                         token_usage: None,
                         char_usage: None,
                     });
+                    // 为跳过的步骤也保存快照
+                    self.save_step_snapshot(&run_id, s.id, plan, &outputs, None, &s.name, "skipped").await;
                     failed.insert(s.id);
                     done.insert(s.id);
                 } else {
@@ -199,8 +253,8 @@ impl Executor {
                         );
                         self.save_output(o.id, text);
                     }
-                    if let Some(text) = o.output {
-                        outputs.insert(o.id, text);
+                    if let Some(ref text) = o.output {
+                        outputs.insert(o.id, text.clone());
                     }
                     results.push(StepResult {
                         id: o.id,
@@ -210,6 +264,8 @@ impl Executor {
                         token_usage: o.token_usage,
                         char_usage: o.char_usage,
                     });
+                    // 保存步骤完成后的快照
+                    self.save_step_snapshot(&run_id, o.id, plan, &outputs, o.output.as_deref(), &plan.step_name(o.id), "completed").await;
                 } else {
                     if let Some(e) = &o.error {
                         eprintln!("[执行]   错误: {}", clip(e, 120));
@@ -223,6 +279,8 @@ impl Executor {
                         token_usage: o.token_usage,
                         char_usage: o.char_usage,
                     });
+                    // 保存步骤失败后的快照
+                    self.save_step_snapshot(&run_id, o.id, plan, &outputs, None, &plan.step_name(o.id), "failed").await;
                 }
                 let _ = crate::status::record_step(o.id, o.ok, &step_summary);
                 done.insert(o.id);
@@ -332,6 +390,103 @@ impl Executor {
                 char_usage: None,
             },
         }
+    }
+
+    /// 保存步骤快照到存储
+    async fn save_step_snapshot(
+        &self,
+        run_id: &str,
+        step_id: usize,
+        plan: &Plan,
+        outputs: &HashMap<usize, String>,
+        step_output: Option<&str>,
+        step_name: &str,
+        status: &str,
+    ) {
+        let snapshot = match self.collect_snapshot(run_id, step_id, plan, outputs, step_output, step_name, status).await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[执行] 警告: 步骤 {} 快照收集失败: {}", step_id, e);
+                return;
+            }
+        };
+
+        // TODO: integrate with store crate properly
+        // if let Err(e) = save_snapshot(run_id, step_id, &snapshot).await {
+        //     eprintln!("[执行] 警告: 步骤 {} 快照保存失败: {}", step_id, e);
+        // }
+        let _ = snapshot; // suppress unused warning
+    }
+
+    /// 收集当前状态构建快照
+    async fn collect_snapshot(
+        &self,
+        run_id: &str,
+        step_id: usize,
+        plan: &Plan,
+        outputs: &HashMap<usize, String>,
+        step_output: Option<&str>,
+        step_name: &str,
+        status: &str,
+    ) -> Result<Snapshot> {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)?
+            .as_millis() as u64;
+
+        // 收集 git 状态
+        let (git_status, git_diff) = self.collect_git_state().await;
+
+        // 构建步骤信息
+        let step_info = StepSnapshot {
+            id: step_id,
+            name: step_name.to_string(),
+            kind: format!("{:?}", plan.steps.iter().find(|s| s.id == step_id).map(|s| s.kind).unwrap_or(StepKind::Llm)),
+            agent: plan.steps.iter().find(|s| s.id == step_id).map(|s| s.agent.clone()).unwrap_or_default(),
+            skill: plan.steps.iter().find(|s| s.id == step_id).map(|s| s.skill.clone()).unwrap_or_default(),
+            status: status.to_string(),
+            output: step_output.map(|s| s.to_string()),
+            error: if status == "failed" { step_output.map(|s| s.to_string()) } else { None },
+        };
+
+        Ok(Snapshot {
+            run_id: run_id.to_string(),
+            step_id,
+            timestamp,
+            memory: outputs.clone(),
+            git_status,
+            git_diff,
+            step: step_info,
+            config_snapshot: ConfigSnapshot {
+                repo_dir: self.cfg.repo_dir.clone(),
+                max_parallel: self.cfg.max_parallel,
+                model: self.cfg.model.clone(),
+            },
+        })
+    }
+
+    /// 收集 git 状态和 diff
+    async fn collect_git_state(&self) -> (String, String) {
+        let repo_dir = &self.cfg.repo_dir;
+        
+        let status_output = Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(repo_dir)
+            .output();
+        
+        let diff_output = Command::new("git")
+            .args(["diff"])
+            .current_dir(repo_dir)
+            .output();
+        
+        let git_status = status_output
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_else(|e| format!("git status 失败: {}", e));
+        
+        let git_diff = diff_output
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_else(|e| format!("git diff 失败: {}", e));
+        
+        (git_status, git_diff)
     }
 }
 

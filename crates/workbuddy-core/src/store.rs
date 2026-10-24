@@ -462,6 +462,160 @@ fn generate_summary(input: &StepInput, output: &StepOutput) -> String {
     }
 }
 
+// ============================================================================
+// Snapshot (high-level replay snapshot) - per design document
+// ============================================================================
+
+/// Workspace state snapshot
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct WorkspaceState {
+    /// Current working directory
+    pub working_dir: String,
+    /// Git status (branch, commit, dirty files)
+    pub git_status: Option<GitStatus>,
+    /// Environment variables snapshot
+    pub env_vars: HashMap<String, String>,
+}
+
+/// Git status at snapshot time
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GitStatus {
+    pub branch: String,
+    pub commit_hash: String,
+    pub is_dirty: bool,
+    pub untracked_files: Vec<String>,
+    pub modified_files: Vec<String>,
+}
+
+/// Agent state snapshot
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct AgentState {
+    pub agent_id: String,
+    pub name: String,
+    pub status: String,
+    pub current_task: Option<String>,
+    pub memory: HashMap<String, serde_json::Value>,
+}
+
+/// Plan state snapshot
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct PlanState {
+    pub plan_id: String,
+    pub current_step_index: usize,
+    pub steps: Vec<PlanStepState>,
+}
+
+/// Individual plan step state
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PlanStepState {
+    pub step_id: String,
+    pub name: String,
+    pub status: String,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub output: Option<serde_json::Value>,
+}
+
+/// File system snapshot (lightweight)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct FileSnapshot {
+    /// Tracked file hashes (path -> blake3 hash)
+    pub file_hashes: HashMap<String, String>,
+    /// List of new/untracked files
+    pub new_files: Vec<String>,
+    /// List of deleted files
+    pub deleted_files: Vec<String>,
+}
+
+/// Executor state for snapshot (simplified from ExecutorInternalState)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ExecutorState {
+    pub step_index: u64,
+    pub conversation_history: Vec<ChatMessage>,
+    pub tool_call_chain: Vec<ToolCallRecord>,
+    pub env_snapshot: HashMap<String, String>,
+    pub memory_state: MemoryStateSnapshot,
+    pub rng_state: Option<RngState>,
+    pub working_dir: String,
+}
+
+/// High-level snapshot for deterministic replay (matches design document)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Snapshot {
+    pub run_id: String,
+    pub step: u32,
+    pub timestamp: DateTime<Utc>,
+    pub executor_state: ExecutorState,
+    pub workspace_state: WorkspaceState,
+    pub agent_states: HashMap<String, AgentState>,
+    pub plan_state: PlanState,
+    pub conversation_history: Vec<ChatMessage>,
+    pub rng_state: Option<Vec<u8>>,
+    pub file_snapshot: FileSnapshot,
+}
+
+/// Get the directory path for a run's high-level snapshots
+fn snapshots_dir(runs_dir: &Path, run_id: &str) -> PathBuf {
+    runs_dir.join(run_id).join("snapshots")
+}
+
+/// Get the file path for a specific high-level snapshot
+fn snapshot_path(runs_dir: &Path, run_id: &str, step: u32) -> PathBuf {
+    snapshots_dir(runs_dir, run_id).join(format!("snapshot-{:06}.json", step))
+}
+
+/// Save a high-level snapshot for replay
+pub fn save_snapshot(runs_dir: &Path, run_id: &str, step: u32, snapshot: &Snapshot) -> Result<()> {
+    let dir = snapshots_dir(runs_dir, run_id);
+    fs::create_dir_all(&dir)?;
+
+    let path = snapshot_path(runs_dir, run_id, step);
+    let content = serde_json::to_string_pretty(snapshot)?;
+    fs::write(&path, content)?;
+    Ok(())
+}
+
+/// Load a high-level snapshot by run ID and step
+pub fn load_snapshot(runs_dir: &Path, run_id: &str, step: u32) -> Result<Snapshot> {
+    let path = snapshot_path(runs_dir, run_id, step);
+    if !path.exists() {
+        return Err(StoreError::NotFound(format!(
+            "snapshot not found for run {} step {}",
+            run_id, step
+        )));
+    }
+    let content = fs::read_to_string(&path)?;
+    if content.trim().is_empty() {
+        return Err(StoreError::Serde(serde_json::Error::custom("empty snapshot file")));
+    }
+    let snapshot: Snapshot = serde_json::from_str(&content)?;
+    Ok(snapshot)
+}
+
+/// List all high-level snapshots for a run
+pub fn list_snapshots(runs_dir: &Path, run_id: &str) -> Result<Vec<u32>> {
+    let dir = snapshots_dir(runs_dir, run_id);
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut steps = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if let Some(filename) = path.file_name().and_then(|f| f.to_str()) {
+            if filename.starts_with("snapshot-") && filename.ends_with(".json") {
+                if let Some(step_str) = filename.strip_prefix("snapshot-").and_then(|s| s.strip_suffix(".json")) {
+                    if let Ok(step) = step_str.parse::<u32>() {
+                        steps.push(step);
+                    }
+                }
+            }
+        }
+    }
+    steps.sort();
+    Ok(steps)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
