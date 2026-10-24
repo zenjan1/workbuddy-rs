@@ -616,6 +616,261 @@ pub fn list_snapshots(runs_dir: &Path, run_id: &str) -> Result<Vec<u32>> {
     Ok(steps)
 }
 
+// ============================================================================
+// Statistics Aggregation Structures & Queries
+// ============================================================================
+
+/// Overall statistics across all runs
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct OverallStats {
+    /// Total number of runs
+    pub total_runs: u64,
+    /// Number of successful runs
+    pub successful_runs: u64,
+    /// Number of failed runs
+    pub failed_runs: u64,
+    /// Total tokens consumed across all runs
+    pub total_tokens: u64,
+    /// Total duration in milliseconds across all runs
+    pub total_duration_ms: u64,
+    /// Most commonly used model (if available)
+    pub most_used_model: Option<String>,
+}
+
+/// Statistics grouped by tag
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct TagStats {
+    /// Tag key
+    pub tag_key: String,
+    /// Tag value
+    pub tag_value: String,
+    /// Number of runs with this tag
+    pub run_count: u64,
+    /// Number of successful runs
+    pub successful_runs: u64,
+    /// Number of failed runs
+    pub failed_runs: u64,
+    /// Total tokens for runs with this tag
+    pub total_tokens: u64,
+    /// Total duration in milliseconds
+    pub total_duration_ms: u64,
+}
+
+/// Statistics grouped by project
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct ProjectStats {
+    /// Project name (from tag "project" or directory name)
+    pub project: String,
+    /// Number of runs in this project
+    pub run_count: u64,
+    /// Number of successful runs
+    pub successful_runs: u64,
+    /// Number of failed runs
+    pub failed_runs: u64,
+    /// Total tokens for this project
+    pub total_tokens: u64,
+    /// Total duration in milliseconds
+    pub total_duration_ms: u64,
+    /// Most commonly used model in this project
+    pub most_used_model: Option<String>,
+}
+
+/// Extended run information with stats-relevant fields
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunRecord {
+    pub id: String,
+    pub status: String,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub model: Option<String>,
+    pub total_tokens: Option<u64>,
+    pub duration_ms: Option<u64>,
+    pub tags: HashMap<String, String>,
+    pub project: Option<String>,
+}
+
+/// Load all run records with extended information for statistics
+pub fn load_run_records(runs_dir: &Path) -> Result<Vec<RunRecord>> {
+    let run_ids = list_run_ids(runs_dir)?;
+    let mut records = Vec::new();
+    
+    for run_id in run_ids {
+        let annotations = load_annotations(runs_dir, &run_id)?;
+        
+        // Try to load extended run data from run.json
+        let run_path = runs_dir.join(&run_id).join("run.json");
+        let (status, started_at, completed_at, model, total_tokens, duration_ms) = 
+            if run_path.exists() {
+                let content = fs::read_to_string(&run_path).unwrap_or_default();
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) {
+                    (
+                        value.get("status").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
+                        value.get("started_at").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
+                        value.get("completed_at").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                        value.get("model").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                        value.get("total_tokens").and_then(|v| v.as_u64()),
+                        value.get("duration_ms").and_then(|v| v.as_u64()),
+                    )
+                } else {
+                    ("unknown".to_string(), "unknown".to_string(), None, None, None, None)
+                }
+            } else {
+                ("unknown".to_string(), "unknown".to_string(), None, None, None, None)
+            };
+        
+        // Extract project from tags or use directory name
+        let project = annotations.tags.get("project").cloned()
+            .or_else(|| {
+                // Try to infer from run directory name
+                runs_dir.join(&run_id).file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_string())
+            });
+        
+        records.push(RunRecord {
+            id: run_id,
+            status,
+            started_at,
+            completed_at,
+            model,
+            total_tokens,
+            duration_ms,
+            tags: annotations.tags,
+            project,
+        });
+    }
+    
+    Ok(records)
+}
+
+/// Get overall statistics across all runs
+pub async fn get_overall_stats(runs_dir: &Path) -> Result<OverallStats> {
+    let records = load_run_records(runs_dir).await?;
+    
+    let total_runs = records.len() as u64;
+    let successful_runs = records.iter().filter(|r| r.status == "success" || r.status == "completed").count() as u64;
+    let failed_runs = records.iter().filter(|r| r.status == "failed" || r.status == "error").count() as u64;
+    let total_tokens = records.iter().filter_map(|r| r.total_tokens).sum();
+    let total_duration_ms = records.iter().filter_map(|r| r.duration_ms).sum();
+    
+    // Find most used model
+    let mut model_counts: HashMap<String, u64> = HashMap::new();
+    for record in &records {
+        if let Some(model) = &record.model {
+            *model_counts.entry(model.clone()).or_insert(0) += 1;
+        }
+    }
+    let most_used_model = model_counts.into_iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(model, _)| model);
+    
+    Ok(OverallStats {
+        total_runs,
+        successful_runs,
+        failed_runs,
+        total_tokens,
+        total_duration_ms,
+        most_used_model,
+    })
+}
+
+/// Get statistics grouped by tag
+pub async fn get_stats_by_tag(runs_dir: &Path) -> Result<Vec<TagStats>> {
+    let records = load_run_records(runs_dir).await?;
+    
+    // Collect all unique tag key-value pairs
+    let mut tag_map: HashMap<(String, String), TagStats> = HashMap::new();
+    
+    for record in &records {
+        for (key, value) in &record.tags {
+            let entry = tag_map.entry((key.clone(), value.clone())).or_insert_with(|| TagStats {
+                tag_key: key.clone(),
+                tag_value: value.clone(),
+                run_count: 0,
+                successful_runs: 0,
+                failed_runs: 0,
+                total_tokens: 0,
+                total_duration_ms: 0,
+            });
+            
+            entry.run_count += 1;
+            if record.status == "success" || record.status == "completed" {
+                entry.successful_runs += 1;
+            } else if record.status == "failed" || record.status == "error" {
+                entry.failed_runs += 1;
+            }
+            if let Some(tokens) = record.total_tokens {
+                entry.total_tokens += tokens;
+            }
+            if let Some(duration) = record.duration_ms {
+                entry.total_duration_ms += duration;
+            }
+        }
+    }
+    
+    let mut stats: Vec<TagStats> = tag_map.into_values().collect();
+    stats.sort_by(|a, b| b.run_count.cmp(&a.run_count));
+    Ok(stats)
+}
+
+/// Get statistics grouped by project
+pub async fn get_stats_by_project(runs_dir: &Path) -> Result<Vec<ProjectStats>> {
+    let records = load_run_records(runs_dir).await?;
+    
+    let mut project_map: HashMap<String, ProjectStats> = HashMap::new();
+    
+    for record in &records {
+        let project = record.project.clone().unwrap_or_else(|| "unknown".to_string());
+        let entry = project_map.entry(project.clone()).or_insert_with(|| ProjectStats {
+            project: project.clone(),
+            run_count: 0,
+            successful_runs: 0,
+            failed_runs: 0,
+            total_tokens: 0,
+            total_duration_ms: 0,
+            most_used_model: None,
+        });
+        
+        entry.run_count += 1;
+        if record.status == "success" || record.status == "completed" {
+            entry.successful_runs += 1;
+        } else if record.status == "failed" || record.status == "error" {
+            entry.failed_runs += 1;
+        }
+        if let Some(tokens) = record.total_tokens {
+            entry.total_tokens += tokens;
+        }
+        if let Some(duration) = record.duration_ms {
+            entry.total_duration_ms += duration;
+        }
+        if let Some(model) = &record.model {
+            // Track model usage per project for most_used_model
+            // We'll compute this after aggregation
+        }
+    }
+    
+    // Compute most used model per project
+    let mut project_model_counts: HashMap<String, HashMap<String, u64>> = HashMap::new();
+    for record in &records {
+        let project = record.project.clone().unwrap_or_else(|| "unknown".to_string());
+        if let Some(model) = &record.model {
+            *project_model_counts.entry(project).or_default().entry(model.clone()).or_insert(0) += 1;
+        }
+    }
+    
+    for (project, model_counts) in project_model_counts {
+        if let Some(entry) = project_map.get_mut(&project) {
+            entry.most_used_model = model_counts.into_iter()
+                .max_by_key(|(_, count)| *count)
+                .map(|(model, _)| model);
+        }
+    }
+    
+    let mut stats: Vec<ProjectStats> = project_map.into_values().collect();
+    stats.sort_by(|a, b| b.run_count.cmp(&a.run_count));
+    Ok(stats)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
