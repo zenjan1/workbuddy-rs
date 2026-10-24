@@ -31,7 +31,7 @@ ureq = { version = "2", features = ["tls"] }
 tiny_http = "0.12"
 ctrlc = "3"
 tower = { version = "0.5", features = ["util"] }
-notify = "6.0"
+notify = { version = "6.0", features = ["mio"] }
 hmac = "0.12"
 sha2 = "0.10"
 tar = "0.4"
