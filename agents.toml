@@ -77,3 +77,23 @@ model = "gpt-4o"
 # """
 # tools = ["read", "edit"]
 # model = "gpt-4o-mini"
+
+# Task configuration examples
+# Each task can override the default token budget (default: 50000 tokens)
+# [[tasks]]
+# name = "code-review"
+# description = "Review code changes for quality and security"
+# agent = "reviewer"
+# max_tokens = 30000  # Override default token budget for this task
+
+# [[tasks]]
+# name = "large-refactor"
+# description = "Perform large-scale code refactoring"
+# agent = "default"
+# max_tokens = 100000  # Increase budget for complex tasks
+
+# [[tasks]]
+# name = "quick-fix"
+# description = "Apply small, targeted fixes"
+# agent = "default"
+# max_tokens = 10000  # Reduce budget for simple tasks

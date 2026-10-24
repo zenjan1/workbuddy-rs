@@ -82,6 +82,21 @@ pub struct SkillConfig {
     pub description: String,
 }
 
+/// 单任务配置，用于控制每个任务的执行参数。
+/// 可在 agents.toml 或任务配置中通过 max_tokens 覆盖默认值。
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, Default)]
+#[serde(default)]
+pub struct TaskConfig {
+    /// 单任务最大 token 预算，默认 50_000。
+    /// 超过此限制将返回 TokenBudgetExceeded 错误。
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: u64,
+}
+
+fn default_max_tokens() -> u64 {
+    50_000
+}
+
 /// `config set` 更新后的生效摘要。
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema)]
 pub struct ConfigUpdateSummary {
