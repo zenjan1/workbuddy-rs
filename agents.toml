@@ -30,3 +30,14 @@ model = "gpt-4o"
 # Consensus group for critical tasks (exactly 3 models: primary + 2 fallbacks)
 # The first model should match the agent's model field
 consensus_group = ["gpt-4o", "claude-3-opus", "gemini-1.5-pro"]
+
+[agents.reviewer]
+model = "gpt-4o"
+# Optional: Custom prompt for self-review. If not set, uses built-in default from reviewer.rs
+# self_review_prompt = """
+# You are a senior code reviewer. Review the following diff for:
+# 1. Critical issues (security, data loss, crashes) - must block
+# 2. Major issues (bugs, performance, maintainability) - should warn
+# 3. Minor issues (style, naming, comments) - suggest improvements
+# Output JSON: {"critical": [...], "major": [...], "minor": [...], "summary": ""}
+# """
