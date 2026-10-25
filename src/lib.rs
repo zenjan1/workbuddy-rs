@@ -6,6 +6,7 @@ pub mod dev;
 pub mod edits;
 pub mod executor;
 pub mod hooks;
+pub mod health;
 pub mod llm;
 pub mod memory;
 pub mod plan;
