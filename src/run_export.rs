@@ -524,12 +524,21 @@ fn now_timestamp_millis() -> u128 {
         .as_millis()
 }
 
-/// Timeline output format
+/// Export format for run export command
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExportFormat {
+    Json,
+    Timeline,
+}
+
+/// Timeline output format (for timeline-specific options)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TimelineFormat {
     Json,
     Ascii,
+    Mermaid,
 }
 
 /// Timeline event representing a single step in the run
@@ -640,6 +649,386 @@ pub fn export_timeline(
 fn serialize_timeline_json(timeline: &TimelineExport) -> Result<String, RunExportError> {
     serde_json::to_string_pretty(timeline)
         .map_err(|err| RunExportError::Parse(format!("failed to serialize timeline as JSON: {err}")))
+}
+
+/// Serialize timeline as Mermaid sequence diagram
+fn serialize_timeline_mermaid(timeline: &TimelineExport) -> Result<String, RunExportError> {
+    let mut output = String::new();
+    output.push_str("sequenceDiagram\n");
+    output.push_str(&format!("    participant Run as Run ({})\n", timeline.run_id));
+    
+    for event in &timeline.events {
+        let participant = match event.step_type {
+            StepType::Llm => "LLM",
+            StepType::Tool => "Tool",
+            StepType::Shell => "Shell",
+            StepType::Custom => "Custom",
+        };
+        output.push_str(&format!("    participant {} as {} ({})\n", event.step_id, participant, event.name));
+    }
+    
+    output.push_str("\n");
+    
+    for event in &timeline.events {
+        let participant = match event.step_type {
+            StepType::Llm => "LLM",
+            StepType::Tool => "Tool",
+            StepType::Shell => "Shell",
+            StepType::Custom => "Custom",
+        };
+        
+        output.push_str(&format!("    activate {}\n", event.step_id));
+        output.push_str(&format!("    Run->>{}: {} (tokens: {}, cost: ${:.6})\n", 
+            event.step_id, event.name, event.total_tokens, event.cost_usd));
+        
+        if let Some(error) = &event.error {
+            output.push_str(&format!("    note right of {}: ERROR: {}\n", event.step_id, error));
+        } else {
+            output.push_str(&format!("    note right of {}: Input: {}\n", event.step_id, event.input_summary));
+            output.push_str(&format!("    note right of {}: Output: {}\n", event.step_id, event.output_summary));
+        }
+        
+        if let Some(duration) = event.duration_ms {
+            output.push_str(&format!("    note left of {}: Duration: {}ms\n", event.step_id, duration));
+        }
+        
+        output.push_str(&format!("    deactivate {}\n", event.step_id));
+        output.push_str(&format!("    {}-->>Run: Completed\n", event.step_id));
+        output.push_str("\n");
+    }
+    
+    Ok(output)
+}
+
+/// Export run with specified format
+pub fn export_run_with_format(
+    run_id: &str,
+    format: ExportFormat,
+    timeline_format: Option<TimelineFormat>,
+    workspace_dir: Option<&Path>,
+    output: Option<&Path>,
+) -> Result<(), RunExportError> {
+    match format {
+        ExportFormat::Json => {
+            let export_data = export_run(run_id, workspace_dir, true)?;
+            write_export(&export_data, output)
+        }
+        ExportFormat::Timeline => {
+            let tf = timeline_format.unwrap_or(TimelineFormat::Mermaid);
+            let timeline_output = export_timeline(run_id, tf, workspace_dir)?;
+            match output {
+                Some(path) => {
+                    let mut file = File::create(path).map_err(RunExportError::Io)?;
+                    file.write_all(timeline_output.as_bytes()).map_err(RunExportError::Io)?;
+                    file.write_all(b"\n").map_err(RunExportError::Io)?;
+                    file.sync_all().map_err(RunExportError::Io)?;
+                }
+                None => {
+                    let mut stdout = std::io::stdout();
+                    stdout.write_all(timeline_output.as_bytes()).map_err(RunExportError::Io)?;
+                    stdout.write_all(b"\n").map_err(RunExportError::Io)?;
+                    stdout.flush().map_err(RunExportError::Io)?;
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Export timeline for a run
+pub fn export_timeline(
+    run_id: &str,
+    format: TimelineFormat,
+    workspace_dir: Option<&Path>,
+) -> Result<String, RunExportError> {
+    // Open stores
+    let run_store = RunStore::open_in_workspace_or_config(workspace_dir)?;
+    let step_store = StepStore::open_in_workspace_or_config(workspace_dir)?;
+
+    // Get run record
+    let run = run_store
+        .get_run(run_id)?
+        .ok_or_else(|| RunExportError::NotFound(run_id.to_string()))?;
+
+    // Get steps for this run
+    let mut steps = step_store.get_steps_for_run(run_id)?;
+    
+    // Sort by timestamp (started_at)
+    steps.sort_by_key(|s| s.started_at);
+
+    // Convert to timeline events
+    let events: Vec<TimelineEvent> = steps.iter().map(TimelineEvent::from).collect();
+
+    // Calculate run duration
+    let run_duration_ms = run.ended_at.map(|ended| ended.saturating_sub(run.started_at));
+
+    // Build timeline export
+    let timeline = TimelineExport {
+        run_id: run.run_id.clone(),
+        run_started_at: run.started_at,
+        run_ended_at: run.ended_at,
+        run_duration_ms,
+        total_steps: events.len(),
+        total_tokens: events.iter().map(|e| e.total_tokens).sum(),
+        total_cost_usd: events.iter().map(|e| e.cost_usd).sum(),
+        events,
+    };
+
+    // Serialize based on format
+    match format {
+        TimelineFormat::Json => serialize_timeline_json(&timeline),
+        TimelineFormat::Ascii => serialize_timeline_ascii(&timeline),
+        TimelineFormat::Mermaid => serialize_timeline_mermaid(&timeline),
+    }
+}!("failed to serialize timeline json: {err}")))
+}
+
+/// Serialize timeline as ASCII
+fn serialize_timeline_ascii(timeline: &TimelineExport) -> Result<String, RunExportError> {
+    let mut out = String::new();
+    out.push_str(&format!("Run: {} ({} steps)\n", timeline.run_id, timeline.total_steps));
+    out.push_str(&format!("Started: {}ms\n", timeline.run_started_at));
+    if let Some(ended) = timeline.run_ended_at {
+        out.push_str(&format!("Ended: {}ms\n", ended));
+    }
+    if let Some(dur) = timeline.run_duration_ms {
+        out.push_str(&format!("Duration: {}ms\n", dur));
+    }
+    out.push_str(&format!("Total tokens: {}\n", timeline.total_tokens));
+    out.push_str(&format!("Total cost: ${:.6}\n", timeline.total_cost_usd));
+    out.push_str("\nEvents:\n");
+    for event in &timeline.events {
+        let dur = event.duration_ms.map(|d| format!("{}ms", d)).unwrap_or_else(|| "ongoing".to_string());
+        out.push_str(&format!(
+            "  [{}] {} ({:?}) - {} - tokens: {} - cost: ${:.6}\n",
+            event.step_index, event.name, event.step_type, event.status, event.total_tokens, event.cost_usd
+        ));
+        out.push_str(&format!("    Duration: {}\n", dur));
+        if !event.input_summary.is_empty() {
+            out.push_str(&format!("    Input: {}\n", event.input_summary));
+        }
+        if !event.output_summary.is_empty() {
+            out.push_str(&format!("    Output: {}\n", event.output_summary));
+        }
+        if let Some(err) = &event.error {
+            out.push_str(&format!("    Error: {}\n", err));
+        }
+    }
+    Ok(out)
+}
+
+/// Trait for exporting run data in various formats
+pub trait Exporter {
+    fn export(&self, record: &RunRecord) -> Result<String, RunExportError>;
+}
+
+/// Exporter that renders a run as a Mermaid sequenceDiagram
+pub struct TimelineExporter {
+    workspace_dir: Option<PathBuf>,
+}
+
+impl TimelineExporter {
+    pub fn new(workspace_dir: Option<impl Into<PathBuf>>) -> Self {
+        Self {
+            workspace_dir: workspace_dir.map(Into::into),
+        }
+    }
+
+    fn get_steps(&self, run_id: &str) -> Result<Vec<StepRecord>, RunExportError> {
+        let step_store = StepStore::open_in_workspace_or_config(self.workspace_dir.as_deref())?;
+        let mut steps = step_store.get_steps_for_run(run_id)?;
+        steps.sort_by_key(|s| s.started_at);
+        Ok(steps)
+    }
+}
+
+impl Exporter for TimelineExporter {
+    fn export(&self, record: &RunRecord) -> Result<String, RunExportError> {
+        let steps = self.get_steps(&record.run_id)?;
+        let mut mermaid = String::new();
+        mermaid.push_str("```mermaid\n");
+        mermaid.push_str("sequenceDiagram\n");
+        mermaid.push_str(&format!("    autonumber\n"));
+
+        // Collect unique participants
+        let mut participants = std::collections::BTreeSet::new();
+        participants.insert("User");
+        participants.insert("Agent");
+        for step in &steps {
+            match step.step_type {
+                StepType::Llm => participants.insert("LLM"),
+                StepType::Tool => participants.insert(&step.name),
+                StepType::Shell => participants.insert("Shell"),
+                StepType::Custom => participants.insert(&step.name),
+            };
+        }
+
+        // Declare participants
+        for p in &participants {
+            mermaid.push_str(&format!("    participant {}\n", p));
+        }
+        mermaid.push_str("\n");
+
+        // Generate sequence for each step
+        for step in &steps {
+            let participant = match step.step_type {
+                StepType::Llm => "LLM",
+                StepType::Tool => &step.name,
+                StepType::Shell => "Shell",
+                StepType::Custom => &step.name,
+            };
+
+            mermaid.push_str(&format!("    activate {}\n", participant));
+
+            let mut note_lines = vec![
+                format!("Type: {:?}", step.step_type),
+                format!("Status: {:?}", step.status),
+                format!("Tokens: {} (in: {}, out: {})", step.total_tokens, step.input_tokens, step.output_tokens),
+                format!("Cost: ${:.6}", step.cost_usd),
+            ];
+            if !step.input_summary.is_empty() {
+                note_lines.push(format!("Input: {}", step.input_summary));
+            }
+            if !step.output_summary.is_empty() {
+                note_lines.push(format!("Output: {}", step.output_summary));
+            }
+            if let Some(err) = &step.error {
+                note_lines.push(format!("Error: {}", err));
+            }
+            let note_text = note_lines.join("\n");
+            mermaid.push_str(&format!("    note right of {}: {}\n", participant, note_text.replace('\n', "<br>")));
+
+            if let Some(ended) = step.ended_at {
+                let dur = ended.saturating_sub(step.started_at);
+                mermaid.push_str(&format!("    deactivate {}: Duration {}ms\n", participant, dur));
+            } else {
+                mermaid.push_str(&format!("    deactivate {}: Ongoing\n", participant));
+            }
+            mermaid.push_str("\n");
+        }
+
+        mermaid.push_str("```\n");
+        Ok(mermaid)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn now_ms() -> u128 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    }
+
+    #[test]
+    fn test_timeline_exporter_mermaid_syntax() {
+        let run = RunRecord {
+            run_id: "test_run_1".to_string(),
+            timestamp: now_ms(),
+            command: "test".to_string(),
+            args: vec![],
+            working_dir: "/tmp".to_string(),
+            status: RunStatus::Completed,
+            started_at: now_ms(),
+            ended_at: Some(now_ms() + 1000),
+            total_tokens: 100,
+            total_cost_usd: 0.001,
+            metadata: serde_json::Value::Null,
+        };
+
+        let steps = vec![
+            StepRecord {
+                step_id: "step_1".to_string(),
+                run_id: "test_run_1".to_string(),
+                step_index: 0,
+                name: "llm_call".to_string(),
+                step_type: StepType::Llm,
+                status: StepStatus::Completed,
+                started_at: now_ms(),
+                ended_at: Some(now_ms() + 100),
+                input_tokens: 50,
+                output_tokens: 30,
+                total_tokens: 80,
+                cost_usd: 0.0008,
+                input_summary: "Hello".to_string(),
+                output_summary: "Hi there".to_string(),
+                error: None,
+                metadata: serde_json::Value::Null,
+            },
+            StepRecord {
+                step_id: "step_2".to_string(),
+                run_id: "test_run_1".to_string(),
+                step_index: 1,
+                name: "read_file".to_string(),
+                step_type: StepType::Tool,
+                status: StepStatus::Completed,
+                started_at: now_ms() + 100,
+                ended_at: Some(now_ms() + 200),
+                input_tokens: 10,
+                output_tokens: 20,
+                total_tokens: 30,
+                cost_usd: 0.0002,
+                input_summary: "path: /tmp/test.txt".to_string(),
+                output_summary: "file content".to_string(),
+                error: None,
+                metadata: serde_json::Value::Null,
+            },
+            StepRecord {
+                step_id: "step_3".to_string(),
+                run_id: "test_run_1".to_string(),
+                step_index: 2,
+                name: "shell_cmd".to_string(),
+                step_type: StepType::Shell,
+                status: StepStatus::Failed,
+                started_at: now_ms() + 200,
+                ended_at: Some(now_ms() + 300),
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                cost_usd: 0.0,
+                input_summary: "ls -la".to_string(),
+                output_summary: "".to_string(),
+                error: Some("permission denied".to_string()),
+                metadata: serde_json::Value::Null,
+            },
+        ];
+
+        // Create a temporary directory for test
+        let temp_dir = tempfile::tempdir().unwrap();
+        let step_store = StepStore::open(temp_dir.path()).unwrap();
+        for step in &steps {
+            step_store.add_step(step).unwrap();
+        }
+
+        let exporter = TimelineExporter::new(Some(temp_dir.path()));
+        let result = exporter.export(&run).unwrap();
+
+        // Verify mermaid syntax keywords
+        assert!(result.starts_with("```mermaid"));
+        assert!(result.ends_with("```\n"));
+        assert!(result.contains("sequenceDiagram"));
+        assert!(result.contains("participant User"));
+        assert!(result.contains("participant Agent"));
+        assert!(result.contains("participant LLM"));
+        assert!(result.contains("participant read_file"));
+        assert!(result.contains("participant Shell"));
+        assert!(result.contains("activate"));
+        assert!(result.contains("deactivate"));
+        assert!(result.contains("note right of"));
+        assert!(result.contains("Type: Llm"));
+        assert!(result.contains("Type: Tool"));
+        assert!(result.contains("Type: Shell"));
+        assert!(result.contains("Status: Completed"));
+        assert!(result.contains("Status: Failed"));
+        assert!(result.contains("Error: permission denied"));
+        assert!(result.contains("autonumber"));
+    }
+}
+!("failed to serialize timeline as JSON: {err}")))
 }
 
 /// Serialize timeline as ASCII timeline
