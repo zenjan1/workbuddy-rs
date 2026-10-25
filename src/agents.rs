@@ -704,6 +704,105 @@ pub fn load_custom_agents_from_dir(dir: &Path) -> Result<Vec<CustomAgentConfig>,
     Ok(all_custom)
 }
 
+/// Task display utilities for showing tasks with slug-based IDs
+pub mod task_display {
+    use crate::task_id::TaskId;
+    use serde::{Deserialize, Serialize};
+    use std::fmt;
+
+    /// A task entry for display purposes
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct TaskDisplay {
+        pub id: TaskId,
+        pub title: String,
+        pub status: String,
+        pub description: Option<String>,
+        pub created_at: Option<String>,
+        pub updated_at: Option<String>,
+    }
+
+    impl TaskDisplay {
+        /// Create a new TaskDisplay with a slug-based ID
+        pub fn new_with_slug(title: &str, status: &str) -> Self {
+            let slug = TaskId::slugify(title);
+            Self {
+                id: TaskId::Slug(slug),
+                title: title.to_string(),
+                status: status.to_string(),
+                description: None,
+                created_at: None,
+                updated_at: None,
+            }
+        }
+
+        /// Create a new TaskDisplay with a numeric ID (for backward compatibility)
+        pub fn new_with_numeric(index: usize, title: &str, status: &str) -> Self {
+            Self {
+                id: TaskId::Numeric(index),
+                title: title.to_string(),
+                status: status.to_string(),
+                description: None,
+                created_at: None,
+                updated_at: None,
+            }
+        }
+
+        /// Get the display ID (slug if available, otherwise numeric)
+        pub fn display_id(&self) -> String {
+            match &self.id {
+                TaskId::Slug(s) => s.clone(),
+                TaskId::Numeric(n) => format!("#{}", n),
+            }
+        }
+    }
+
+    impl fmt::Display for TaskDisplay {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "{} | {} | {}", self.display_id(), self.title, self.status)
+        }
+    }
+
+    /// Format a list of tasks for display
+    pub fn format_task_list(tasks: &[TaskDisplay]) -> String {
+        if tasks.is_empty() {
+            return "No tasks found.".to_string();
+        }
+
+        let mut output = String::new();
+        output.push_str(&format!("{:<20} | {:<40} | {}\n", "ID", "Title", "Status"));
+        output.push_str(&format!("{:-<20}-+-{:-<40}-+-{:-<10}\n", "", "", ""));
+
+        for task in tasks {
+            let title = if task.title.len() > 38 {
+                format!("{}..", &task.title[..36])
+            } else {
+                task.title.clone()
+            };
+            output.push_str(&format!("{:<20} | {:<40} | {}\n", task.display_id(), title, task.status));
+        }
+
+        output
+    }
+
+    /// Format a single task for detailed display (wb show)
+    pub fn format_task_detail(task: &TaskDisplay) -> String {
+        let mut output = String::new();
+        output.push_str(&format!("ID:          {}\n", task.display_id()));
+        output.push_str(&format!("Title:       {}\n", task.title));
+        output.push_str(&format!("Status:      {}\n", task.status));
+        if let Some(desc) = &task.description {
+            output.push_str(&format!("Description: {}\n", desc));
+        }
+        if let Some(created) = &task.created_at {
+            output.push_str(&format!("Created:     {}\n", created));
+        }
+        if let Some(updated) = &task.updated_at {
+            output.push_str(&format!("Updated:     {}\n", updated));
+        }
+        output
+    }
+}
+
 /// Agent 孵化事件记录，用于血统追踪。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct AgentSpawnEvent {

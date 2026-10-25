@@ -2,9 +2,11 @@ use std::collections::HashSet;
 use std::convert::Infallible;
 use std::fmt;
 use std::str::FromStr;
+use serde::{Deserialize, Serialize};
 
 /// TaskId 用于统一表示旧数字索引和基于标题的短 slug。
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
 pub enum TaskId {
     /// 兼容旧版数字索引
     Numeric(usize),
@@ -19,6 +21,29 @@ impl TaskId {
 
     pub fn from_slug(s: impl Into<String>) -> Self {
         TaskId::Slug(s.into())
+    }
+
+    /// 从 u64 创建 TaskId（向后兼容）
+    pub fn from_u64(n: u64) -> Self {
+        TaskId::Numeric(n as usize)
+    }
+
+    /// 获取用于存储/显示的规范字符串表示
+    pub fn as_str(&self) -> String {
+        match self {
+            TaskId::Numeric(n) => n.to_string(),
+            TaskId::Slug(s) => s.clone(),
+        }
+    }
+
+    /// 判断是否为 slug 类型
+    pub fn is_slug(&self) -> bool {
+        matches!(self, TaskId::Slug(_))
+    }
+
+    /// 判断是否为数字类型
+    pub fn is_numeric(&self) -> bool {
+        matches!(self, TaskId::Numeric(_))
     }
 
     /// 将标题转换为 slug 基础形式。
@@ -119,6 +144,30 @@ impl FromStr for TaskId {
         } else {
             Ok(TaskId::Slug(s.to_string()))
         }
+    }
+}
+
+impl From<u64> for TaskId {
+    fn from(n: u64) -> Self {
+        TaskId::Numeric(n as usize)
+    }
+}
+
+impl From<usize> for TaskId {
+    fn from(n: usize) -> Self {
+        TaskId::Numeric(n)
+    }
+}
+
+impl From<String> for TaskId {
+    fn from(s: String) -> Self {
+        TaskId::Slug(s)
+    }
+}
+
+impl From<&str> for TaskId {
+    fn from(s: &str) -> Self {
+        TaskId::Slug(s.to_string())
     }
 }
 
