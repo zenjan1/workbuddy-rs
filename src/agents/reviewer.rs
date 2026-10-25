@@ -9,20 +9,78 @@ use serde::{Deserialize, Serialize};
 use tokio::time::timeout;
 
 use crate::llm::LlmClient;
+use crate::config::Config;
 
 const REVIEWER_SYSTEM: &str = "You are a rigorous code reviewer. Given a task description and a git diff, produce a structured review in JSON with keys: risk_level (low/medium/high), suggestions (array of strings), key_issues (array of strings).";
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReviewResult {
-    #[serde(default)]
-    pub risk_level: String,
-    #[serde(default)]
-    pub suggestions: Vec<String>,
-    #[serde(default)]
-    pub key_issues: Vec<String>,
-    #[serde(default)]
-    pub raw: String,
+
+
+/// Configuration for the reviewer agent, extracted from the main Config.
+#[derive(Debug, Clone)]
+pub struct ReviewerConfig {
+    pub agent: String,
+    pub model: Option<String>,
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
+    pub temperature: Option<f32>,
+    pub max_tokens: Option<u32>,
 }
+
+impl ReviewerConfig {
+    pub fn from_config(cfg: &Config) -> Self {
+        Self {
+            agent: "reviewer".to_string(),
+            model: Some(cfg.model.clone()),
+            base_url: Some(cfg.base_url.clone()),
+            api_key: cfg.api_key.clone(),
+            temperature: None,
+            max_tokens: None,
+        }
+    }
+}
+
+/// Review a git diff using the configured reviewer agent.
+/// Returns a structured ReviewResult with summary, suggestions, and blocking flag.
+pub async fn review_diff<C: LlmClient>(diff: &str, cfg: &ReviewerConfig, client: &C) -> Result<ReviewResult> {
+    if diff.trim().is_empty() {
+        return Ok(ReviewResult {
+            risk_level: "low".to_string(),
+            suggestions: vec![],
+            key_issues: vec![],
+            summary: "No changes to review.".to_string(),
+            blocking: false,
+            raw: String::new(),
+        });
+    }
+
+    let user_prompt = format!(
+        "Task: Review the following git diff for code quality, correctness, and potential issues.\n\nDiff:\n```\n{}```",
+        diff
+    );
+
+    let response = client
+        .chat(REVIEWER_SYSTEM, &user_prompt)
+        .await
+        .context("Failed to call reviewer agent")?;
+
+    // Parse the JSON response
+    let review: ReviewResult = serde_json::from_str(&response)
+        .context(format!("Failed to parse reviewer response as JSON: {}", response))?;
+
+    // Determine if blocking based on risk level
+    let blocking = matches!(review.risk_level.as_str(), "high" | "critical");
+
+    Ok(ReviewResult {
+        blocking,
+        summary: review.summary.clone(),
+        raw: review.raw.clone(),
+        risk_level: review.risk_level.clone(),
+        suggestions: review.suggestions.clone(),
+        key_issues: review.key_issues.clone(),
+    })
+}
+
+
 
 /// ReviewerAgent 封装代码审查逻辑，持有 LLM 客户端与配置
 #[derive(Debug)]
@@ -155,6 +213,8 @@ pub fn parse_review_output(text: &str) -> ReviewResult {
         risk_level: "unknown".to_string(),
         suggestions: vec![],
         key_issues: vec![],
+        summary: String::new(),
+        blocking: false,
         raw: text.to_string(),
     }
 }
@@ -252,6 +312,8 @@ mod tests {
             risk_level: "medium".into(),
             suggestions: vec!["refactor".into()],
             key_issues: vec!["input validation".into()],
+            summary: String::new(),
+            blocking: false,
             raw: "raw review output".into(),
         };
         save_review(&path, &review).unwrap();
@@ -260,4 +322,19 @@ mod tests {
         assert_eq!(parsed, review);
         let _ = std::fs::remove_file(&path);
     }
+}
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewResult {
+    #[serde(default)]
+    pub risk_level: String,
+    #[serde(default)]
+    pub suggestions: Vec<String>,
+    #[serde(default)]
+    pub key_issues: Vec<String>,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub blocking: bool,
+    #[serde(default)]
+    pub raw: String,
 }
