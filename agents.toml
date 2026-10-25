@@ -64,7 +64,11 @@ summarization_model = "gpt-4o-mini"
 semantic_weights = { system = 1.0, task = 0.9, recent = 0.7, tool = 0.8 }
 
 [agents.reviewer]
+name = "reviewer"
+description = "Code reviewer agent for pre-commit review: reads git diff --staged, runs checklist (test coverage, clippy, naming, security, docs), outputs structured review; blocks on blockers with fix suggestions."
 model = "gpt-4o"
+tools = ["shell", "read"]
+checklist = ["测试覆盖", "clippy", "命名规范", "安全", "文档"]
 prompt_template = """
 You are a senior code reviewer. Review the following staged git diff for code quality issues across four dimensions:
 
