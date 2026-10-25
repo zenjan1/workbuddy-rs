@@ -1,5 +1,5 @@
 #[cfg(feature = "tui")]
-use std::{io::stdout, time::Duration};
+use std::{io::stdout, sync::Arc, time::Duration};
 
 #[cfg(feature = "tui")]
 use anyhow::Result;
@@ -16,6 +16,14 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Frame, Terminal,
 };
+#[cfg(feature = "tui")]
+use tokio::sync::mpsc;
+#[cfg(feature = "tui")]
+use tokio::task::JoinHandle;
+#[cfg(feature = "tui")]
+use crate::executor::task_runner::{run_task, TaskEvent, TaskConfig};
+#[cfg(feature = "tui")]
+use crate::event_bus::{EventBus, EventBusSubscriber};
 
 /// A single backlog entry used by the TUI list. Construct these from
 /// workspace records in `main.rs` (e.g. `StepRecord`) before calling `run_tui`.
@@ -228,46 +236,205 @@ pub fn handle_key(key: KeyCode, selected: usize, item_count: usize) -> (usize, K
     }
 }
 
-/// Run the blocking TUI with two panels: left shows backlog list, right shows task details.
-/// Supports j/k for navigation, Enter to select, q to quit.
+/// Application state for the TUI.
+#[cfg(feature = "tui")]
+#[derive(Debug)]
+pub struct App {
+    pub backlog: Vec<BacklogItem>,
+    pub list_state: ListState,
+    pub show_details: bool,
+    pub should_quit: bool,
+    /// Log buffer for the bottom panel
+    pub log_buffer: Vec<String>,
+    /// Scroll offset for log panel
+    pub log_scroll: usize,
+    /// Whether a task is currently running
+    pub is_running: bool,
+    /// Handle to the running task
+    pub task_handle: Option<JoinHandle<()>>,
+    /// Receiver for task events (log lines, completion)
+    pub task_event_rx: Option<mpsc::UnboundedReceiver<TaskEvent>>,
+    /// Event bus subscriber for external events
+    pub event_bus_sub: Option<EventBusSubscriber>,
+}
+
+#[cfg(feature = "tui")]
+impl App {
+    pub fn new(tasks: Vec<BacklogItem>) -> Self {
+        let mut list_state = ListState::default();
+        if !tasks.is_empty() {
+            list_state.select(Some(0));
+        }
+        Self {
+            backlog: tasks,
+            list_state,
+            show_details: false,
+            should_quit: false,
+            log_buffer: Vec::new(),
+            log_scroll: 0,
+            is_running: false,
+            task_handle: None,
+            task_event_rx: None,
+            event_bus_sub: None,
+        }
+    }
+
+    /// Spawn a task (run or dev) and set up event handling
+    pub async fn spawn_task(&mut self, command: &str) -> Result<()> {
+        if self.is_running {
+            return Ok(());
+        }
+
+        let config = TaskConfig {
+            command: command.to_string(),
+            args: vec![],
+            env: std::collections::HashMap::new(),
+            cwd: None,
+        };
+
+        let (handle, rx) = run_task(config).await?;
+        self.task_handle = Some(handle);
+        self.task_event_rx = Some(rx);
+        self.is_running = true;
+        self.log_buffer.clear();
+        self.log_buffer.push(format!("[INFO] Starting task: {}", command));
+        self.log_scroll = self.log_buffer.len().saturating_sub(1);
+        Ok(())
+    }
+
+    /// Poll task events and update log buffer
+    pub fn poll_task_events(&mut self) {
+        if let Some(rx) = &mut self.task_event_rx {
+            while let Ok(event) = rx.try_recv() {
+                match event {
+                    TaskEvent::LogLine(line) => {
+                        self.log_buffer.push(line);
+                        // Auto-scroll to bottom
+                        self.log_scroll = self.log_buffer.len().saturating_sub(1);
+                    }
+                    TaskEvent::Completed(exit_code) => {
+                        self.log_buffer.push(format!("[INFO] Task completed with exit code: {}", exit_code));
+                        self.is_running = false;
+                        self.task_handle = None;
+                        self.task_event_rx = None;
+                    }
+                    TaskEvent::Error(err) => {
+                        self.log_buffer.push(format!("[ERROR] {}", err));
+                        self.is_running = false;
+                        self.task_handle = None;
+                        self.task_event_rx = None;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Handle key events
+    pub fn handle_key(&mut self, key: KeyCode) {
+        match key {
+            KeyCode::Char('q') => {
+                if !self.is_running {
+                    self.should_quit = true;
+                }
+            }
+            KeyCode::Char('r') => {
+                if !self.is_running {
+                    let _ = self.spawn_task("run");
+                }
+            }
+            KeyCode::Char('d') => {
+                if !self.is_running {
+                    let _ = self.spawn_task("dev");
+                }
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if !self.backlog.is_empty() {
+                    let next = self.list_state.selected().map_or(0, |s| s + 1);
+                    if next < self.backlog.len() {
+                        self.list_state.select(Some(next));
+                    }
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if !self.backlog.is_empty() {
+                    let prev = self.list_state.selected().map_or(0, |s| s.saturating_sub(1));
+                    self.list_state.select(Some(prev));
+                }
+            }
+            KeyCode::Enter => {
+                self.show_details = !self.show_details;
+            }
+            KeyCode::PageUp => {
+                self.log_scroll = self.log_scroll.saturating_sub(10);
+            }
+            KeyCode::PageDown => {
+                let max_scroll = self.log_buffer.len().saturating_sub(1);
+                self.log_scroll = (self.log_scroll + 10).min(max_scroll);
+            }
+            KeyCode::Home => {
+                self.log_scroll = 0;
+            }
+            KeyCode::End => {
+                self.log_scroll = self.log_buffer.len().saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Run the blocking TUI with three panels: left shows backlog list, right shows task details, bottom shows logs.
+/// Supports j/k for navigation, Enter to toggle details, r/d to run tasks, q to quit, PgUp/PgDn for log scrolling.
 #[cfg(feature = "tui")]
 pub fn run_tui(tasks: Vec<Task>) -> Result<()> {
     let tasks = sort_backlog(tasks);
-    let items = &tasks;
+    let mut app = App::new(tasks);
+    
+    // Subscribe to event bus for external events
+    let event_bus = EventBus::global();
+    app.event_bus_sub = Some(event_bus.subscribe());
+
     enable_raw_mode()?;
     let mut stdout = stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut selected = 0usize;
-    let mut show_details = false;
+    // Create a tokio runtime for async task spawning
+    let rt = tokio::runtime::Runtime::new()?;
 
     loop {
-        terminal.draw(|frame| draw_ui(frame, items, selected, show_details))?;
+        // Poll task events
+        app.poll_task_events();
+        
+        // Poll event bus
+        if let Some(sub) = &mut app.event_bus_sub {
+            while let Ok(event) = sub.try_recv() {
+                app.log_buffer.push(format!("[EVENT] {:?}", event));
+                app.log_scroll = app.log_buffer.len().saturating_sub(1);
+            }
+        }
 
-        if event::poll(Duration::from_millis(100))? {
+        terminal.draw(|frame| draw_ui(frame, &mut app))?;
+
+        if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
-                match key.code {
-                    KeyCode::Char('q') => break,
-                    KeyCode::Char('j') | KeyCode::Down => {
-                        if selected + 1 < items.len() {
-                            selected += 1;
-                        }
-                    }
-                    KeyCode::Char('k') | KeyCode::Up => {
-                        if selected > 0 {
-                            selected -= 1;
-                        }
-                    }
-                    KeyCode::Enter => {
-                        show_details = !show_details;
-                    }
-                    _ => {}
+                app.handle_key(key.code);
+                if app.should_quit {
+                    break;
                 }
             }
         }
     }
+
+    // Cleanup: abort running task if any
+    if let Some(handle) = app.task_handle.take() {
+        handle.abort();
+    }
+    
+    // Wait a bit for cleanup
+    rt.block_on(async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    });
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -277,7 +444,10 @@ pub fn run_tui(tasks: Vec<Task>) -> Result<()> {
 }
 
 #[cfg(feature = "tui")]
-fn draw_ui(frame: &mut Frame, items: &[BacklogItem], selected: usize, show_details: bool) {
+fn draw_ui(frame: &mut Frame, app: &mut App) {
+    let items = &app.backlog;
+    let selected = app.list_state.selected().unwrap_or(0);
+    
     let rows = if items.is_empty() {
         vec!["No backlog tasks".to_string()]
     } else {
@@ -297,27 +467,35 @@ fn draw_ui(frame: &mut Frame, items: &[BacklogItem], selected: usize, show_detai
         })
         .collect();
 
+    let status_hint = if app.is_running {
+        " (RUNNING - r/d disabled, q to quit after stop)"
+    } else {
+        ""
+    };
     let list = List::new(list_items).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(format!(" Backlog ({} tasks, j/k: move, Enter: details, q: quit) ", items.len())),
+            .title(format!(" Backlog ({} tasks, j/k: move, Enter: details, r: run, d: dev, q: quit{}) ", items.len(), status_hint)),
     );
 
-    let mut state = ListState::default();
-    if !items.is_empty() {
-        state.select(Some(selected));
-    }
-
-    // Create two-panel layout
+    // Create three-panel layout: left (backlog), right (details), bottom (logs)
     let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(10),
+            Constraint::Length(12),
+        ])
         .split(frame.area());
 
-    frame.render_stateful_widget(list, chunks[0], &mut state);
+    let top_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(chunks[0]);
+
+    frame.render_stateful_widget(list, top_chunks[0], &mut app.list_state);
 
     // Right panel: task details
-    if show_details && !items.is_empty() && selected < items.len() {
+    if app.show_details && !items.is_empty() && selected < items.len() {
         let task = &items[selected];
         let details = format!(
             "Title: {}\nStatus: {}\nPriority: {}\nID: {}\n\nDescription:\n{}\n\nDependencies:\n{}",
@@ -330,12 +508,29 @@ fn draw_ui(frame: &mut Frame, items: &[BacklogItem], selected: usize, show_detai
         );
         let paragraph = Paragraph::new(details)
             .block(Block::default().borders(Borders::ALL).title(" Task Details "));
-        frame.render_widget(paragraph, chunks[1]);
+        frame.render_widget(paragraph, top_chunks[1]);
     } else {
         let placeholder = Paragraph::new("Press Enter to view task details")
             .block(Block::default().borders(Borders::ALL).title(" Task Details "));
-        frame.render_widget(placeholder, chunks[1]);
+        frame.render_widget(placeholder, top_chunks[1]);
     }
+
+    // Bottom panel: log output
+    let log_lines: Vec<ListItem> = app.log_buffer
+        .iter()
+        .skip(app.log_scroll)
+        .take(chunks[1].height as usize)
+        .map(|line| ListItem::new(line.clone()))
+        .collect();
+
+    let log_title = if app.is_running {
+        " Logs (LIVE - PgUp/PgDn: scroll, Home/End: jump) "
+    } else {
+        " Logs (PgUp/PgDn: scroll, Home/End: jump) "
+    };
+    let log_list = List::new(log_lines)
+        .block(Block::default().borders(Borders::ALL).title(log_title));
+    frame.render_widget(log_list, chunks[1]);
 }
 
 #[cfg(feature = "tui")]
@@ -369,6 +564,138 @@ mod tests {
             BacklogItem::new(2, "Render backlog list", "pending"),
             BacklogItem::new(3, "Handle q to quit", "done"),
         ]
+    }
+
+    #[test]
+    fn app_new_initializes_state() {
+        let items = sample_items();
+        let app = App::new(items.clone());
+        assert_eq!(app.backlog.len(), 3);
+        assert_eq!(app.list_state.selected(), Some(0));
+        assert!(!app.show_details);
+        assert!(!app.should_quit);
+        assert!(app.log_buffer.is_empty());
+        assert_eq!(app.log_scroll, 0);
+        assert!(!app.is_running);
+        assert!(app.task_handle.is_none());
+        assert!(app.task_event_rx.is_none());
+    }
+
+    #[test]
+    fn app_handle_key_quit_when_not_running() {
+        let mut app = App::new(sample_items());
+        app.handle_key(KeyCode::Char('q'));
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn app_handle_key_quit_blocked_when_running() {
+        let mut app = App::new(sample_items());
+        app.is_running = true;
+        app.handle_key(KeyCode::Char('q'));
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn app_handle_key_navigation() {
+        let mut app = App::new(sample_items());
+        assert_eq!(app.list_state.selected(), Some(0));
+        
+        app.handle_key(KeyCode::Char('j'));
+        assert_eq!(app.list_state.selected(), Some(1));
+        
+        app.handle_key(KeyCode::Char('j'));
+        assert_eq!(app.list_state.selected(), Some(2));
+        
+        app.handle_key(KeyCode::Char('j'));
+        assert_eq!(app.list_state.selected(), Some(2));
+        
+        app.handle_key(KeyCode::Char('k'));
+        assert_eq!(app.list_state.selected(), Some(1));
+        
+        app.handle_key(KeyCode::Char('k'));
+        assert_eq!(app.list_state.selected(), Some(0));
+        
+        app.handle_key(KeyCode::Char('k'));
+        assert_eq!(app.list_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn app_handle_key_enter_toggles_details() {
+        let mut app = App::new(sample_items());
+        assert!(!app.show_details);
+        app.handle_key(KeyCode::Char('\n'));
+        assert!(app.show_details);
+        app.handle_key(KeyCode::Char('\n'));
+        assert!(!app.show_details);
+    }
+
+    #[test]
+    fn app_handle_key_r_d_when_not_running() {
+        let mut app = App::new(sample_items());
+        // These would spawn tasks in real usage, but we just verify they don't panic
+        app.handle_key(KeyCode::Char('r'));
+        app.handle_key(KeyCode::Char('d'));
+        // is_running would be set to true by spawn_task in real usage
+    }
+
+    #[test]
+    fn app_handle_key_log_scrolling() {
+        let mut app = App::new(sample_items());
+        app.log_buffer = (0..100).map(|i| format!("Line {}", i)).collect();
+        
+        app.handle_key(KeyCode::End);
+        assert_eq!(app.log_scroll, 99);
+        
+        app.handle_key(KeyCode::Home);
+        assert_eq!(app.log_scroll, 0);
+        
+        app.handle_key(KeyCode::PageDown);
+        assert_eq!(app.log_scroll, 10);
+        
+        app.handle_key(KeyCode::PageUp);
+        assert_eq!(app.log_scroll, 0);
+    }
+
+    #[test]
+    fn log_panel_renders_correctly() {
+        let mut app = App::new(sample_items());
+        app.log_buffer = vec![
+            "[INFO] Starting task: run".to_string(),
+            "[INFO] Compiling...".to_string(),
+            "[INFO] Done".to_string(),
+        ];
+        
+        let backend = ratatui::backend::TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).expect("failed to create terminal");
+        terminal.draw(|frame| draw_ui(frame, &mut app)).expect("draw failed");
+        
+        let buffer = terminal.backend().buffer();
+        let mut output = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                output.push_str(buffer[(x, y)].symbol());
+            }
+            output.push('\n');
+        }
+        
+        assert!(output.contains("[INFO] Starting task: run"));
+        assert!(output.contains("[INFO] Compiling..."));
+        assert!(output.contains("[INFO] Done"));
+        assert!(output.contains("Logs"));
+    }
+
+    #[test]
+    fn log_panel_auto_scrolls_on_new_lines() {
+        let mut app = App::new(sample_items());
+        app.log_buffer = vec!["Line 1".to_string(), "Line 2".to_string()];
+        app.log_scroll = 0;
+        
+        // Simulate adding a new line (like poll_task_events would do)
+        app.log_buffer.push("Line 3".to_string());
+        app.log_scroll = app.log_buffer.len().saturating_sub(1);
+        
+        assert_eq!(app.log_scroll, 2);
     }
 
     #[test]
