@@ -524,6 +524,243 @@ fn now_timestamp_millis() -> u128 {
         .as_millis()
 }
 
+/// Timeline output format
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TimelineFormat {
+    Json,
+    Ascii,
+}
+
+/// Timeline event representing a single step in the run
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TimelineEvent {
+    pub step_id: String,
+    pub step_index: usize,
+    pub name: String,
+    pub step_type: StepType,
+    pub status: StepStatus,
+    pub started_at: u128,
+    pub ended_at: Option<u128>,
+    pub duration_ms: Option<u128>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub cost_usd: f64,
+    pub input_summary: String,
+    pub output_summary: String,
+    pub error: Option<String>,
+    pub metadata: serde_json::Value,
+}
+
+/// Complete timeline export data
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TimelineExport {
+    pub run_id: String,
+    pub run_started_at: u128,
+    pub run_ended_at: Option<u128>,
+    pub run_duration_ms: Option<u128>,
+    pub total_steps: usize,
+    pub total_tokens: u64,
+    pub total_cost_usd: f64,
+    pub events: Vec<TimelineEvent>,
+}
+
+impl From<&StepRecord> for TimelineEvent {
+    fn from(step: &StepRecord) -> Self {
+        let duration_ms = step.ended_at.map(|ended| ended.saturating_sub(step.started_at));
+        Self {
+            step_id: step.step_id.clone(),
+            step_index: step.step_index,
+            name: step.name.clone(),
+            step_type: step.step_type.clone(),
+            status: step.status.clone(),
+            started_at: step.started_at,
+            ended_at: step.ended_at,
+            duration_ms,
+            input_tokens: step.input_tokens,
+            output_tokens: step.output_tokens,
+            total_tokens: step.total_tokens,
+            cost_usd: step.cost_usd,
+            input_summary: step.input_summary.clone(),
+            output_summary: step.output_summary.clone(),
+            error: step.error.clone(),
+            metadata: step.metadata.clone(),
+        }
+    }
+}
+
+/// Export timeline for a run
+pub fn export_timeline(
+    run_id: &str,
+    format: TimelineFormat,
+    workspace_dir: Option<&Path>,
+) -> Result<String, RunExportError> {
+    // Open stores
+    let run_store = RunStore::open_in_workspace_or_config(workspace_dir)?;
+    let step_store = StepStore::open_in_workspace_or_config(workspace_dir)?;
+
+    // Get run record
+    let run = run_store
+        .get_run(run_id)?
+        .ok_or_else(|| RunExportError::NotFound(run_id.to_string()))?;
+
+    // Get steps for this run
+    let mut steps = step_store.get_steps_for_run(run_id)?;
+    
+    // Sort by timestamp (started_at)
+    steps.sort_by_key(|s| s.started_at);
+
+    // Convert to timeline events
+    let events: Vec<TimelineEvent> = steps.iter().map(TimelineEvent::from).collect();
+
+    // Calculate run duration
+    let run_duration_ms = run.ended_at.map(|ended| ended.saturating_sub(run.started_at));
+
+    // Build timeline export
+    let timeline = TimelineExport {
+        run_id: run.run_id.clone(),
+        run_started_at: run.started_at,
+        run_ended_at: run.ended_at,
+        run_duration_ms,
+        total_steps: events.len(),
+        total_tokens: events.iter().map(|e| e.total_tokens).sum(),
+        total_cost_usd: events.iter().map(|e| e.cost_usd).sum(),
+        events,
+    };
+
+    // Serialize based on format
+    match format {
+        TimelineFormat::Json => serialize_timeline_json(&timeline),
+        TimelineFormat::Ascii => serialize_timeline_ascii(&timeline),
+    }
+}
+
+/// Serialize timeline as JSON
+fn serialize_timeline_json(timeline: &TimelineExport) -> Result<String, RunExportError> {
+    serde_json::to_string_pretty(timeline)
+        .map_err(|err| RunExportError::Parse(format!("failed to serialize timeline as JSON: {err}")))
+}
+
+/// Serialize timeline as ASCII timeline
+fn serialize_timeline_ascii(timeline: &TimelineExport) -> Result<String, RunExportError> {
+    let mut output = String::new();
+    
+    // Header
+    output.push_str(&format!("Timeline for run: {}\n", timeline.run_id));
+    output.push_str(&format!("Started: {} (timestamp: {})\n", format_timestamp(timeline.run_started_at), timeline.run_started_at));
+    if let Some(ended) = timeline.run_ended_at {
+        output.push_str(&format!("Ended: {} (timestamp: {})\n", format_timestamp(ended), ended));
+    }
+    if let Some(duration) = timeline.run_duration_ms {
+        output.push_str(&format!("Duration: {} ms\n", duration));
+    }
+    output.push_str(&format!("Total Steps: {}\n", timeline.total_steps));
+    output.push_str(&format!("Total Tokens: {}\n", timeline.total_tokens));
+    output.push_str(&format!("Total Cost: ${:.6}\n", timeline.total_cost_usd));
+    output.push_str("\n");
+    
+    // Timeline events
+    output.push_str("═══════════════════════════════════════════════════════════════════════════════\n");
+    output.push_str("TIMELINE\n");
+    output.push_str("═══════════════════════════════════════════════════════════════════════════════\n\n");
+
+    for (idx, event) in timeline.events.iter().enumerate() {
+        let step_num = idx + 1;
+        let type_label = match event.step_type {
+            StepType::Llm => "LLM",
+            StepType::Tool => "TOOL",
+            StepType::Shell => "SHELL",
+            StepType::Custom => "CUSTOM",
+        };
+        
+        let status_symbol = match event.status {
+            StepStatus::Pending => "⏳",
+            StepStatus::Running => "▶",
+            StepStatus::Completed => "✓",
+            StepStatus::Failed => "✗",
+            StepStatus::Skipped => "⊘",
+        };
+
+        output.push_str(&format!("┌─ Step {}: {} [{}] {}\n", step_num, event.name, type_label, status_symbol));
+        output.push_str(&format!("│  ID: {}\n", event.step_id));
+        output.push_str(&format!("│  Started: {} (timestamp: {})\n", format_timestamp(event.started_at), event.started_at));
+        
+        if let Some(ended) = event.ended_at {
+            output.push_str(&format!("│  Ended: {} (timestamp: {})\n", format_timestamp(ended), ended));
+        }
+        
+        if let Some(duration) = event.duration_ms {
+            output.push_str(&format!("│  Duration: {} ms\n", duration));
+        }
+        
+        output.push_str(&format!("│  Tokens: {} in / {} out / {} total\n", event.input_tokens, event.output_tokens, event.total_tokens));
+        output.push_str(&format!("│  Cost: ${:.6}\n", event.cost_usd));
+        
+        if !event.input_summary.is_empty() {
+            let input_preview = truncate(&event.input_summary, 80);
+            output.push_str(&format!("│  Input: {}\n", input_preview));
+        }
+        
+        if !event.output_summary.is_empty() {
+            let output_preview = truncate(&event.output_summary, 80);
+            output.push_str(&format!("│  Output: {}\n", output_preview));
+        }
+        
+        if let Some(error) = &event.error {
+            let error_preview = truncate(error, 80);
+            output.push_str(&format!("│  Error: {}\n", error_preview));
+        }
+        
+        if idx < timeline.events.len() - 1 {
+            output.push_str("├──────────────────────────────────────────────────────────────────────────────\n");
+        } else {
+            output.push_str("└──────────────────────────────────────────────────────────────────────────────\n");
+        }
+        output.push_str("\n");
+    }
+
+    // Summary footer
+    output.push_str("═══════════════════════════════════════════════════════════════════════════════\n");
+    output.push_str("SUMMARY\n");
+    output.push_str("═══════════════════════════════════════════════════════════════════════════════\n");
+    output.push_str(&format!("Total Steps: {}\n", timeline.total_steps));
+    output.push_str(&format!("Completed: {}\n", timeline.events.iter().filter(|e| e.status == StepStatus::Completed).count()));
+    output.push_str(&format!("Failed: {}\n", timeline.events.iter().filter(|e| e.status == StepStatus::Failed).count()));
+    output.push_str(&format!("Total Tokens: {}\n", timeline.total_tokens));
+    output.push_str(&format!("Total Cost: ${:.6}\n", timeline.total_cost_usd));
+    if let Some(duration) = timeline.run_duration_ms {
+        output.push_str(&format!("Total Duration: {} ms\n", duration));
+    }
+
+    Ok(output)
+}
+
+fn format_timestamp(timestamp: u128) -> String {
+    // Convert milliseconds since epoch to human-readable format
+    let secs = (timestamp / 1000) as u64;
+    let millis = (timestamp % 1000) as u32;
+    
+    // Use chrono if available, otherwise simple format
+    #[cfg(feature = "chrono")] {
+        use chrono::{DateTime, Utc, TimeZone};
+        if let Some(dt) = Utc.timestamp_millis_opt(secs as i64).single() {
+            return format!("{}.{:03}", dt.format("%Y-%m-%d %H:%M:%S"), millis);
+        }
+    }
+    
+    // Fallback: just show the timestamp
+    format!("{}.{:03}", secs, millis)
+}
+
+fn truncate(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max_len.saturating_sub(3)])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -630,6 +867,246 @@ mod tests {
         }
 
         let artifact_store = ArtifactStore::open(&workspace).unwrap();
+        for artifact in &artifacts {
+            artifact_store.add_artifact(artifact).unwrap();
+        }
+
+        // Test export
+        let export = export_run(run.run_id.as_str(), Some(&workspace), true).unwrap();
+        assert_eq!(export.run.run_id, run.run_id);
+        assert_eq!(export.steps.len(), 2);
+        assert_eq!(export.artifacts.len(), 1);
+        assert_eq!(export.summary.total_steps, 2);
+        assert_eq!(export.summary.completed_steps, 2);
+        assert_eq!(export.summary.total_tokens, 150);
+    }
+
+    #[test]
+    fn export_timeline_json() {
+        let workspace = temp_workspace();
+        fs::create_dir_all(&workspace).unwrap();
+
+        let (run, steps, _artifacts) = create_test_run(&workspace);
+
+        let run_store = RunStore::open(&workspace).unwrap();
+        run_store.add_run(&run).unwrap();
+
+        let step_store = StepStore::open(&workspace).unwrap();
+        for step in &steps {
+            step_store.add_step(step).unwrap();
+        }
+
+        let json = export_timeline(&run.run_id, TimelineFormat::Json, Some(&workspace)).unwrap();
+        
+        // Parse and verify
+        let timeline: TimelineExport = serde_json::from_str(&json).unwrap();
+        assert_eq!(timeline.run_id, run.run_id);
+        assert_eq!(timeline.events.len(), 2);
+        assert_eq!(timeline.total_steps, 2);
+        assert_eq!(timeline.total_tokens, 150);
+        
+        // Verify events are sorted by timestamp
+        assert_eq!(timeline.events[0].step_index, 0);
+        assert_eq!(timeline.events[1].step_index, 1);
+        assert!(timeline.events[0].started_at <= timeline.events[1].started_at);
+        
+        // Verify event fields
+        assert_eq!(timeline.events[0].name, "analyze");
+        assert_eq!(timeline.events[0].step_type, StepType::Llm);
+        assert_eq!(timeline.events[0].status, StepStatus::Completed);
+        assert_eq!(timeline.events[0].input_tokens, 50);
+        assert_eq!(timeline.events[0].output_tokens, 30);
+        assert_eq!(timeline.events[0].total_tokens, 80);
+        assert!((timeline.events[0].cost_usd - 0.00016).abs() < f64::EPSILON);
+        assert_eq!(timeline.events[0].duration_ms, Some(2000));
+    }
+
+    #[test]
+    fn export_timeline_ascii() {
+        let workspace = temp_workspace();
+        fs::create_dir_all(&workspace).unwrap();
+
+        let (run, steps, _artifacts) = create_test_run(&workspace);
+
+        let run_store = RunStore::open(&workspace).unwrap();
+        run_store.add_run(&run).unwrap();
+
+        let step_store = StepStore::open(&workspace).unwrap();
+        for step in &steps {
+            step_store.add_step(step).unwrap();
+        }
+
+        let ascii = export_timeline(&run.run_id, TimelineFormat::Ascii, Some(&workspace)).unwrap();
+        
+        // Verify ASCII output contains expected elements
+        assert!(ascii.contains(&run.run_id));
+        assert!(ascii.contains("analyze"));
+        assert!(ascii.contains("fix"));
+        assert!(ascii.contains("LLM"));
+        assert!(ascii.contains("TOOL"));
+        assert!(ascii.contains("✓")); // Completed status symbol
+        assert!(ascii.contains("Tokens:"));
+        assert!(ascii.contains("Cost:"));
+        assert!(ascii.contains("Duration:"));
+        assert!(ascii.contains("SUMMARY"));
+        assert!(ascii.contains("Total Steps: 2"));
+    }
+
+    #[test]
+    fn export_timeline_not_found() {
+        let workspace = temp_workspace();
+        fs::create_dir_all(&workspace).unwrap();
+
+        let result = export_timeline("nonexistent", TimelineFormat::Json, Some(&workspace));
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            RunExportError::NotFound(id) => assert_eq!(id, "nonexistent"),
+            _ => panic!("Expected NotFound error"),
+        }
+    }
+
+    #[test]
+    fn timeline_event_from_step_record() {
+        let step = StepRecord {
+            step_id: "test-step".to_string(),
+            run_id: "test-run".to_string(),
+            step_index: 0,
+            name: "test".to_string(),
+            step_type: StepType::Llm,
+            status: StepStatus::Completed,
+            started_at: 1000,
+            ended_at: Some(1500),
+            input_tokens: 10,
+            output_tokens: 20,
+            total_tokens: 30,
+            cost_usd: 0.001,
+            input_summary: "input".to_string(),
+            output_summary: "output".to_string(),
+            error: None,
+            metadata: serde_json::json!({}),
+        };
+
+        let event = TimelineEvent::from(&step);
+        assert_eq!(event.step_id, "test-step");
+        assert_eq!(event.duration_ms, Some(500));
+        assert_eq!(event.input_tokens, 10);
+        assert_eq!(event.output_tokens, 20);
+        assert_eq!(event.total_tokens, 30);
+    }
+
+    #[test]
+    fn timeline_event_from_step_record_no_end() {
+        let step = StepRecord {
+            step_id: "test-step".to_string(),
+            run_id: "test-run".to_string(),
+            step_index: 0,
+            name: "test".to_string(),
+            step_type: StepType::Tool,
+            status: StepStatus::Running,
+            started_at: 1000,
+            ended_at: None,
+            input_tokens: 5,
+            output_tokens: 0,
+            total_tokens: 5,
+            cost_usd: 0.0,
+            input_summary: "input".to_string(),
+            output_summary: "".to_string(),
+            error: None,
+            metadata: serde_json::json!({}),
+        };
+
+        let event = TimelineEvent::from(&step);
+        assert_eq!(event.duration_ms, None);
+        assert_eq!(event.ended_at, None);
+        assert_eq!(event.status, StepStatus::Running);
+    }
+
+    #[test]
+    fn serialize_timeline_json_format() {
+        let timeline = TimelineExport {
+            run_id: "test-run".to_string(),
+            run_started_at: 1000,
+            run_ended_at: Some(2000),
+            run_duration_ms: Some(1000),
+            total_steps: 1,
+            total_tokens: 100,
+            total_cost_usd: 0.001,
+            events: vec![TimelineEvent {
+                step_id: "step-1".to_string(),
+                step_index: 0,
+                name: "test".to_string(),
+                step_type: StepType::Llm,
+                status: StepStatus::Completed,
+                started_at: 1000,
+                ended_at: Some(2000),
+                duration_ms: Some(1000),
+                input_tokens: 50,
+                output_tokens: 50,
+                total_tokens: 100,
+                cost_usd: 0.001,
+                input_summary: "input".to_string(),
+                output_summary: "output".to_string(),
+                error: None,
+                metadata: serde_json::json!({}),
+            }],
+        };
+
+        let json = serialize_timeline_json(&timeline).unwrap();
+        let parsed: TimelineExport = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.run_id, "test-run");
+        assert_eq!(parsed.events.len(), 1);
+    }
+
+    #[test]
+    fn serialize_timeline_ascii_format() {
+        let timeline = TimelineExport {
+            run_id: "test-run".to_string(),
+            run_started_at: 1000,
+            run_ended_at: Some(2000),
+            run_duration_ms: Some(1000),
+            total_steps: 1,
+            total_tokens: 100,
+            total_cost_usd: 0.001,
+            events: vec![TimelineEvent {
+                step_id: "step-1".to_string(),
+                step_index: 0,
+                name: "test step".to_string(),
+                step_type: StepType::Tool,
+                status: StepStatus::Completed,
+                started_at: 1000,
+                ended_at: Some(2000),
+                duration_ms: Some(1000),
+                input_tokens: 50,
+                output_tokens: 50,
+                total_tokens: 100,
+                cost_usd: 0.001,
+                input_summary: "input summary".to_string(),
+                output_summary: "output summary".to_string(),
+                error: None,
+                metadata: serde_json::json!({}),
+            }],
+        };
+
+        let ascii = serialize_timeline_ascii(&timeline).unwrap();
+        assert!(ascii.contains("test-run"));
+        assert!(ascii.contains("test step"));
+        assert!(ascii.contains("TOOL"));
+        assert!(ascii.contains("✓"));
+        assert!(ascii.contains("1000"));
+        assert!(ascii.contains("Tokens:"));
+        assert!(ascii.contains("Cost:"));
+        assert!(ascii.contains("SUMMARY"));
+    }
+
+    #[test]
+    fn truncate_test() {
+        assert_eq!(truncate("short", 10), "short");
+        assert_eq!(truncate("this is a very long string", 10), "this is...");
+        assert_eq!(truncate("exact", 5), "exact");
+        assert_eq!(truncate("exactly", 5), "ex...");
+    }
+}
+};
         for artifact in &artifacts {
             artifact_store.add_artifact(artifact).unwrap();
         }
