@@ -415,6 +415,62 @@ pub struct AgentConfig {
     pub prompt_file: String,
 }
 
+/// 工作流步骤类型
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum StepType {
+    #[default]
+    Sequential,
+    Parallel,
+    Conditional,
+}
+
+/// 工作流步骤定义
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct WorkflowStep {
+    /// 执行该步骤的 Agent ID
+    pub agent: String,
+    /// 步骤执行类型：sequential/parallel/conditional
+    #[serde(default)]
+    pub step_type: StepType,
+    /// 条件表达式（仅当 step_type = conditional 时使用）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
+    /// 步骤名称（可选，用于标识）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// 步骤描述（可选）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// 工作流阶段定义
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct WorkflowStage {
+    /// 阶段名称
+    pub name: String,
+    /// 阶段描述
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// 该阶段包含的步骤列表
+    pub steps: Vec<WorkflowStep>,
+}
+
+/// 工作流定义
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct Workflow {
+    /// 工作流名称
+    pub name: String,
+    /// 工作流描述
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// 工作流版本
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// 工作流阶段列表
+    pub stages: Vec<WorkflowStage>,
+}
+
 /// 自定义专家配置（对应 agents.toml 中的 [[custom_agents]]）
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct CustomAgentConfig {
@@ -558,6 +614,24 @@ pub fn load_agents(path: &Path) -> Result<Vec<AgentConfig>, Box<dyn std::error::
     Ok(agents)
 }
 
+/// 从 agents.toml 文件加载工作流配置
+///
+/// # 参数
+/// - `path`: agents.toml 文件路径
+///
+/// # 返回
+/// Workflow 列表，如果文件不存在、解析失败或无 workflow 段则返回空列表
+pub fn load_workflows(path: &Path) -> Result<Vec<Workflow>, Box<dyn std::error::Error>> {
+    let content = std::fs::read_to_string(path)?;
+    #[derive(Deserialize)]
+    struct WorkflowsWrapper {
+        #[serde(default)]
+        workflow: Vec<Workflow>,
+    }
+    let wrapper: WorkflowsWrapper = toml::from_str(&content)?;
+    Ok(wrapper.workflow)
+}
+
 /// 从 agents.toml 文件加载自定义专家配置列表
 ///
 /// # 参数
@@ -592,6 +666,24 @@ pub fn load_agents_from_dir(dir: &Path) -> Result<Vec<AgentConfig>, Box<dyn std:
         }
     }
     Ok(all_agents)
+}
+
+/// 从目录加载所有 .toml 文件中的工作流配置
+pub fn load_workflows_from_dir(dir: &Path) -> Result<Vec<Workflow>, Box<dyn std::error::Error>> {
+    let mut all_workflows = Vec::new();
+    if dir.exists() {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("toml") {
+                match load_workflows(&path) {
+                    Ok(mut workflows) => all_workflows.append(&mut workflows),
+                    Err(e) => eprintln!("Warning: failed to load workflows from {}: {}", path.display(), e),
+                }
+            }
+        }
+    }
+    Ok(all_workflows)
 }
 
 /// 从目录加载所有 .toml 文件中的自定义专家配置

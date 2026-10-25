@@ -1,3 +1,25 @@
+# Workflow definitions for multi-agent orchestration
+# Each workflow defines a sequence of stages with agent references and context passing
+
+[workflow.planner_coder]
+name = "planner_coder"
+description = "Two-stage workflow: planner creates a plan, coder implements it"
+type = "sequential"
+
+[[workflow.planner_coder.stages]]
+name = "planner"
+agent = "decomposer"
+# Context passed to this stage: inherits from workflow input
+# Output context keys to pass to next stage
+output_context = ["tasks", "plan_summary"]
+
+[[workflow.planner_coder.stages]]
+name = "coder"
+agent = "default"
+# Context passed to this stage: includes workflow input + planner outputs
+input_context = ["goal", "tasks", "plan_summary"]
+output_context = ["implementation", "files_changed"]
+
 # Tool definitions for the agent loop
 # Each tool defines a callable function that the LLM can invoke
 
