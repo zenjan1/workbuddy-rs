@@ -24,6 +24,107 @@ pub struct ReviewResult {
     pub raw: String,
 }
 
+/// ReviewerAgent 封装代码审查逻辑，持有 LLM 客户端与配置
+#[derive(Debug)]
+pub struct ReviewerAgent<C: LlmClient> {
+    client: C,
+    run_log_path: std::path::PathBuf,
+    timeout_secs: u64,
+}
+
+impl<C: LlmClient> ReviewerAgent<C> {
+    /// 创建新的 ReviewerAgent
+    pub fn new(client: C, run_log_path: impl Into<std::path::PathBuf>, timeout_secs: u64) -> Self {
+        Self {
+            client,
+            run_log_path: run_log_path.into(),
+            timeout_secs,
+        }
+    }
+
+    /// 执行代码审查：读取暂存区 diff，调用 LLM，解析结果，按 severity 分类
+    /// 返回 Ok(ReviewResult) 表示审查完成（可能包含 blocker），Err 表示调用/解析失败
+    pub async fn run_review(&self, task_description: &str) -> Result<ReviewResult> {
+        let diff = get_staged_diff().context("failed to get staged diff")?;
+        if diff.trim().is_empty() {
+            anyhow::bail!("Git diff is empty");
+        }
+
+        let user_prompt = format!(
+            "Task description:\n{}\n\nGit diff:\n{}",
+            task_description, diff
+        );
+
+        let response = match timeout(
+            Duration::from_secs(self.timeout_secs),
+            self.client.chat(REVIEWER_SYSTEM, &user_prompt),
+        )
+        .await
+        {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(e)) => anyhow::bail!("LLM reviewer call failed: {}", e),
+            Err(_) => anyhow::bail!("LLM reviewer timed out after {} seconds", self.timeout_secs),
+        };
+
+        let review = parse_review_output(&response);
+        
+        // 验证 risk_level
+        if review.risk_level != "low" && review.risk_level != "medium" && review.risk_level != "high" {
+            anyhow::bail!(
+                "LLM reviewer returned invalid risk_level: {:?}",
+                review.risk_level
+            );
+        }
+        
+        save_review(&self.run_log_path, &review)?;
+        Ok(review)
+    }
+
+    /// 非交互模式评审：仅评审暂存区 diff，输出简要建议，返回退出码
+    /// 返回: Ok(0) = 通过, Ok(1) = 不通过, Err = 错误(退出码 2)
+    pub async fn run_review_non_interactive(&self, task_description: &str) -> Result<i32> {
+        let diff = get_staged_diff().context("failed to get staged diff")?;
+        if diff.trim().is_empty() {
+            println!("暂存区为空，跳过评审");
+            return Ok(0);
+        }
+
+        let user_prompt = format!(
+            "Task description:\n{}\n\nGit diff:\n{}",
+            task_description, diff
+        );
+
+        let response = match timeout(
+            Duration::from_secs(self.timeout_secs),
+            self.client.chat(REVIEWER_SYSTEM, &user_prompt),
+        )
+        .await
+        {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(e)) => anyhow::bail!("LLM reviewer call failed: {}", e),
+            Err(_) => anyhow::bail!("LLM reviewer timed out after {} seconds", self.timeout_secs),
+        };
+
+        let review = parse_review_output(&response);
+        
+        if review.risk_level != "low" && review.risk_level != "medium" && review.risk_level != "high" {
+            anyhow::bail!(
+                "LLM reviewer returned invalid risk_level: {:?}",
+                review.risk_level
+            );
+        }
+        save_review(&self.run_log_path, &review)?;
+
+        print_brief_review(&review);
+
+        match review.risk_level.as_str() {
+            "low" => Ok(0),
+            "medium" | "high" => Ok(1),
+            _ => Ok(2),
+        }
+    }
+}
+
 pub fn parse_review_output(text: &str) -> ReviewResult {
     let trimmed = text.trim();
     if let Ok(mut parsed) = serde_json::from_str::<ReviewResult>(trimmed) {
@@ -69,83 +170,7 @@ pub fn save_review(run_log_path: &Path, review: &ReviewResult) -> Result<()> {
     Ok(())
 }
 
-pub async fn run_reviewer<C: LlmClient + ?Sized>(
-    diff: &str,
-    task_description: &str,
-    client: &C,
-    run_log_path: &Path,
-) -> Result<ReviewResult> {
-    if diff.trim().is_empty() {
-        anyhow::bail!("Git diff is empty");
-    }
 
-    let user_prompt = format!(
-        "Task description:\n{}\n\nGit diff:\n{}",
-        task_description, diff
-    );
-    let response = client
-        .chat(REVIEWER_SYSTEM, &user_prompt)
-        .await
-        .context("LLM reviewer call failed")?;
-    let review = parse_review_output(&response);
-    if review.risk_level != "low" && review.risk_level != "medium" && review.risk_level != "high" {
-        anyhow::bail!(
-            "LLM reviewer returned invalid risk_level: {:?}",
-            review.risk_level
-        );
-    }
-    save_review(run_log_path, &review)?;
-    Ok(review)
-}
-
-/// 非交互模式评审：仅评审暂存区 diff，超时 60s，输出简要建议，返回退出码
-/// 返回: Ok(0) = 通过, Ok(1) = 不通过, Err = 错误(退出码 2)
-pub async fn run_reviewer_non_interactive<C: LlmClient + ?Sized>(
-    client: &C,
-    run_log_path: &Path,
-    task_description: &str,
-    timeout_secs: u64,
-) -> Result<i32> {
-    // 获取暂存区 diff
-    let diff = get_staged_diff().context("failed to get staged diff")?;
-    if diff.trim().is_empty() {
-        println!("暂存区为空，跳过评审");
-        return Ok(0);
-    }
-
-    let user_prompt = format!(
-        "Task description:\n{}\n\nGit diff:\n{}",
-        task_description, diff
-    );
-
-    // 带超时的 LLM 调用
-    let response = match timeout(Duration::from_secs(timeout_secs), client.chat(REVIEWER_SYSTEM, &user_prompt)).await {
-        Ok(Ok(resp)) => resp,
-        Ok(Err(e)) => anyhow::bail!("LLM reviewer call failed: {}", e),
-        Err(_) => anyhow::bail!("LLM reviewer timed out after {} seconds", timeout_secs),
-    };
-
-    let review = parse_review_output(&response);
-    
-    // 验证 risk_level
-    if review.risk_level != "low" && review.risk_level != "medium" && review.risk_level != "high" {
-        anyhow::bail!(
-            "LLM reviewer returned invalid risk_level: {:?}",
-            review.risk_level
-        );
-    }
-    save_review(run_log_path, &review)?;
-
-    // 输出简要建议
-    print_brief_review(&review);
-
-    // 根据风险等级决定退出码
-    match review.risk_level.as_str() {
-        "low" => Ok(0),
-        "medium" | "high" => Ok(1),
-        _ => Ok(2),
-    }
-}
 
 fn get_staged_diff() -> Result<String> {
     let output = Command::new("git")

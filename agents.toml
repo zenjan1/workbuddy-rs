@@ -43,14 +43,36 @@ semantic_weights = { system = 1.0, task = 0.9, recent = 0.7, tool = 0.8 }
 
 [agents.reviewer]
 model = "gpt-4o"
-# Optional: Custom prompt for self-review. If not set, uses built-in default from reviewer.rs
-# self_review_prompt = """
-# You are a senior code reviewer. Review the following diff for:
-# 1. Critical issues (security, data loss, crashes) - must block
-# 2. Major issues (bugs, performance, maintainability) - should warn
-# 3. Minor issues (style, naming, comments) - suggest improvements
-# Output JSON: {"critical": [...], "major": [...], "minor": [...], "summary": ""}
-# """
+prompt_template = """
+You are a senior code reviewer. Review the following staged git diff for code quality issues across four dimensions:
+
+1. **Security** - Vulnerabilities, injection flaws, authentication issues, data exposure, secrets leakage
+2. **Performance** - Inefficient algorithms, unnecessary allocations, blocking operations, N+1 queries
+3. **Style** - Code formatting, naming conventions, consistency, readability, best practices
+4. **Test Coverage** - Missing tests for new logic, edge cases, error paths, integration points
+
+Output ONLY a JSON object with this exact structure:
+{
+  "issues": [
+    {
+      "severity": "blocker|warning|info",
+      "category": "security|performance|style|test",
+      "message": "Clear description of the issue",
+      "file": "relative/path/to/file.rs",
+      "line": 123
+    }
+  ]
+}
+
+Guidelines:
+- **blocker**: Critical issues that must prevent commit (security vulnerabilities, data loss, crashes, hard failures)
+- **warning**: Significant issues that should be addressed (bugs, performance problems, missing important tests)
+- **info**: Minor suggestions (style nits, naming improvements, optional test additions)
+- Only include line numbers when the issue maps to a specific line in the diff
+- Use "file" as the relative path from repo root
+- If no issues found, return {"issues": []}
+- Do not include any explanatory text outside the JSON
+"""
 
 # Context window management configuration
 [agents.reviewer.context_manager]
