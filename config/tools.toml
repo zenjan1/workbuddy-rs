@@ -1,0 +1,153 @@
+# WorkBuddy 内置工具注册表
+# 版本: 1.0
+# 说明: 所有内置工具的声明式定义；运行时由 ToolRegistry 读取并注册到 Agent 可用工具集
+
+[tool.edit]
+name = "edit"
+description = "对文件进行范围修改（插入/删除/替换），基于统一 edits 模块实现，支持原子性写入与回滚。"
+version = "1.0.0"
+enabled = true
+
+# 参数 JSON Schema（OpenAPI 3.1 / JSON Schema 2020-12 子集）
+parameters = '''
+{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "目标文件的相对或绝对路径"
+    },
+    "operations": {
+      "type": "array",
+      "description": "编辑操作序列，按顺序应用",
+      "items": {
+        "type": "object",
+        "oneOf": [
+          { "$ref": "#/$defs/InsertOp" },
+          { "$ref": "#/$defs/DeleteOp" },
+          { "$ref": "#/$defs/ReplaceOp" }
+        ]
+      },
+      "minItems": 1
+    }
+  },
+  "required": ["path", "operations"],
+  "$defs": {
+    "InsertOp": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "insert" },
+        "line": { "type": "integer", "minimum": 1, "description": "插入位置（1-based 行号），在该行之前插入" },
+        "content": { "type": "string", "description": "要插入的文本内容" }
+      },
+      "required": ["type", "line", "content"]
+    },
+    "DeleteOp": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "delete" },
+        "start_line": { "type": "integer", "minimum": 1, "description": "起始行号（含）" },
+        "end_line": { "type": "integer", "minimum": 1, "description": "结束行号（含）" }
+      },
+      "required": ["type", "start_line", "end_line"]
+    },
+    "ReplaceOp": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "replace" },
+        "start_line": { "type": "integer", "minimum": 1 },
+        "end_line": { "type": "integer", "minimum": 1 },
+        "content": { "type": "string", "description": "替换后的新内容" }
+      },
+      "required": ["type", "start_line", "end_line", "content"]
+    }
+  }
+}
+'''
+
+# edit 工具特定配置
+max_operations_per_call = 50
+max_lines_per_operation = 1000
+
+[tool.shell]
+name = "shell"
+description = "在受限环境中执行允许列表内的命令，支持超时控制与输出捕获。"
+version = "1.0.0"
+enabled = true
+
+parameters = '''
+{
+  "type": "object",
+  "properties": {
+    "command": {
+      "type": "string",
+      "description": "要执行的命令（必须在 allowlist 中）"
+    },
+    "args": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "命令参数列表",
+      "default": []
+    },
+    "working_dir": {
+      "type": "string",
+      "description": "工作目录（相对项目根目录）",
+      "default": "."
+    },
+    "timeout_seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 300,
+      "description": "超时时间（秒），默认使用工具级配置",
+      "default": 30
+    }
+  },
+  "required": ["command"]
+}
+'''
+
+# shell 工具特定配置
+allowlist = ["cargo", "git", "ls", "cat"]
+timeout_seconds = 30
+max_output_bytes = 1048576
+
+[tool.read]
+name = "read"
+description = "读取文件或列出目录内容，支持大小限制与编码检测。"
+version = "1.0.0"
+enabled = true
+
+parameters = '''
+{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "要读取的文件或目录路径"
+    },
+    "offset": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "读取起始字节偏移",
+      "default": 0
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1048576,
+      "description": "最大读取字节数",
+      "default": 1048576
+    },
+    "encoding": {
+      "type": "string",
+      "enum": ["utf-8", "utf-16", "latin1"],
+      "description": "文件编码，默认自动检测",
+      "default": "utf-8"
+    }
+  },
+  "required": ["path"]
+}
+'''
+
+# read 工具特定配置
+max_bytes = 1048576
