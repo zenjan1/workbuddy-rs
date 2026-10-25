@@ -495,16 +495,34 @@ pub async fn run_dev_loop(
         state.started_at = Some(now_iso());
     }
 
+    // 为每个任务生成稳定的 slug id(冲突时由 task_id 模块追加短哈希)。
+    // 提前生成以便在 skip 过滤时使用 task_id 记录日志。
+    let mut used_slugs: HashSet<String> = HashSet::new();
+    let mut task_ids: Vec<String> = backlog
+        .iter()
+        .map(|task| {
+            let id = crate::task_id::unique_slug(&task.title, &mut used_slugs);
+            used_slugs.insert(id.clone());
+            id
+        })
+        .collect();
+
     // 处理 skip 任务: 不进入正常调度队列, 但在 state.history 中留下跳过记录
-    backlog.retain(|task| {
+    // 日志格式: skipped: <task_id> reason=backlog_skip
+    let mut new_backlog = Vec::new();
+    let mut new_task_ids = Vec::new();
+    for (idx, task) in backlog.into_iter().enumerate() {
         if task.skip {
+            let task_id = task_ids.get(idx).cloned().unwrap_or_else(|| task.title.clone());
             state.history.push(format!("[skipped] {}", task.title));
-            eprintln!("[dev] 跳过任务: {} (skip=true)", task.title);
-            false
+            eprintln!("skipped: {} reason=backlog_skip", task_id);
         } else {
-            true
+            new_backlog.push(task);
+            new_task_ids.push(task_ids[idx].clone());
         }
-    });
+    }
+    backlog = new_backlog;
+    task_ids = new_task_ids;
 
     // 若用户通过 --task 指定了任务(数字索引或标题/前缀),调用 task_id::parse_task_selector 解析。
     let selected_idx: Option<usize> = if let Some(ref input) = opts.task {
@@ -539,16 +557,7 @@ pub async fn run_dev_loop(
     let mut failed = Vec::new();
     let mut extend_rounds = 0usize;
     let mut extend_fail_streak = 0usize;
-    // 为每个任务生成稳定的 slug id(冲突时由 task_id 模块追加短哈希)。
-    let mut used_slugs: HashSet<String> = HashSet::new();
-    let mut task_ids: Vec<String> = backlog
-        .iter()
-        .map(|task| {
-            let id = crate::task_id::unique_slug(&task.title, &mut used_slugs);
-            used_slugs.insert(id.clone());
-            id
-        })
-        .collect();
+
 
     // done_set 同时含 done 与 failed:重启后不重复跑已失败任务(省 token);
     // 确需重试时用 --retry-failed 从 failed 移回待办。
