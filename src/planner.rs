@@ -213,6 +213,30 @@ fn extract_path_from_prompt(text: &str) -> Option<String> {
     None
 }
 
+/// 过滤掉标记为 skip 的任务，并记录日志。
+/// 供调度器在执行 backlog 任务前调用。
+/// 任务类型需实现 `HasSkip` trait（见下方）。
+pub fn filter_skipped_tasks<T: HasSkip>(tasks: Vec<T>) -> Vec<T> {
+    tasks
+        .into_iter()
+        .filter(|task| {
+            if task.is_skip() {
+                eprintln!("Skipping task {} because skip=true", task.id());
+                false
+            } else {
+                true
+            }
+        })
+        .collect()
+}
+
+/// 统一访问任务的 skip 字段与 id 的 trait，
+/// 使 `filter_skipped_tasks` 能同时适配 backlog 任务与其它任务类型。
+pub trait HasSkip {
+    fn is_skip(&self) -> bool;
+    fn id(&self) -> String;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
