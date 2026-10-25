@@ -10,6 +10,8 @@ use nix::unistd::Pid;
 use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 
+use crate::plan::{StepRecord, TaskSpec};
+
 /// Custom error type for timeout scenarios
 #[derive(Debug, thiserror::Error)]
 pub enum TimeoutError {
@@ -28,6 +30,27 @@ pub enum TimeoutError {
     /// The underlying future returned an error
     #[error("Future error: {0}")]
     FutureError(String),
+}
+
+/// Error type for budget exceeded scenarios
+#[derive(Debug, thiserror::Error)]
+pub enum BudgetError {
+    /// The task exceeded its token budget
+    #[error("Task token budget exceeded: used {used} tokens, limit {limit} tokens")]
+    TokenBudgetExceeded { used: u32, limit: u32 },
+    /// The task exceeded its cost budget
+    #[error("Task cost budget exceeded: used ${used:.6}, limit ${limit:.6}")]
+    CostBudgetExceeded { used: f64, limit: f64 },
+    /// Generic budget exceeded (when both or unspecified)
+    #[error("Task budget exceeded: {message}")]
+    BudgetExceeded { message: String },
+}
+
+impl BudgetError {
+    /// Check if this error represents a budget exceeded condition
+    pub fn is_budget_exceeded(&self) -> bool {
+        true
+    }
 }
 
 impl TimeoutError {
@@ -300,6 +323,78 @@ impl Default for TimeoutGuardBuilder {
     }
 }
 
+/// Budget tracker for task-level LLM call budget enforcement
+#[derive(Debug, Clone, Default)]
+pub struct BudgetTracker {
+    /// Cumulative tokens used so far
+    pub total_tokens: u32,
+    /// Cumulative cost in USD so far
+    pub total_cost_usd: f64,
+    /// Token budget limit (None = unlimited)
+    pub max_tokens: Option<u32>,
+    /// Cost budget limit in USD (None = unlimited)
+    pub max_cost_usd: Option<f64>,
+}
+
+impl BudgetTracker {
+    /// Create a new BudgetTracker from TaskSpec budget limits
+    pub fn from_task_spec(spec: &TaskSpec) -> Self {
+        Self {
+            total_tokens: 0,
+            total_cost_usd: 0.0,
+            max_tokens: spec.max_tokens,
+            max_cost_usd: spec.max_cost_usd,
+        }
+    }
+
+    /// Check if adding the given tokens/cost would exceed budget
+    /// Returns BudgetError if budget would be exceeded
+    pub fn check_budget(&self, additional_tokens: u32, additional_cost_usd: f64) -> Result<(), BudgetError> {
+        if let Some(limit) = self.max_tokens {
+            let projected = self.total_tokens.saturating_add(additional_tokens);
+            if projected > limit {
+                return Err(BudgetError::TokenBudgetExceeded {
+                    used: projected,
+                    limit,
+                });
+            }
+        }
+
+        if let Some(limit) = self.max_cost_usd {
+            let projected = self.total_cost_usd + additional_cost_usd;
+            if projected > limit {
+                return Err(BudgetError::CostBudgetExceeded {
+                    used: projected,
+                    limit,
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Record actual consumption from an LLM call
+    pub fn record_consumption(&mut self, tokens: u32, cost_usd: f64) {
+        self.total_tokens = self.total_tokens.saturating_add(tokens);
+        self.total_cost_usd += cost_usd;
+    }
+
+    /// Get current cumulative tokens
+    pub fn total_tokens(&self) -> u32 {
+        self.total_tokens
+    }
+
+    /// Get current cumulative cost
+    pub fn total_cost_usd(&self) -> f64 {
+        self.total_cost_usd
+    }
+
+    /// Check if any budget is configured
+    pub fn has_budget(&self) -> bool {
+        self.max_tokens.is_some() || self.max_cost_usd.is_some()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,6 +415,114 @@ mod tests {
         assert!(err.is_timeout());
         assert!(matches!(err, TimeoutError::TimedOut(1)));
         assert!(guard.is_triggered());
+    }
+
+    #[tokio::test]
+    async fn test_budget_tracker_token_limit() {
+        let mut tracker = BudgetTracker {
+            total_tokens: 0,
+            total_cost_usd: 0.0,
+            max_tokens: Some(100),
+            max_cost_usd: None,
+        };
+
+        // Should pass - under limit
+        assert!(tracker.check_budget(50, 0.0).is_ok());
+        tracker.record_consumption(50, 0.0);
+        assert_eq!(tracker.total_tokens(), 50);
+
+        // Should pass - exactly at limit
+        assert!(tracker.check_budget(50, 0.0).is_ok());
+        tracker.record_consumption(50, 0.0);
+        assert_eq!(tracker.total_tokens(), 100);
+
+        // Should fail - would exceed limit
+        let err = tracker.check_budget(1, 0.0).unwrap_err();
+        assert!(matches!(err, BudgetError::TokenBudgetExceeded { used: 101, limit: 100 }));
+    }
+
+    #[tokio::test]
+    async fn test_budget_tracker_cost_limit() {
+        let mut tracker = BudgetTracker {
+            total_tokens: 0,
+            total_cost_usd: 0.0,
+            max_tokens: None,
+            max_cost_usd: Some(0.01),
+        };
+
+        // Should pass - under limit
+        assert!(tracker.check_budget(0, 0.005).is_ok());
+        tracker.record_consumption(0, 0.005);
+        assert!((tracker.total_cost_usd() - 0.005).abs() < f64::EPSILON);
+
+        // Should fail - would exceed limit
+        let err = tracker.check_budget(0, 0.006).unwrap_err();
+        assert!(matches!(err, BudgetError::CostBudgetExceeded { used, limit: 0.01 } if (used - 0.011).abs() < f64::EPSILON));
+    }
+
+    #[tokio::test]
+    async fn test_budget_tracker_both_limits() {
+        let mut tracker = BudgetTracker {
+            total_tokens: 0,
+            total_cost_usd: 0.0,
+            max_tokens: Some(100),
+            max_cost_usd: Some(0.01),
+        };
+
+        // Should pass - both under limits
+        assert!(tracker.check_budget(50, 0.005).is_ok());
+        tracker.record_consumption(50, 0.005);
+
+        // Should fail - token limit exceeded
+        let err = tracker.check_budget(60, 0.0).unwrap_err();
+        assert!(matches!(err, BudgetError::TokenBudgetExceeded { .. }));
+
+        // Reset and test cost limit
+        tracker = BudgetTracker {
+            total_tokens: 0,
+            total_cost_usd: 0.0,
+            max_tokens: Some(100),
+            max_cost_usd: Some(0.01),
+        };
+        tracker.record_consumption(50, 0.005);
+        let err = tracker.check_budget(0, 0.006).unwrap_err();
+        assert!(matches!(err, BudgetError::CostBudgetExceeded { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_budget_tracker_no_limits() {
+        let mut tracker = BudgetTracker::default();
+        assert!(!tracker.has_budget());
+        assert!(tracker.check_budget(1000000, 1000.0).is_ok());
+        tracker.record_consumption(1000000, 1000.0);
+        assert_eq!(tracker.total_tokens(), 1000000);
+        assert!((tracker.total_cost_usd() - 1000.0).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn test_budget_tracker_from_task_spec() {
+        let spec = TaskSpec {
+            id: "test".to_string(),
+            name: "Test Task".to_string(),
+            description: "Test".to_string(),
+            steps: vec![],
+            max_tokens: Some(500),
+            max_cost_usd: Some(0.05),
+            ..Default::default()
+        };
+
+        let tracker = BudgetTracker::from_task_spec(&spec);
+        assert_eq!(tracker.max_tokens, Some(500));
+        assert_eq!(tracker.max_cost_usd, Some(0.05));
+        assert_eq!(tracker.total_tokens(), 0);
+        assert_eq!(tracker.total_cost_usd(), 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_budget_error_is_budget_exceeded() {
+        assert!(BudgetError::TokenBudgetExceeded { used: 100, limit: 50 }.is_budget_exceeded());
+        assert!(BudgetError::CostBudgetExceeded { used: 0.1, limit: 0.05 }.is_budget_exceeded());
+        assert!(BudgetError::BudgetExceeded { message: "test".to_string() }.is_budget_exceeded());
     }
 
     #[tokio::test]

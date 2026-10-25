@@ -75,6 +75,12 @@ pub struct TaskSpec {
     /// 绝对截止时间（UTC），超过即取消
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline: Option<DateTime<Utc>>,
+    /// 任务级 LLM 调用最大 token 数限制
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    /// 任务级 LLM 调用最大成本限制（美元）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_cost_usd: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
