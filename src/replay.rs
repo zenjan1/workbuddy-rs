@@ -1,6 +1,24 @@
 use crate::config::Config;
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StepStatus {
+    Success,
+    Failed,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StepRecord {
+    pub step_name: String,
+    pub status: StepStatus,
+    pub input_chars: usize,
+    pub output_chars: usize,
+    pub error_message: Option<String>,
+}
 
 #[derive(Debug, Clone)]
 pub struct ReplayOptions {

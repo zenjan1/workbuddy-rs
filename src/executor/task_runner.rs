@@ -395,6 +395,127 @@ impl BudgetTracker {
     }
 }
 
+use crate::plan::{TaskStatus, StepRecord};
+use std::path::PathBuf;
+
+/// Artifact produced by a task step
+#[derive(Debug, Clone, Default)]
+pub struct TaskArtifact {
+    /// Standard output from the task
+    pub stdout: String,
+    /// Standard error from the task
+    pub stderr: String,
+    /// Exit code of the task
+    pub exit_code: Option<i32>,
+    /// Path to any output files generated
+    pub output_files: Vec<PathBuf>,
+    /// Token usage statistics
+    pub tokens_used: u32,
+    /// Cost in USD
+    pub cost_usd: f64,
+}
+
+/// Task runner that executes task steps with support for skipping successful tasks
+pub struct TaskRunner {
+    /// Whether to skip tasks that have already succeeded (for --retry-failed)
+    pub skip_successful: bool,
+    /// Base directory for artifact storage
+    pub artifact_dir: PathBuf,
+    /// Timeout configuration
+    pub timeout_config: TimeoutConfig,
+    /// Budget tracker
+    pub budget_tracker: BudgetTracker,
+}
+
+impl TaskRunner {
+    /// Create a new TaskRunner
+    pub fn new(skip_successful: bool, artifact_dir: PathBuf, timeout_config: TimeoutConfig, budget_tracker: BudgetTracker) -> Self {
+        Self {
+            skip_successful,
+            artifact_dir,
+            timeout_config,
+            budget_tracker,
+        }
+    }
+
+    /// Run a single task step, skipping if already successful and skip_successful is true
+    /// 
+    /// Returns the TaskArtifact (either from cache or fresh execution)
+    pub async fn run_step(
+        &mut self,
+        step: &StepRecord,
+        spec: &TaskSpec,
+        execute_fn: impl FnOnce() -> Pin<Box<dyn Future<Output = Result<TaskArtifact, TimeoutError>> + Send>>,
+    ) -> Result<TaskArtifact, TimeoutError> {
+        // If skip_successful is enabled and the step already succeeded, return cached artifact
+        if self.skip_successful && step.status == TaskStatus::Success {
+            info!("Skipping successful step: {} (id: {})", step.name, step.id);
+            return Ok(self.load_cached_artifact(step).await);
+        }
+
+        // Otherwise, execute the step
+        info!("Executing step: {} (id: {})", step.name, step.id);
+        let guard = TimeoutGuard::new(self.timeout_config.clone());
+        let artifact = guard.run(execute_fn()).await?;
+
+        // Record budget consumption if any
+        if artifact.tokens_used > 0 || artifact.cost_usd > 0.0 {
+            self.budget_tracker.record_consumption(artifact.tokens_used, artifact.cost_usd);
+        }
+
+        Ok(artifact)
+    }
+
+    /// Load cached artifact for a successful step
+    async fn load_cached_artifact(&self, step: &StepRecord) -> TaskArtifact {
+        // In a real implementation, this would load from the artifact directory
+        // For now, reconstruct from StepRecord fields
+        TaskArtifact {
+            stdout: step.stdout.clone().unwrap_or_default(),
+            stderr: step.stderr.clone().unwrap_or_default(),
+            exit_code: step.exit_code,
+            output_files: step.output_files.clone().unwrap_or_default(),
+            tokens_used: step.tokens_used.unwrap_or(0),
+            cost_usd: step.cost_usd.unwrap_or(0.0),
+        }
+    }
+
+    /// Run multiple steps in sequence
+    pub async fn run_steps(
+        &mut self,
+        steps: &mut [StepRecord],
+        spec: &TaskSpec,
+        mut execute_fn: impl FnMut(&StepRecord, &TaskSpec) -> Pin<Box<dyn Future<Output = Result<TaskArtifact, TimeoutError>> + Send>>,
+    ) -> Result<Vec<TaskArtifact>, TimeoutError> {
+        let mut artifacts = Vec::with_capacity(steps.len());
+
+        for step in steps.iter_mut() {
+            let artifact = self.run_step(step, spec, || execute_fn(step, spec)).await?;
+            // Update step record with results
+            step.status = TaskStatus::Success;
+            step.stdout = Some(artifact.stdout.clone());
+            step.stderr = Some(artifact.stderr.clone());
+            step.exit_code = artifact.exit_code;
+            step.output_files = Some(artifact.output_files.clone());
+            step.tokens_used = Some(artifact.tokens_used);
+            step.cost_usd = Some(artifact.cost_usd);
+            artifacts.push(artifact);
+        }
+
+        Ok(artifacts)
+    }
+
+    /// Get the current budget tracker
+    pub fn budget_tracker(&self) -> &BudgetTracker {
+        &self.budget_tracker
+    }
+
+    /// Get mutable reference to budget tracker
+    pub fn budget_tracker_mut(&mut self) -> &mut BudgetTracker {
+        &mut self.budget_tracker
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
