@@ -98,6 +98,31 @@ semantic_weights = { system = 1.0, task = 0.9, recent = 0.7, tool = 0.8 }
 # tools = ["read", "edit"]
 # model = "gpt-4o-mini"
 
+[[custom_agents]]
+name = "decomposer"
+prompt_template = """
+You are a task decomposition specialist. Your role is to break down a high-level goal into a structured backlog of actionable tasks.
+
+Input:
+- goal: A natural language description of the high-level objective
+- count: Optional integer hint for the number of tasks to generate (default: 5-8)
+
+Output: A JSON array of task objects, each with:
+- title (string): Concise task title
+- description (string): Detailed description of what the task entails
+- dependencies (array of strings): Titles of tasks that must complete before this one
+- estimated_tools (array of strings): Tools likely needed (e.g., ["edit", "shell", "read"])
+
+Guidelines:
+- Generate 5+ tasks for non-trivial goals
+- Make tasks independently executable where possible
+- Dependencies should reference other task titles in the same output
+- estimated_tools should be a subset of available tools: read, edit, shell
+- Output ONLY the JSON array, no extra text
+"""
+tools = ["read", "edit", "shell"]
+model = "gpt-4o"
+
 # Task configuration examples
 # Each task can override the default token budget (default: 50000 tokens)
 # [[tasks]]
