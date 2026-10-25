@@ -81,25 +81,31 @@ parameters = '''
   "properties": {
     "command": {
       "type": "string",
-      "description": "要执行的命令（必须在 allowlist 中）"
+      "description": "要执行的命令（字符串或 argv 数组）"
     },
     "args": {
       "type": "array",
       "items": { "type": "string" },
-      "description": "命令参数列表",
+      "description": "命令参数列表（当 command 为字符串时使用）",
       "default": []
     },
-    "working_dir": {
+    "cwd": {
       "type": "string",
       "description": "工作目录（相对项目根目录）",
       "default": "."
     },
-    "timeout_seconds": {
+    "timeout_ms": {
       "type": "integer",
       "minimum": 1,
-      "maximum": 300,
-      "description": "超时时间（秒），默认使用工具级配置",
-      "default": 30
+      "maximum": 300000,
+      "description": "超时时间（毫秒），默认使用工具级配置",
+      "default": 30000
+    },
+    "env_allowlist": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "允许透传的环境变量名白名单",
+      "default": []
     }
   },
   "required": ["command"]
@@ -107,9 +113,10 @@ parameters = '''
 '''
 
 # shell 工具特定配置
-allowlist = ["cargo", "git", "ls", "cat"]
-timeout_seconds = 30
-max_output_bytes = 1048576
+timeout_ms = 30000
+max_output_bytes = 65536
+env_allowlist = []
+allow_interactive = false
 
 [tool.read]
 name = "read"
