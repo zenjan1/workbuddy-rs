@@ -151,3 +151,42 @@ parameters = '''
 
 # read 工具特定配置
 max_bytes = 1048576
+
+# 模型定价配置（单位：元/1k tokens）
+# 用于成本估算引擎：预执行成本预测、运行时累加、阈值预警
+[pricing]
+# OpenAI GPT-4o
+gpt-4o-input = 0.03
+gpt-4o-output = 0.06
+
+# OpenAI GPT-4o-mini
+gpt-4o-mini-input = 0.0015
+gpt-4o-mini-output = 0.006
+
+# Anthropic Claude 3.5 Sonnet
+claude-3-5-sonnet-input = 0.021
+claude-3-5-sonnet-output = 0.105
+
+# Anthropic Claude 3.5 Haiku
+claude-3-5-haiku-input = 0.0012
+claude-3-5-haiku-output = 0.006
+
+# 通义千问 Qwen-Max
+qwen-max-input = 0.004
+qwen-max-output = 0.012
+
+# 通义千问 Qwen-Plus
+qwen-plus-input = 0.0008
+qwen-plus-output = 0.002
+
+# DeepSeek V3
+deepseek-v3-input = 0.0014
+deepseek-v3-output = 0.0028
+
+# DeepSeek R1
+deepseek-r1-input = 0.0055
+deepseek-r1-output = 0.022
+
+# 默认兜底定价（当模型未在上述列表时使用）
+default-input = 0.01
+default-output = 0.03
