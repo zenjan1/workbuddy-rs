@@ -53,10 +53,14 @@ fluent-templates = { version = "0.11", optional = true }
 unic-langid = { version = "0.9", optional = true }
 unic-langid-impl = { version = "0.9", optional = true }
 
+# Policy engine (OPA/Rego)
+opa-wasm = { version = "0.3", optional = true }
+
 [features]
 default = ["i18n"]
 i18n = ["fluent", "fluent-templates", "unic-langid", "unic-langid-impl"]
 tui = ["ratatui", "crossterm"]
+policy-engine = ["opa-wasm"]
 
 [profile.release]
 strip = true
