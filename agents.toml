@@ -31,6 +31,16 @@ model = "gpt-4o"
 # The first model should match the agent's model field
 consensus_group = ["gpt-4o", "claude-3-opus", "gemini-1.5-pro"]
 
+# Context window management configuration
+[agents.default.context_manager]
+enabled = true
+max_tokens = 128000
+trigger_threshold = 0.85
+strategy = "summarization"
+priority_retention = { system_prompt = true, current_task = true, recent_turns = 10, key_tool_results = 5 }
+summarization_model = "gpt-4o-mini"
+semantic_weights = { system = 1.0, task = 0.9, recent = 0.7, tool = 0.8 }
+
 [agents.reviewer]
 model = "gpt-4o"
 # Optional: Custom prompt for self-review. If not set, uses built-in default from reviewer.rs
@@ -41,6 +51,16 @@ model = "gpt-4o"
 # 3. Minor issues (style, naming, comments) - suggest improvements
 # Output JSON: {"critical": [...], "major": [...], "minor": [...], "summary": ""}
 # """
+
+# Context window management configuration
+[agents.reviewer.context_manager]
+enabled = true
+max_tokens = 128000
+trigger_threshold = 0.85
+strategy = "summarization"
+priority_retention = { system_prompt = true, current_task = true, recent_turns = 10, key_tool_results = 5 }
+summarization_model = "gpt-4o-mini"
+semantic_weights = { system = 1.0, task = 0.9, recent = 0.7, tool = 0.8 }
 
 # Custom agent definitions
 # Uncomment and customize the following section to define your own specialized agents

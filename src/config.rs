@@ -2600,3 +2600,108 @@ fn validate_nested_config_value_type(key: &str, value: &str) -> Result<()> {
     }
     Ok(())
 }
+// ContextManager configuration structures
+
+
+/// Configuration for the context window manager
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(default)]
+pub struct ContextManagerConfig {
+    /// Whether context management is enabled for this agent
+    pub enabled: bool,
+    /// Maximum context window size in tokens (model limit)
+    pub max_tokens: usize,
+    /// Threshold (0.0-1.0) at which to trigger compression
+    pub trigger_threshold: f32,
+    /// Compression strategy to use
+    pub strategy: ContextStrategy,
+    /// Priority retention settings for different message types
+    pub priority_retention: PriorityRetention,
+    /// Model to use for summarization (when strategy is summarization)
+    pub summarization_model: String,
+    /// Semantic importance weights for different message categories
+    pub semantic_weights: SemanticWeights,
+}
+
+/// Context compression strategy
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextStrategy {
+    /// Use a cheap model to generate summaries of older context
+    Summarization,
+    /// Truncate based on semantic importance scores
+    SemanticTruncation,
+    /// Simple sliding window - keep only the most recent messages
+    SlidingWindow,
+}
+
+impl Default for ContextStrategy {
+    fn default() -> Self {
+        ContextStrategy::Summarization
+    }
+}
+
+/// Priority retention configuration
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PriorityRetention {
+    /// Always retain system prompt
+    pub system_prompt: bool,
+    /// Always retain current task description
+    pub current_task: bool,
+    /// Number of recent conversation turns to retain
+    pub recent_turns: usize,
+    /// Number of key tool results to retain
+    pub key_tool_results: usize,
+}
+
+impl Default for PriorityRetention {
+    fn default() -> Self {
+        PriorityRetention {
+            system_prompt: true,
+            current_task: true,
+            recent_turns: 10,
+            key_tool_results: 5,
+        }
+    }
+}
+
+/// Semantic importance weights for message categories
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SemanticWeights {
+    /// Weight for system messages
+    pub system: f32,
+    /// Weight for task-related messages
+    pub task: f32,
+    /// Weight for recent conversation messages
+    pub recent: f32,
+    /// Weight for tool result messages
+    pub tool: f32,
+}
+
+impl Default for SemanticWeights {
+    fn default() -> Self {
+        SemanticWeights {
+            system: 1.0,
+            task: 0.9,
+            recent: 0.7,
+            tool: 0.8,
+        }
+    }
+}
+
+/// Context manager runtime statistics for monitoring
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ContextManagerStats {
+    /// Total number of messages in context
+    pub total_messages: usize,
+    /// Estimated token count
+    pub estimated_tokens: usize,
+    /// Number of times compression was triggered
+    pub compression_count: u64,
+    /// Total tokens removed by compression
+    pub tokens_compressed: u64,
+    /// Last compression timestamp (Unix epoch ms)
+    pub last_compression_ms: Option<u64>,
+    /// Current strategy in use
+    pub current_strategy: Option<ContextStrategy>,
+}
