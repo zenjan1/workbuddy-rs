@@ -65,6 +65,9 @@ pub struct Step {
     /// 绝对截止时间（UTC），超过即取消
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline: Option<DateTime<Utc>>,
+    /// 步骤级 LLM 调用最大 token 数限制
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +90,16 @@ pub struct TaskSpec {
 pub struct Plan {
     pub goal: String,
     pub steps: Vec<Step>,
+}
+
+/// 步骤执行记录，用于追踪 token 使用等运行时信息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StepRecord {
+    /// 对应的步骤 id
+    pub step_id: usize,
+    /// 本步骤累计使用的 token 数
+    #[serde(default)]
+    pub tokens_used: u32,
 }
 
 impl Plan {
@@ -170,6 +183,7 @@ impl Plan {
                 tool: None,
                 timeout_sec: None,
                 deadline: None,
+                max_tokens: None,
             });
         }
 

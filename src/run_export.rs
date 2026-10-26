@@ -101,6 +101,16 @@ pub enum ArtifactType {
     Custom,
 }
 
+/// Per-task token usage summary
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TaskTokenSummary {
+    pub task_id: String,
+    pub task_name: String,
+    pub max_tokens: Option<u32>,
+    pub tokens_used: u32,
+    pub token_budget_exceeded: bool,
+}
+
 /// Complete export data structure
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExportData {
@@ -110,6 +120,8 @@ pub struct ExportData {
     pub steps: Vec<StepRecord>,
     pub artifacts: Vec<ArtifactRecord>,
     pub summary: ExportSummary,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub task_token_summaries: Vec<TaskTokenSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -446,6 +458,9 @@ pub fn export_run(
     // Calculate summary
     let summary = calculate_summary(&run, &steps, &artifacts);
 
+    // Calculate per-task token summaries (placeholder - tasks would come from TaskStore)
+    let task_token_summaries = calculate_task_token_summaries(run_id, workspace_dir, &steps)?;
+
     // Build export data
     let export_data = ExportData {
         version: 1,
@@ -454,9 +469,43 @@ pub fn export_run(
         steps,
         artifacts,
         summary,
+        task_token_summaries,
     };
 
     Ok(export_data)
+}
+
+/// Calculate per-task token summaries from steps and task metadata.
+/// This is a placeholder implementation; in a full implementation, this would
+/// query a TaskStore for task definitions (including max_tokens) and aggregate
+/// step tokens per task.
+fn calculate_task_token_summaries(
+    run_id: &str,
+    workspace_dir: Option<&Path>,
+    steps: &[StepRecord],
+) -> Result<Vec<TaskTokenSummary>, RunExportError> {
+    // TODO: In a complete implementation, fetch TaskRecords from a TaskStore
+    // using run_id and workspace_dir, then aggregate step tokens per task.
+    // For now, return empty vector to maintain compatibility.
+    //
+    // Example of what the full implementation would do:
+    // let task_store = TaskStore::open_in_workspace_or_config(workspace_dir)?;
+    // let tasks = task_store.get_tasks_for_run(run_id)?;
+    // for task in tasks {
+    //     let task_steps: Vec<&StepRecord> = steps.iter()
+    //         .filter(|s| s.metadata.get("task_id") == Some(&serde_json::Value::String(task.task_id.clone())))
+    //         .collect();
+    //     let tokens_used: u32 = task_steps.iter().map(|s| s.total_tokens as u32).sum();
+    //     let token_budget_exceeded = task.max_tokens.map_or(false, |max| tokens_used > max);
+    //     summaries.push(TaskTokenSummary {
+    //         task_id: task.task_id,
+    //         task_name: task.name,
+    //         max_tokens: task.max_tokens,
+    //         tokens_used,
+    //         token_budget_exceeded,
+    //     });
+    // }
+    Ok(Vec::new())
 }
 
 /// Write export data to a file or stdout

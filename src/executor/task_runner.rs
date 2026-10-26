@@ -10,7 +10,7 @@ use nix::unistd::Pid;
 use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 
-use crate::plan::{StepRecord, TaskSpec};
+use crate::plan::{StepRecord, TaskSpec, TaskStatus};
 
 /// Custom error type for timeout scenarios
 #[derive(Debug, thiserror::Error)]
@@ -446,6 +446,15 @@ pub struct TaskRunner {
     pub budget_tracker: BudgetTracker,
 }
 
+/// Error type for task execution that combines timeout and budget errors
+#[derive(Debug, thiserror::Error)]
+pub enum TaskRunError {
+    #[error(transparent)]
+    Timeout(#[from] TimeoutError),
+    #[error(transparent)]
+    Budget(#[from] BudgetError),
+}
+
 impl TaskRunner {
     /// Create a new TaskRunner
     pub fn new(skip_successful: bool, artifact_dir: PathBuf, timeout_config: TimeoutConfig, budget_tracker: BudgetTracker) -> Self {
@@ -464,18 +473,23 @@ impl TaskRunner {
         &mut self,
         step: &StepRecord,
         spec: &TaskSpec,
-        execute_fn: impl FnOnce() -> Pin<Box<dyn Future<Output = Result<TaskArtifact, TimeoutError>> + Send>>,
-    ) -> Result<TaskArtifact, TimeoutError> {
+        execute_fn: impl FnOnce(&mut BudgetTracker) -> Pin<Box<dyn Future<Output = Result<TaskArtifact, TaskRunError>> + Send>>,
+    ) -> Result<TaskArtifact, TaskRunError> {
         // If skip_successful is enabled and the step already succeeded, return cached artifact
         if self.skip_successful && step.status == TaskStatus::Success {
             info!("Skipping successful step: {} (id: {})", step.name, step.id);
             return Ok(self.load_cached_artifact(step).await);
         }
 
-        // Otherwise, execute the step
+        // Pre-check: ensure we haven't already exceeded budget before starting
+        self.budget_tracker.check_budget(0, 0, 0.0)?;
+
+        // Otherwise, execute the step with budget tracker access
         info!("Executing step: {} (id: {})", step.name, step.id);
         let guard = TimeoutGuard::new(self.timeout_config.clone());
-        let artifact = guard.run(execute_fn()).await?;
+        let artifact = guard.run(async {
+            execute_fn(&mut self.budget_tracker).await
+        }).await?;
 
         // Record budget consumption if any
         if artifact.tokens_used > 0 || artifact.cost_usd > 0.0 {
@@ -510,23 +524,39 @@ impl TaskRunner {
         &mut self,
         steps: &mut [StepRecord],
         spec: &TaskSpec,
-        mut execute_fn: impl FnMut(&StepRecord, &TaskSpec) -> Pin<Box<dyn Future<Output = Result<TaskArtifact, TimeoutError>> + Send>>,
-    ) -> Result<Vec<TaskArtifact>, TimeoutError> {
+        mut execute_fn: impl FnMut(&StepRecord, &TaskSpec, &mut BudgetTracker) -> Pin<Box<dyn Future<Output = Result<TaskArtifact, TaskRunError>> + Send>>,
+    ) -> Result<Vec<TaskArtifact>, TaskRunError> {
         let mut artifacts = Vec::with_capacity(steps.len());
 
         for step in steps.iter_mut() {
-            let artifact = self.run_step(step, spec, || execute_fn(step, spec)).await?;
-            // Update step record with results
-            step.status = TaskStatus::Success;
-            step.stdout = Some(artifact.stdout.clone());
-            step.stderr = Some(artifact.stderr.clone());
-            step.exit_code = artifact.exit_code;
-            step.output_files = Some(artifact.output_files.clone());
-            step.tokens_used = Some(artifact.tokens_used);
-            step.input_tokens = Some(artifact.input_tokens);
-            step.output_tokens = Some(artifact.output_tokens);
-            step.cost_usd = Some(artifact.cost_usd);
-            artifacts.push(artifact);
+            let artifact = self.run_step(step, spec, |tracker| execute_fn(step, spec, tracker)).await;
+            match artifact {
+                Ok(artifact) => {
+                    // Update step record with results
+                    step.status = TaskStatus::Success;
+                    step.stdout = Some(artifact.stdout.clone());
+                    step.stderr = Some(artifact.stderr.clone());
+                    step.exit_code = artifact.exit_code;
+                    step.output_files = Some(artifact.output_files.clone());
+                    step.tokens_used = Some(artifact.tokens_used);
+                    step.input_tokens = Some(artifact.input_tokens);
+                    step.output_tokens = Some(artifact.output_tokens);
+                    step.cost_usd = Some(artifact.cost_usd);
+                    artifacts.push(artifact);
+                }
+                Err(TaskRunError::Budget(budget_err)) => {
+                    // Mark step as failed due to budget exceeded
+                    step.status = TaskStatus::Failed;
+                    step.error_message = Some(format!("token_budget_exceeded: {}", budget_err));
+                    return Err(TaskRunError::Budget(budget_err));
+                }
+                Err(TaskRunError::Timeout(timeout_err)) => {
+                    // Mark step as failed due to timeout
+                    step.status = TaskStatus::Failed;
+                    step.error_message = Some(format!("timeout: {}", timeout_err));
+                    return Err(TaskRunError::Timeout(timeout_err));
+                }
+            }
         }
 
         Ok(artifacts)
@@ -568,25 +598,85 @@ mod tests {
     #[tokio::test]
     async fn test_budget_tracker_token_limit() {
         let mut tracker = BudgetTracker {
-            total_tokens: 0,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
             total_cost_usd: 0.0,
             max_tokens: Some(100),
             max_cost_usd: None,
         };
 
         // Should pass - under limit
-        assert!(tracker.check_budget(50, 0.0).is_ok());
-        tracker.record_consumption(50, 0.0);
+        assert!(tracker.check_budget(50, 0, 0.0).is_ok());
+        tracker.record_consumption(50, 0, 0.0);
         assert_eq!(tracker.total_tokens(), 50);
 
         // Should pass - exactly at limit
-        assert!(tracker.check_budget(50, 0.0).is_ok());
-        tracker.record_consumption(50, 0.0);
+        assert!(tracker.check_budget(50, 0, 0.0).is_ok());
+        tracker.record_consumption(50, 0, 0.0);
         assert_eq!(tracker.total_tokens(), 100);
 
         // Should fail - would exceed limit
-        let err = tracker.check_budget(1, 0.0).unwrap_err();
+        let err = tracker.check_budget(1, 0, 0.0).unwrap_err();
         assert!(matches!(err, BudgetError::TokenBudgetExceeded { used: 101, limit: 100 }));
+    }
+
+    #[tokio::test]
+    async fn test_task_runner_budget_exceeded() {
+        use std::path::PathBuf;
+        use crate::plan::{StepRecord, TaskSpec, TaskStatus};
+        
+        let mut runner = TaskRunner::new(
+            false,
+            PathBuf::from("/tmp"),
+            TimeoutConfig::default(),
+            BudgetTracker::from_task_spec(&TaskSpec {
+                max_tokens: Some(100),
+                max_cost_usd: None,
+                ..Default::default()
+            }),
+        );
+
+        let mut step = StepRecord {
+            id: "test-step".to_string(),
+            name: "Test Step".to_string(),
+            status: TaskStatus::Pending,
+            ..Default::default()
+        };
+        let spec = TaskSpec {
+            max_tokens: Some(100),
+            max_cost_usd: None,
+            ..Default::default()
+        };
+
+        // First call uses 60 tokens - should succeed
+        let artifact1 = runner.run_step(&step, &spec, |tracker| Box::pin(async move {
+            tracker.check_budget(60, 0, 0.0)?;
+            tracker.record_consumption(60, 0, 0.0);
+            Ok(TaskArtifact {
+                tokens_used: 60,
+                input_tokens: 60,
+                output_tokens: 0,
+                cost_usd: 0.0,
+                ..Default::default()
+            })
+        })).await;
+        assert!(artifact1.is_ok());
+        assert_eq!(runner.budget_tracker.total_tokens(), 60);
+
+        // Second call would exceed budget (60 + 50 > 100) - should fail
+        let artifact2 = runner.run_step(&step, &spec, |tracker| Box::pin(async move {
+            tracker.check_budget(50, 0, 0.0)?;
+            tracker.record_consumption(50, 0, 0.0);
+            Ok(TaskArtifact {
+                tokens_used: 50,
+                input_tokens: 50,
+                output_tokens: 0,
+                cost_usd: 0.0,
+                ..Default::default()
+            })
+        })).await;
+        assert!(artifact2.is_err());
+        assert!(matches!(artifact2.unwrap_err(), TaskRunError::Budget(BudgetError::TokenBudgetExceeded { used: 110, limit: 100 })));
     }
 
     #[tokio::test]
