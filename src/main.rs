@@ -236,6 +236,12 @@ enum Cmd {
     Show {
         /// 任务 slug 或数字 id
         id: String,
+        /// 输出 Mermaid.js 时间线图表
+        #[arg(long)]
+        timeline: bool,
+        /// 将时间线写入文件而非标准输出
+        #[arg(long, short, value_name = "FILE")]
+        output: Option<PathBuf>,
     },
     /// 列出内置专家与 skills
     Agents,
@@ -468,12 +474,22 @@ async fn main() -> Result<()> {
                 cmd_list_with_slug(cfg, since.as_deref())
             }
         }
-        Cmd::Show { id } => {
+        Cmd::Show { id, timeline, output } => {
             let runs = Workspace::root(&cfg.workspace_dir);
             let run = resolve_task_run(&runs, &id)?.ok_or_else(|| {
                 anyhow::anyhow!("未找到任务 '{}'。请使用 `workbuddy list` 查看任务列表。", id)
             })?;
-            cmd_show(cfg, &run.id)
+            if timeline {
+                let options = replay::ShowOptions {
+                    run_id: run.id.clone(),
+                    timeline: true,
+                    output,
+                    ascii: false,
+                };
+                replay::run_show(cfg, options).await
+            } else {
+                cmd_show(cfg, &run.id)
+            }
         }
         Cmd::Agents => cmd_agents(),
         Cmd::Agent { action } => {
