@@ -598,6 +598,8 @@ pub fn format_status(summary: &StatusSummary) -> String {
     output
 }
 
+
+
 fn truncate_chars(input: &str, max_chars: usize) -> String {
     if input.chars().count() <= max_chars {
         input.to_string()
