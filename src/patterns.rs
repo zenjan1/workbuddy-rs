@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 use dirs;
-use crate::error::{WorkBuddyError, Result};
+use crate::error::{XiError, Result};
 
 /// Pattern type classification
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -105,10 +105,10 @@ pub struct PatternStore {
 }
 
 impl PatternStore {
-    /// Get the default database path (~/.workbuddy/patterns.db)
+    /// Get the default database path (~/.xi/patterns.db)
     fn default_db_path() -> PathBuf {
         let mut path = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        path.push(".workbuddy");
+        path.push(".xi");
         std::fs::create_dir_all(&path).ok();
         path.push("patterns.db");
         path
@@ -118,7 +118,7 @@ impl PatternStore {
     pub fn init_db() -> Result<Self> {
         let path = Self::default_db_path();
         let conn = Connection::open(&path)
-            .map_err(|e| WorkBuddyError::Storage(format!("Failed to open pattern database: {}", e)))?;
+            .map_err(|e| XiError::Storage(format!("Failed to open pattern database: {}", e)))?;
 
         let mut store = Self { conn };
         store.run_migrations()?;
@@ -128,7 +128,7 @@ impl PatternStore {
     /// Initialize with a custom database path (useful for testing)
     pub fn init_db_at(path: &PathBuf) -> Result<Self> {
         let conn = Connection::open(path)
-            .map_err(|e| WorkBuddyError::Storage(format!("Failed to open pattern database: {}", e)))?;
+            .map_err(|e| XiError::Storage(format!("Failed to open pattern database: {}", e)))?;
 
         let mut store = Self { conn };
         store.run_migrations()?;
@@ -151,19 +151,19 @@ impl PatternStore {
                 updated_at TEXT NOT NULL
             )"#,
             [],
-        ).map_err(|e| WorkBuddyError::Storage(format!("Failed to create patterns table: {}", e)))?;
+        ).map_err(|e| XiError::Storage(format!("Failed to create patterns table: {}", e)))?;
 
         // Create index on pattern_type for faster filtering
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_patterns_type ON patterns(pattern_type)",
             [],
-        ).map_err(|e| WorkBuddyError::Storage(format!("Failed to create index: {}", e)))?;
+        ).map_err(|e| XiError::Storage(format!("Failed to create index: {}", e)))?;
 
         // Create index on frequency for sorting
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_patterns_frequency ON patterns(frequency DESC)",
             [],
-        ).map_err(|e| WorkBuddyError::Storage(format!("Failed to create frequency index: {}", e)))?;
+        ).map_err(|e| XiError::Storage(format!("Failed to create frequency index: {}", e)))?;
 
         Ok(())
     }
@@ -171,9 +171,9 @@ impl PatternStore {
     /// Save a new pattern or update existing one
     pub fn save_pattern(&mut self, pattern: &Pattern) -> Result<()> {
         let examples_json = serde_json::to_string(&pattern.examples)
-            .map_err(|e| WorkBuddyError::Storage(format!("Failed to serialize examples: {}", e)))?;
+            .map_err(|e| XiError::Storage(format!("Failed to serialize examples: {}", e)))?;
         let metadata_json = serde_json::to_string(&pattern.metadata)
-            .map_err(|e| WorkBuddyError::Storage(format!("Failed to serialize metadata: {}", e)))?;
+            .map_err(|e| XiError::Storage(format!("Failed to serialize metadata: {}", e)))?;
 
         self.conn.execute(
             r#"
@@ -195,7 +195,7 @@ impl PatternStore {
                 pattern.created_at.to_rfc3339(),
                 pattern.updated_at.to_rfc3339(),
             ],
-        ).map_err(|e| WorkBuddyError::Storage(format!("Failed to save pattern: {}", e)))?;
+        ).map_err(|e| XiError::Storage(format!("Failed to save pattern: {}", e)))?;
 
         Ok(())
     }
@@ -214,15 +214,15 @@ impl PatternStore {
         };
 
         let mut stmt = self.conn.prepare(&sql)
-            .map_err(|e| WorkBuddyError::Storage(format!("Failed to prepare query: {}", e)))?;
+            .map_err(|e| XiError::Storage(format!("Failed to prepare query: {}", e)))?;
 
         let pattern_iter = stmt.query_map(params.as_slice(), |row| {
             Self::row_to_pattern(row)
-        }).map_err(|e| WorkBuddyError::Storage(format!("Failed to query patterns: {}", e)))?;
+        }).map_err(|e| XiError::Storage(format!("Failed to query patterns: {}", e)))?;
 
         let mut patterns = Vec::new();
         for pattern in pattern_iter {
-            patterns.push(pattern.map_err(|e| WorkBuddyError::Storage(format!("Failed to parse pattern: {}", e)))?);
+            patterns.push(pattern.map_err(|e| XiError::Storage(format!("Failed to parse pattern: {}", e)))?);
         }
 
         Ok(patterns)
@@ -232,12 +232,12 @@ impl PatternStore {
     pub fn get_pattern_by_id(&self, id: &str) -> Result<Option<Pattern>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, pattern_type, description, frequency, examples, metadata, created_at, updated_at FROM patterns WHERE id = ?1"
-        ).map_err(|e| WorkBuddyError::Storage(format!("Failed to prepare query: {}", e)))?;
+        ).map_err(|e| XiError::Storage(format!("Failed to prepare query: {}", e)))?;
 
         let pattern = stmt.query_row(params![id], |row| {
             Self::row_to_pattern(row)
         }).optional()
-        .map_err(|e| WorkBuddyError::Storage(format!("Failed to query pattern: {}", e)))?;
+        .map_err(|e| XiError::Storage(format!("Failed to query pattern: {}", e)))?;
 
         Ok(pattern)
     }
@@ -249,8 +249,8 @@ impl PatternStore {
             params![Utc::now().to_rfc3339(), id],
             |row| row.get(0),
         ).optional()
-        .map_err(|e| WorkBuddyError::Storage(format!("Failed to increment frequency: {}", e)))?
-        .ok_or_else(|| WorkBuddyError::NotFound(format!("Pattern not found: {}", id)))?;
+        .map_err(|e| XiError::Storage(format!("Failed to increment frequency: {}", e)))?
+        .ok_or_else(|| XiError::NotFound(format!("Pattern not found: {}", id)))?;
 
         Ok(new_freq)
     }
@@ -260,7 +260,7 @@ impl PatternStore {
         let rows_affected = self.conn.execute(
             "DELETE FROM patterns WHERE id = ?1",
             params![id],
-        ).map_err(|e| WorkBuddyError::Storage(format!("Failed to delete pattern: {}", e)))?;
+        ).map_err(|e| XiError::Storage(format!("Failed to delete pattern: {}", e)))?;
 
         Ok(rows_affected > 0)
     }
@@ -279,7 +279,7 @@ impl PatternStore {
         };
 
         let count: u64 = self.conn.query_row(&sql, params.as_slice(), |row| row.get(0))
-            .map_err(|e| WorkBuddyError::Storage(format!("Failed to count patterns: {}", e)))?;
+            .map_err(|e| XiError::Storage(format!("Failed to count patterns: {}", e)))?;
 
         Ok(count)
     }

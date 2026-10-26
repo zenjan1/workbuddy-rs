@@ -2,7 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use workbuddy_rs::config::{get_config_value, set_config_value};
+use xi_rs::config::{get_config_value, set_config_value};
 
 struct TestWorkspace {
     path: PathBuf,
@@ -11,7 +11,7 @@ struct TestWorkspace {
 impl TestWorkspace {
     fn new() -> Self {
         let unique = format!(
-            "workbuddy_config_set_{}_{}",
+            "xi_config_set_{}_{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -30,7 +30,7 @@ impl TestWorkspace {
     fn write_initial_config(&self) {
         fs::write(
             self.config_path(),
-            r#"# WorkBuddy configuration
+            r#"# Xi configuration
 model = "default-model"
 max_budget = 5000
 timeout = 30
@@ -81,7 +81,7 @@ fn config_set_updates_existing_keys_and_preserves_other_keys() {
         raw
     );
     assert!(
-        raw.contains("# WorkBuddy configuration"),
+        raw.contains("# Xi configuration"),
         "comment was not preserved: {}",
         raw
     );
@@ -560,7 +560,7 @@ fn config_set_preserves_existing_config_keys_on_successful_update() {
         raw
     );
     assert!(
-        raw.contains("# WorkBuddy configuration"),
+        raw.contains("# Xi configuration"),
         "comment not preserved: {}",
         raw
     );
@@ -609,20 +609,20 @@ fn config_set_rolls_back_on_failed_update_and_keeps_original_config() {
 }
 
 
-fn workbuddy_bin() -> &'static str {
-    if let Some(bin) = option_env!("CARGO_BIN_EXE_workbuddy") {
+fn xi_bin() -> &'static str {
+    if let Some(bin) = option_env!("CARGO_BIN_EXE_xi") {
         bin
-    } else if let Some(bin) = option_env!("CARGO_BIN_EXE_workbuddy-rs") {
+    } else if let Some(bin) = option_env!("CARGO_BIN_EXE_xi") {
         bin
-    } else if let Some(bin) = option_env!("CARGO_BIN_EXE_workbuddy_rs") {
+    } else if let Some(bin) = option_env!("CARGO_BIN_EXE_xi_rs") {
         bin
     } else {
-        panic!("neither CARGO_BIN_EXE_workbuddy, CARGO_BIN_EXE_workbuddy-rs, nor CARGO_BIN_EXE_workbuddy_rs is set")
+        panic!("neither CARGO_BIN_EXE_xi, CARGO_BIN_EXE_xi, nor CARGO_BIN_EXE_xi_rs is set")
     }
 }
 
 fn run_config_set(ws: &TestWorkspace, key: &str, value: &str) -> std::process::Output {
-    std::process::Command::new(workbuddy_bin())
+    std::process::Command::new(xi_bin())
         .arg("config")
         .arg("set")
         .arg(key)
@@ -632,7 +632,7 @@ fn run_config_set(ws: &TestWorkspace, key: &str, value: &str) -> std::process::O
         .env("WORKBUDDY_CONFIG_PATH", ws.config_path())
         .env("WORKBUDDY_CONFIG_FILE", ws.config_path())
         .output()
-        .expect("failed to execute workbuddy config set")
+        .expect("failed to execute xi config set")
 }
 
 #[test]
@@ -706,7 +706,7 @@ fn cli_config_set_preserves_existing_unknown_fields() {
     let ws = TestWorkspace::new();
     fs::write(
         ws.config_path(),
-        r#"# WorkBuddy configuration
+        r#"# Xi configuration
 model = "default-model"
 future_setting = "keep-me"
 
@@ -743,7 +743,7 @@ future_llm_setting = true
         raw
     );
     assert!(
-        raw.contains("# WorkBuddy configuration"),
+        raw.contains("# Xi configuration"),
         "comment was not preserved: {}",
         raw
     );

@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 
 use crate::config::Config;
 
-const DEFAULT_REVIEWER_SYSTEM: &str = "You are WorkBuddy's code review expert. Review the given git diff for correctness, readability, performance, security, and maintainability. Provide concise, actionable feedback.";
+const DEFAULT_REVIEWER_SYSTEM: &str = "You are Xi's code review expert. Review the given git diff for correctness, readability, performance, security, and maintainability. Provide concise, actionable feedback.";
 
 pub trait LlmClient: Send + Sync {
     fn chat<'a>(

@@ -202,7 +202,7 @@ fn resolve_secret_placeholders(value: &str) -> Result<String> {
             
             if secret_name.starts_with("secret:") {
                 let name = &secret_name["secret:".len()..];
-                let entry = Entry::new("workbuddy", name)
+                let entry = Entry::new("xi", name)
                     .with_context(|| format!("Failed to create keyring entry for secret: {name}"))?;
                 match entry.get_password() {
                     Ok(password) => result.push_str(&password),
@@ -292,7 +292,7 @@ impl Config {
 
         let workspace_dir = file
             .workspace_dir
-            .unwrap_or_else(|| home.join(".local/share/workbuddy"));
+            .unwrap_or_else(|| home.join(".local/share/xi"));
         let repo_dir = file
             .repo_dir
             .or_else(|| env::var("WORKBUDDY_REPO").ok().map(PathBuf::from))
@@ -667,7 +667,7 @@ impl Config {
         Self::config_candidates()
             .into_iter()
             .next()
-            .unwrap_or_else(|| PathBuf::from("workbuddy.toml"))
+            .unwrap_or_else(|| PathBuf::from("xi.toml"))
     }
 
     fn config_candidates() -> Vec<PathBuf> {
@@ -676,12 +676,12 @@ impl Config {
             v.push(PathBuf::from(explicit));
         }
         v.push(PathBuf::from("config.toml"));
-        v.push(PathBuf::from("workbuddy.toml"));
+        v.push(PathBuf::from("xi.toml"));
         if let Ok(xdg) = env::var("XDG_CONFIG_HOME") {
-            v.push(PathBuf::from(xdg).join("workbuddy/config.toml"));
+            v.push(PathBuf::from(xdg).join("xi/config.toml"));
         }
         if let Ok(home) = env::var("HOME") {
-            v.push(PathBuf::from(home).join(".config/workbuddy/config.toml"));
+            v.push(PathBuf::from(home).join(".config/xi/config.toml"));
         }
         v
     }
@@ -1716,7 +1716,7 @@ mod tests {
             base_url: "https://example.com/v1".into(),
             model: "qwen-plus".into(),
             max_parallel: 4,
-            workspace_dir: PathBuf::from("/tmp/workbuddy"),
+            workspace_dir: PathBuf::from("/tmp/xi"),
             repo_dir: PathBuf::from("/tmp/repo"),
             request_timeout_secs: 120,
             price: 0.0,
@@ -1831,7 +1831,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        path.push(format!("workbuddy-test-{}-{}.toml", test_name, unique));
+        path.push(format!("xi-test-{}-{}.toml", test_name, unique));
         path
     }
 
@@ -2190,7 +2190,7 @@ mod config_update_tests {
             base_url: "https://example.com".into(),
             model: "qwen-plus".into(),
             max_parallel: 4,
-            workspace_dir: PathBuf::from("/tmp/workbuddy"),
+            workspace_dir: PathBuf::from("/tmp/xi"),
             repo_dir: PathBuf::from("."),
             request_timeout_secs: 300,
             price: 0.0,

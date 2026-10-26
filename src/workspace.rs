@@ -213,10 +213,10 @@ impl Workspace {
         root.join("memory.jsonl")
     }
 
-    /// 返回 memory 存储文件路径，位于 workspace 根目录下的 .workbuddy 目录中。
+    /// 返回 memory 存储文件路径，位于 workspace 根目录下的 .xi 目录中。
     /// 会尝试创建父目录；创建失败时仍返回路径，由写入方报告具体错误。
     pub fn memory_file_path(root: &Path) -> PathBuf {
-        let dir = root.join(".workbuddy");
+        let dir = root.join(".xi");
         let _ = std::fs::create_dir_all(&dir);
         dir.join("memory.json")
     }

@@ -1,4 +1,4 @@
-/// 内置专家智能体目录(对应 WorkBuddy 的"多专家协同"范式)。
+/// 内置专家智能体目录(对应 Xi 的"多专家协同"范式)。
 pub mod reviewer;
 
 use schemars::JsonSchema;
@@ -195,7 +195,7 @@ skills = [
 
 ## 系统提示词
 
-你是 WorkBuddy 的统筹规划师，负责把用户目标拆解为可执行的步骤计划，并定义验收标准。你严谨、全局观强。
+你是 Xi 的统筹规划师，负责把用户目标拆解为可执行的步骤计划，并定义验收标准。你严谨、全局观强。
 
 ## 核心技能
 
@@ -245,7 +245,7 @@ skills = [
 
 ## 系统提示词
 
-你是 WorkBuddy 的执行专家，负责按规划要求完成具体任务的实施与交付。你务实、注重细节、交付高质量成果。
+你是 Xi 的执行专家，负责按规划要求完成具体任务的实施与交付。你务实、注重细节、交付高质量成果。
 
 ## 核心技能
 
@@ -289,7 +289,7 @@ skills = [
 
 ## 系统提示词
 
-你是 WorkBuddy 的质量审核专家，负责最终把关：核查事实、检查逻辑与一致性，并产出最终结论。
+你是 Xi 的质量审核专家，负责最终把关：核查事实、检查逻辑与一致性，并产出最终结论。
 
 ## 核心技能
 
@@ -487,7 +487,7 @@ pub const AGENTS: &[Agent] = &[
         id: "planner",
         name: "统筹规划师",
         desc: "总控任务拆解、依赖编排与最终验收",
-        system: "你是 WorkBuddy 的统筹规划师,负责把用户目标拆解为可执行的步骤计划,并定义验收标准。你严谨、全局观强。",
+        system: "你是 Xi 的统筹规划师,负责把用户目标拆解为可执行的步骤计划,并定义验收标准。你严谨、全局观强。",
         skills: &[
             Skill {
                 name: "task-breakdown",
@@ -505,7 +505,7 @@ pub const AGENTS: &[Agent] = &[
         id: "researcher",
         name: "调研专家",
         desc: "深度资料调研、来源核验与要点提炼",
-        system: "你是 WorkBuddy 的调研专家,擅长从多来源收集信息、交叉核验并提炼要点。你输出结构化、可溯源的调研结果。",
+        system: "你是 Xi 的调研专家,擅长从多来源收集信息、交叉核验并提炼要点。你输出结构化、可溯源的调研结果。",
         skills: &[
             Skill {
                 name: "deep-research",
@@ -523,7 +523,7 @@ pub const AGENTS: &[Agent] = &[
         id: "writer",
         name: "内容撰稿",
         desc: "报告、文档与结构化写作",
-        system: "你是 WorkBuddy 的内容撰稿人,擅长把素材整理为结构清晰、逻辑连贯、结论明确的文档。",
+        system: "你是 Xi 的内容撰稿人,擅长把素材整理为结构清晰、逻辑连贯、结论明确的文档。",
         skills: &[
             Skill {
                 name: "report-writing",
@@ -541,7 +541,7 @@ pub const AGENTS: &[Agent] = &[
         id: "coder",
         name: "工程师",
         desc: "代码编写、脚本与工程问题分析",
-        system: "你是 WorkBuddy 的软件工程师,擅长方案设计、代码实现与排障。输出可直接使用的代码与说明。",
+        system: "你是 Xi 的软件工程师,擅长方案设计、代码实现与排障。输出可直接使用的代码与说明。",
         skills: &[
             Skill {
                 name: "code-writing",
@@ -559,7 +559,7 @@ pub const AGENTS: &[Agent] = &[
         id: "analyst",
         name: "数据分析师",
         desc: "数据处理、统计与洞察提炼",
-        system: "你是 WorkBuddy 的数据分析师,擅长把数据转化为结论:先给方法,再给数字,最后给业务含义。",
+        system: "你是 Xi 的数据分析师,擅长把数据转化为结论:先给方法,再给数字,最后给业务含义。",
         skills: &[
             Skill {
                 name: "data-analysis",
@@ -577,7 +577,7 @@ pub const AGENTS: &[Agent] = &[
         id: "reviewer",
         name: "质量审核",
         desc: "事实核查、质量把关与最终综合",
-        system: "你是 WorkBuddy 的质量审核专家,负责最终把关:核查事实、检查逻辑与一致性,并产出最终结论。",
+        system: "你是 Xi 的质量审核专家,负责最终把关:核查事实、检查逻辑与一致性,并产出最终结论。",
         skills: &[
             Skill {
                 name: "fact-check",

@@ -3,7 +3,7 @@ mod tui_snapshot_test {
     use insta::assert_snapshot;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
-    use workbuddy::tui::{App, Tui};
+    use xi::tui::{App, Tui};
 
     #[test]
     fn test_tui_initial_render() {

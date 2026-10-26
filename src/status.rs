@@ -117,7 +117,7 @@ pub fn run(workspace_dir: &Path) -> anyhow::Result<()> {
             println!("{}", format_status(&summary));
         }
         Err(err) => {
-            eprintln!("workbuddy status: 无法读取运行状态: {err:#}");
+            eprintln!("xi status: 无法读取运行状态: {err:#}");
         }
     }
     Ok(())
@@ -131,7 +131,7 @@ pub fn run_with_log_lines(workspace_dir: &Path, log_lines: usize) -> anyhow::Res
             println!("{}", format_status(&summary));
         }
         Err(err) => {
-            eprintln!("workbuddy status: 无法读取运行状态: {err:#}");
+            eprintln!("xi status: 无法读取运行状态: {err:#}");
         }
     }
     Ok(())
@@ -185,7 +185,7 @@ fn parse_status_inner(
         if !run_files.is_empty() {
             let history = load_history(workspace_dir, cost_per_1k_tokens)?;
             StatusSummary::from_history_with_limit(&history, 5)
-        } else if workspace_dir.join("workbuddy.log").exists() {
+        } else if workspace_dir.join("xi.log").exists() {
             let (completed, failed, recent_logs) = read_legacy_status(workspace_dir)?;
             let mut legacy_summary = StatusSummary::from_history_with_limit(&[], 5);
             legacy_summary.completed_runs = completed;
@@ -215,7 +215,7 @@ fn parse_status_inner(
     // 如果本地状态文件存在，则优先采用其中显式给出的完成/失败计数；
     // 若历史日志为空，则使用状态文件中的最近日志尾部。
     let direct_status = workspace_dir.join(STATUS_FILE_NAME);
-    let nested_status = workspace_dir.join(".workbuddy").join(STATUS_FILE_NAME);
+    let nested_status = workspace_dir.join(".xi").join(STATUS_FILE_NAME);
     let status_path = if direct_status.exists() {
         Some(direct_status)
     } else if nested_status.exists() {
@@ -443,7 +443,7 @@ fn check_supervisor_process() -> bool {
                         }
                     }
                 }
-                line.contains("workbuddy") || line.contains("supervisor")
+                line.contains("xi") || line.contains("supervisor")
             });
         }
     }
@@ -458,7 +458,7 @@ fn check_supervisor_process() -> bool {
             let stdout = String::from_utf8_lossy(&output.stdout);
             return stdout
                 .lines()
-                .any(|line| line.contains("workbuddy") || line.contains("supervisor"));
+                .any(|line| line.contains("xi") || line.contains("supervisor"));
         }
     }
     false
@@ -528,13 +528,13 @@ fn read_legacy_count(workspace_dir: &Path, name: &str) -> anyhow::Result<usize> 
 }
 
 fn read_legacy_logs(workspace_dir: &Path) -> anyhow::Result<Vec<String>> {
-    read_log_file_recent(workspace_dir, &["workbuddy.log"], 5)
+    read_log_file_recent(workspace_dir, &["xi.log"], 5)
 }
 
 fn read_memory_recent_logs(workspace_dir: &Path, limit: usize) -> anyhow::Result<Vec<String>> {
     read_log_file_recent(
         workspace_dir,
-        &["memory.jsonl", "memory.log", "workbuddy.log"],
+        &["memory.jsonl", "memory.log", "xi.log"],
         limit,
     )
 }
@@ -659,7 +659,7 @@ mod tests {
 
     fn temp_workspace(test_name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
-            "workbuddy-status-test-{}-{}",
+            "xi-status-test-{}-{}",
             test_name,
             std::process::id()
         ));
@@ -935,7 +935,7 @@ mod extended_tests {
 
     #[test]
     fn run_missing_workspace_prints_readable_error_and_returns_ok() {
-        let workspace = PathBuf::from("/nonexistent/path/for/workbuddy/status");
+        let workspace = PathBuf::from("/nonexistent/path/for/xi/status");
         assert!(run(&workspace).is_ok());
     }
 
@@ -993,7 +993,7 @@ mod extended_tests {
     fn test_workspace(name: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
         let unique = format!(
-            "workbuddy_status_{}_{}_{}",
+            "xi_status_{}_{}_{}",
             name,
             std::process::id(),
             std::time::SystemTime::now()
@@ -1503,7 +1503,7 @@ mod cost_display_tests {
     fn show_output_includes_estimated_cost() {
         let mut path = std::env::temp_dir();
         let unique = format!(
-            "workbuddy_status_cost_{}_{}",
+            "xi_status_cost_{}_{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1603,7 +1603,7 @@ mod status_presentation_tests {
     fn temp_workspace(name: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
         path.push(format!(
-            "workbuddy_status_extra_{}_{}",
+            "xi_status_extra_{}_{}",
             name,
             std::process::id()
         ));
@@ -1696,7 +1696,7 @@ mod edge_case_tests {
     fn temp_workspace(name: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
         let unique = format!(
-            "workbuddy_status_edge_{}_{}_{}",
+            "xi_status_edge_{}_{}_{}",
             name,
             std::process::id(),
             SystemTime::now()

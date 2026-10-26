@@ -62,7 +62,7 @@ impl Default for TempWorkspaceConfig {
         Self {
             retain_on_failure: true,
             retain_on_success: false,
-            dir_prefix: "workbuddy-orchestrate-".to_string(),
+            dir_prefix: "xi-orchestrate-".to_string(),
             tool_config: ToolConfig::default(),
         }
     }

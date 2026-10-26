@@ -249,7 +249,7 @@ mod tests {
 
     fn vision_sample() -> String {
         [
-            "# workbuddy VISION",
+            "# xi VISION",
             "",
             "## 路线图(按里程碑,顺序即大方向)",
             "",
@@ -311,7 +311,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        path.push(format!("workbuddy-roadmap-test-{}.md", unique));
+        path.push(format!("xi-roadmap-test-{}.md", unique));
         fs::write(&path, sample()).unwrap();
 
         let result = update_roadmap_file(&path, "任务一", "说明");

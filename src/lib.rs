@@ -34,7 +34,7 @@ pub fn main_now_iso() -> String {
     format!("{}", secs)
 }
 
-// WorkBuddy Memory Store - Persistent key-value storage with SQLite backend.
+// Xi Memory Store - Persistent key-value storage with SQLite backend.
 //
 // This crate provides a thread-safe key-value storage abstraction with support for:
 // - Namespace isolation

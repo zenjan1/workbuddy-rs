@@ -42,9 +42,9 @@ use serde_json;
 
 #[derive(Parser)]
 #[command(
-    name = "workbuddy",
+    name = "xi",
     version = env!("CARGO_PKG_VERSION"),
-    about = "WorkBuddy 非官方 Rust 复刻:多专家 AI 智能体工作台"
+    about = "Xi 非官方 Rust 复刻:多专家 AI 智能体工作台"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -266,7 +266,7 @@ enum Cmd {
     Health,
     /// 自主开发循环:从 backlog 取任务 → 规划 → 改码 → 验证 → 提交
     Dev {
-        /// backlog 文件(JSON,默认 .workbuddy/backlog.json)
+        /// backlog 文件(JSON,默认 .xi/backlog.json)
         #[arg(long)]
         backlog: Option<std::path::PathBuf>,
         /// 全局验证命令(任务未指定 verify 时使用)
@@ -322,9 +322,9 @@ enum Cmd {
     /// 持久记忆：添加、列出或获取记忆条目
     ///
     /// 示例：
-    ///   workbuddy memory add "会议结论" "使用 Rust 实现"
-    ///   workbuddy memory list
-    ///   workbuddy memory get <id>
+    ///   xi memory add "会议结论" "使用 Rust 实现"
+    ///   xi memory list
+    ///   xi memory get <id>
     Memory {
         #[command(subcommand)]
         action: MemoryAction,
@@ -332,8 +332,8 @@ enum Cmd {
     /// 系统密钥环只读访问：获取或列出密钥
     ///
     /// 示例：
-    ///   workbuddy secret get OPENAI_API_KEY
-    ///   workbuddy secret list
+    ///   xi secret get OPENAI_API_KEY
+    ///   xi secret list
     Secret {
         #[command(subcommand)]
         action: SecretAction,
@@ -467,7 +467,7 @@ async fn main() -> Result<()> {
             if let Some(id) = id {
                 let runs = Workspace::root(&cfg.workspace_dir);
                 let run = resolve_task_run(&runs, &id)?.ok_or_else(|| {
-                    anyhow::anyhow!("未找到任务 '{}'。请使用 `workbuddy list` 查看任务列表。", id)
+                    anyhow::anyhow!("未找到任务 '{}'。请使用 `xi list` 查看任务列表。", id)
                 })?;
                 cmd_show(cfg, &run.id)
             } else {
@@ -477,7 +477,7 @@ async fn main() -> Result<()> {
         Cmd::Show { id, timeline, output } => {
             let runs = Workspace::root(&cfg.workspace_dir);
             let run = resolve_task_run(&runs, &id)?.ok_or_else(|| {
-                anyhow::anyhow!("未找到任务 '{}'。请使用 `workbuddy list` 查看任务列表。", id)
+                anyhow::anyhow!("未找到任务 '{}'。请使用 `xi list` 查看任务列表。", id)
             })?;
             if timeline {
                 let options = replay::ShowOptions {
@@ -578,7 +578,7 @@ async fn main() -> Result<()> {
                         "model" | "base_url" | "api_key" | "temperature" | "timeout"
                     );
                     if needs_restart {
-                        println!("提示：修改 {} 需要重启 WorkBuddy 才能生效。", key);
+                        println!("提示：修改 {} 需要重启 Xi 才能生效。", key);
                     }
                     Ok(())
                 }
@@ -612,13 +612,13 @@ async fn main() -> Result<()> {
             }
             cfg.mock = mock;
             let llm: Arc<dyn Llm> = if cfg.mock {
-                eprintln!("[workbuddy] Mock 模式:使用内置 Mock LLM");
+                eprintln!("[xi] Mock 模式:使用内置 Mock LLM");
                 Arc::new(MockLlm)
             } else {
                 Arc::new(OpenAiCompat::new(&cfg)?)
             };
             let backlog_path = backlog.unwrap_or_else(|| {
-                cfg.repo_dir.join(".workbuddy/backlog.json")
+                cfg.repo_dir.join(".xi/backlog.json")
             });
             let report = dev::run_dev_loop(
                 llm,
@@ -660,7 +660,7 @@ async fn main() -> Result<()> {
         },
         #[cfg(feature = "tui")]
         Cmd::Tui => {
-            let backlog_dir = cfg.repo_dir.join(".workbuddy");
+            let backlog_dir = cfg.repo_dir.join(".xi");
             tui::run(&backlog_dir)
                 .map_err(|e| anyhow::anyhow!("启动 TUI 失败: {e:#}"))?;
             Ok(())
@@ -695,7 +695,7 @@ async fn main() -> Result<()> {
             if let Some(id) = id {
                 let runs = Workspace::root(&cfg.workspace_dir);
                 let _ = resolve_task_run(&runs, &id)?.ok_or_else(|| {
-                    anyhow::anyhow!("未找到任务 '{}'。请使用 `workbuddy list` 查看任务列表。", id)
+                    anyhow::anyhow!("未找到任务 '{}'。请使用 `xi list` 查看任务列表。", id)
                 })?;
             }
             match run_undo(None) {
@@ -785,8 +785,8 @@ fn run_secret_command(action: SecretAction) -> Result<()> {
                 anyhow::bail!("密钥名称不能为空");
             }
             // 使用 keyring crate 从系统密钥环读取
-            // 服务名固定为 "workbuddy"，账户名为用户提供的名称
-            let entry = Entry::new("workbuddy", name)
+            // 服务名固定为 "xi"，账户名为用户提供的名称
+            let entry = Entry::new("xi", name)
                 .map_err(|e| anyhow::anyhow!("创建密钥环条目失败: {e}"))?;
             match entry.get_password() {
                 Ok(password) => {
@@ -804,7 +804,7 @@ fn run_secret_command(action: SecretAction) -> Result<()> {
             // 注意：keyring crate 不支持枚举所有条目
             // 这是一个平台限制，大多数系统密钥环不提供列出所有条目的 API
             println!("注意：系统密钥环不支持枚举所有条目。");
-            println!("请使用 `workbuddy secret get <name>` 获取特定密钥。");
+            println!("请使用 `xi secret get <name>` 获取特定密钥。");
             println!("常用密钥名称示例：");
             println!("  OPENAI_API_KEY");
             println!("  ANTHROPIC_API_KEY");
@@ -823,7 +823,7 @@ mod config_cmd_tests {
 
     #[test]
     fn cli_parses_config_set() {
-        let cli = Cli::try_parse_from(["workbuddy", "config", "set", "llm.model", "gpt-4o"])
+        let cli = Cli::try_parse_from(["xi", "config", "set", "llm.model", "gpt-4o"])
             .expect("parse config set");
         match cli.cmd {
             Cmd::Config { action, get } => {
@@ -847,8 +847,8 @@ mod config_cmd_tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        path.push(format!("workbuddy-test-{}.toml", unique));
-        let content = format!("workspace_dir = {:?}", "/tmp/workbuddy-test");
+        path.push(format!("xi-test-{}.toml", unique));
+        let content = format!("workspace_dir = {:?}", "/tmp/xi-test");
         fs::write(&path, content).unwrap();
 
         let result = config::set_config(&path, "definitely.not.a.real.key", "x");
@@ -863,7 +863,7 @@ mod status_cmd_tests {
 
     #[test]
     fn cli_parses_status_default_log_lines() {
-        let cli = Cli::try_parse_from(["workbuddy", "status"]).expect("parse status");
+        let cli = Cli::try_parse_from(["xi", "status"]).expect("parse status");
         match cli.cmd {
             Cmd::Status { log_lines } => assert_eq!(log_lines, 10),
             _ => panic!("expected status command"),
@@ -872,7 +872,7 @@ mod status_cmd_tests {
 
     #[test]
     fn cli_parses_status_custom_log_lines() {
-        let cli = Cli::try_parse_from(["workbuddy", "status", "--log-lines", "25"])
+        let cli = Cli::try_parse_from(["xi", "status", "--log-lines", "25"])
             .expect("parse status custom log lines");
         match cli.cmd {
             Cmd::Status { log_lines } => assert_eq!(log_lines, 25),
@@ -887,7 +887,7 @@ mod serve_cmd_tests {
 
     #[test]
     fn cli_parses_serve_defaults() {
-        let cli = Cli::try_parse_from(["workbuddy", "serve"]).expect("parse serve");
+        let cli = Cli::try_parse_from(["xi", "serve"]).expect("parse serve");
         match cli.cmd {
             Cmd::Serve {
                 data_dir: None,
@@ -903,7 +903,7 @@ mod serve_cmd_tests {
 
     #[test]
     fn cli_parses_serve_custom_port() {
-        let cli = Cli::try_parse_from(["workbuddy", "serve", "--port", "9090"])
+        let cli = Cli::try_parse_from(["xi", "serve", "--port", "9090"])
             .expect("parse serve custom port");
         match cli.cmd {
             Cmd::Serve { port, .. } => assert_eq!(port, 9090),
@@ -913,7 +913,7 @@ mod serve_cmd_tests {
 
     #[test]
     fn cli_parses_serve_port_zero() {
-        let cli = Cli::try_parse_from(["workbuddy", "serve", "--port", "0"])
+        let cli = Cli::try_parse_from(["xi", "serve", "--port", "0"])
             .expect("parse serve port zero");
         match cli.cmd {
             Cmd::Serve { port, .. } => assert_eq!(port, 0),
@@ -929,7 +929,7 @@ mod memory_cmd_tests {
 
     #[test]
     fn cli_parses_memory_add() {
-        let cli = Cli::try_parse_from(["workbuddy", "memory", "add", "greeting", "hello"])
+        let cli = Cli::try_parse_from(["xi", "memory", "add", "greeting", "hello"])
             .expect("parse memory add");
         match cli.cmd {
             Cmd::Memory { action } => match action {
@@ -945,7 +945,7 @@ mod memory_cmd_tests {
 
     #[test]
     fn cli_parses_memory_list() {
-        let cli = Cli::try_parse_from(["workbuddy", "memory", "list"])
+        let cli = Cli::try_parse_from(["xi", "memory", "list"])
             .expect("parse memory list");
         match cli.cmd {
             Cmd::Memory { action } => match action {
@@ -960,7 +960,7 @@ mod memory_cmd_tests {
 
     #[test]
     fn cli_parses_memory_get() {
-        let cli = Cli::try_parse_from(["workbuddy", "memory", "get", "greeting"])
+        let cli = Cli::try_parse_from(["xi", "memory", "get", "greeting"])
             .expect("parse memory get");
         match cli.cmd {
             Cmd::Memory { action } => match action {
@@ -973,7 +973,7 @@ mod memory_cmd_tests {
 
     #[test]
     fn cli_memory_add_requires_args() {
-        let result = Cli::try_parse_from(["workbuddy", "memory", "add"]);
+        let result = Cli::try_parse_from(["xi", "memory", "add"]);
         match result {
             Ok(_) => panic!("expected missing arguments error"),
             Err(e) => assert_eq!(e.kind(), ErrorKind::MissingRequiredArgument),
@@ -982,7 +982,7 @@ mod memory_cmd_tests {
 
     #[test]
     fn cli_memory_get_requires_key_arg() {
-        let result = Cli::try_parse_from(["workbuddy", "memory", "get"]);
+        let result = Cli::try_parse_from(["xi", "memory", "get"]);
         match result {
             Ok(_) => panic!("expected missing key error"),
             Err(e) => assert_eq!(e.kind(), ErrorKind::MissingRequiredArgument),
@@ -1002,7 +1002,7 @@ mod config_set_tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!(
-            "workbuddy_config_{}_{}_{}.toml",
+            "xi_config_{}_{}_{}.toml",
             tag,
             std::process::id(),
             nanos
@@ -1020,7 +1020,7 @@ mod config_set_tests {
 
     #[test]
     fn cli_parses_config_set() {
-        let cli = Cli::try_parse_from(["workbuddy", "config", "set", "timeout", "45"])
+        let cli = Cli::try_parse_from(["xi", "config", "set", "timeout", "45"])
             .expect("parse config set");
         match cli.cmd {
             Cmd::Config { action, .. } => match action {
@@ -1151,17 +1151,17 @@ fn cmd_validate() -> Result<()> {
 
 async fn run_task(cfg: Config, goal: &str) -> Result<()> {
     let llm: Arc<dyn Llm> = if cfg.mock {
-        eprintln!("[workbuddy] Mock 模式:使用内置 Mock LLM");
+        eprintln!("[xi] Mock 模式:使用内置 Mock LLM");
         Arc::new(MockLlm)
     } else {
         if cfg.api_key.is_none() {
-            eprintln!("[workbuddy] 警告:未检测到 API key(DASHSCOPE_API_KEY/OPENAI_API_KEY),将按 OpenAI 兼容模式尝试调用");
+            eprintln!("[xi] 警告:未检测到 API key(DASHSCOPE_API_KEY/OPENAI_API_KEY),将按 OpenAI 兼容模式尝试调用");
         }
         Arc::new(OpenAiCompat::new(&cfg)?)
     };
 
     println!("==================================================");
-    println!("WorkBuddy 任务: {}", goal);
+    println!("Xi 任务: {}", goal);
     println!("{}", cfg.summary());
     println!("==================================================");
 
@@ -1196,7 +1196,7 @@ async fn run_task(cfg: Config, goal: &str) -> Result<()> {
         .find(|r| r.ok)
         .map(|r| r.id);
     let mut report = format!(
-        "# WorkBuddy 任务报告\n\n- 任务: {goal}\n- 任务ID: {}\n- 模型: {}\n- 时间: {}\n\n## 计划\n\n```\n{}\n```\n\n## 最终产出\n\n",
+        "# Xi 任务报告\n\n- 任务: {goal}\n- 任务ID: {}\n- 模型: {}\n- 时间: {}\n\n## 计划\n\n```\n{}\n```\n\n## 最终产出\n\n",
         run.id, run.model, run.created, plan.summary()
     );
     if let Some(id) = last {
@@ -1567,10 +1567,10 @@ mod tests {
 
     #[test]
     fn report_path_joins_workspace_run_id_and_report_md() {
-        let path = report_path(std::path::Path::new("/tmp/workbuddy-ws"), "run-123");
+        let path = report_path(std::path::Path::new("/tmp/xi-ws"), "run-123");
         assert_eq!(
             path,
-            std::path::PathBuf::from("/tmp/workbuddy-ws/run-123/report.md")
+            std::path::PathBuf::from("/tmp/xi-ws/run-123/report.md")
         );
     }
 
@@ -1626,7 +1626,7 @@ mod config_set_cli_tests {
 
     #[test]
     fn cli_parses_config_set() {
-        let cli = Cli::try_parse_from(["workbuddy", "config", "set", "model", "gpt-4o"])
+        let cli = Cli::try_parse_from(["xi", "config", "set", "model", "gpt-4o"])
             .expect("parse config set");
         match cli.cmd {
             Cmd::Config {
@@ -1642,7 +1642,7 @@ mod config_set_cli_tests {
 
     #[test]
     fn cli_config_set_requires_value() {
-        let result = Cli::try_parse_from(["workbuddy", "config", "set", "model"]);
+        let result = Cli::try_parse_from(["xi", "config", "set", "model"]);
         match result {
             Ok(_) => panic!("expected missing value error"),
             Err(e) => assert_eq!(e.kind(), ErrorKind::MissingRequiredArgument),

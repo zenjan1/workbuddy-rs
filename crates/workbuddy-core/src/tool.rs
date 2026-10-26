@@ -1,4 +1,4 @@
-//! Tool trait and registry for WorkBuddy custom tool framework.
+//! Tool trait and registry for Xi custom tool framework.
 
 use std::collections::HashMap;
 use std::sync::Arc;

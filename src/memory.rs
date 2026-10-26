@@ -370,7 +370,7 @@ impl MemoryStore {
 }
 
 pub fn memory_file_path(workspace_dir: &Path) -> PathBuf {
-    workspace_dir.join(".workbuddy").join("memory.jsonl")
+    workspace_dir.join(".xi").join("memory.jsonl")
 }
 
 pub fn config_memory_file_path() -> PathBuf {
@@ -379,8 +379,8 @@ pub fn config_memory_file_path() -> PathBuf {
 
 fn default_memory_file_path() -> PathBuf {
     dirs::home_dir()
-        .map(|home| home.join(".workbuddy").join("memory.jsonl"))
-        .unwrap_or_else(|| PathBuf::from(".workbuddy").join("memory.jsonl"))
+        .map(|home| home.join(".xi").join("memory.jsonl"))
+        .unwrap_or_else(|| PathBuf::from(".xi").join("memory.jsonl"))
 }
 
 pub fn add(
@@ -536,7 +536,7 @@ mod memory_entry_usage_tests {
         static NEXT_DIR_ID: AtomicUsize = AtomicUsize::new(0);
         let id = NEXT_DIR_ID.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!(
-            "workbuddy-memory-lineage-test-{}-{}",
+            "xi-memory-lineage-test-{}-{}",
             std::process::id(),
             id
         ))
@@ -559,7 +559,7 @@ mod tests {
     fn temp_workspace() -> PathBuf {
         let id = NEXT_DIR_ID.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!(
-            "workbuddy-memory-crud-test-{}-{}",
+            "xi-memory-crud-test-{}-{}",
             std::process::id(),
             id
         ))
@@ -766,7 +766,7 @@ mod memory_entry_tests {
     fn temp_memory_path() -> PathBuf {
         let mut path = std::env::temp_dir();
         path.push(format!(
-            "workbuddy-memory-entry-test-{}-{}",
+            "xi-memory-entry-test-{}-{}",
             std::process::id(),
             NEXT_DIR_ID.fetch_add(1, Ordering::Relaxed)
         ));
@@ -856,7 +856,7 @@ mod memory_store_tests {
 
     fn temp_test_dir() -> PathBuf {
         let unique = format!(
-            "workbuddy-memory-test-{}-{}",
+            "xi-memory-test-{}-{}",
             std::process::id(),
             TEST_SEQ.fetch_add(1, Ordering::Relaxed)
         );
@@ -963,7 +963,7 @@ mod memory_persistence_tests {
     fn temp_workspace() -> PathBuf {
         let mut dir = std::env::temp_dir();
         dir.push(format!(
-            "workbuddy-memory-test-{}-{}",
+            "xi-memory-test-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1152,7 +1152,7 @@ mod key_value_tests {
     fn temp_memory_path() -> PathBuf {
         let mut path = std::env::temp_dir();
         path.push(format!(
-            "workbuddy-memory-kv-test-{}-{}",
+            "xi-memory-kv-test-{}-{}",
             std::process::id(),
             NEXT_DIR_ID.fetch_add(1, Ordering::Relaxed)
         ));
@@ -1240,7 +1240,7 @@ mod tests {
     fn temp_workspace() -> PathBuf {
         let id = NEXT_DIR_ID.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!(
-            "workbuddy-memory-crud-test-{}-{}",
+            "xi-memory-crud-test-{}-{}",
             std::process::id(),
             id
         ))
@@ -1393,7 +1393,7 @@ mod memory_jsonl_tests {
 
     fn temp_dir() -> Guard {
         let unique = format!(
-            "workbuddy-memory-jsonl-test-{}-{}",
+            "xi-memory-jsonl-test-{}-{}",
             std::process::id(),
             TEST_SEQ.fetch_add(1, Ordering::Relaxed)
         );
@@ -1495,7 +1495,7 @@ mod memory_correct_tests {
     fn temp_workspace() -> PathBuf {
         let id = NEXT_DIR_ID.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!(
-            "workbuddy-memory-correct-test-{}-{}",
+            "xi-memory-correct-test-{}-{}",
             std::process::id(),
             id
         ))

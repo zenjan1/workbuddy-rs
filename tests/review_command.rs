@@ -7,7 +7,7 @@ struct TempDir(PathBuf);
 impl TempDir {
     fn new(tag: &str) -> Self {
         let mut p = std::env::temp_dir();
-        p.push(format!("workbuddy_review_{}_{}_{}", tag, std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        p.push(format!("xi_review_{}_{}_{}", tag, std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
         fs::create_dir_all(&p).unwrap();
         Self(p)
     }
@@ -33,7 +33,7 @@ fn init_repo(dir: &Path, file: &str, content: &str) {
 }
 
 fn review(dir: &Path, extra: &[(&str, &str)]) -> std::process::Output {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_workbuddy"));
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_xi"));
     cmd.arg("review").current_dir(dir);
     for (k, v) in extra { cmd.env(k, v); }
     cmd.output().unwrap()
@@ -77,7 +77,7 @@ fn reviewer_model_triggers_llm_and_merges_results() {
     // normal change
 }
 "#).unwrap();
-    fs::write(dir.path().join(".workbuddy.toml"), r#"reviewer = "mock"
+    fs::write(dir.path().join(".xi.toml"), r#"reviewer = "mock"
 "#).unwrap();
     let output = review(dir.path(), &[("WORKBUDDY_LLM_MOCK", "1")]);
     assert!(output.status.success());

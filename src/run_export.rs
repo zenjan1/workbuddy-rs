@@ -400,33 +400,33 @@ impl From<MemoryError> for RunExportError {
 }
 
 fn run_file_path(workspace_dir: &Path) -> PathBuf {
-    workspace_dir.join(".workbuddy").join("runs.jsonl")
+    workspace_dir.join(".xi").join("runs.jsonl")
 }
 
 fn step_file_path(workspace_dir: &Path) -> PathBuf {
-    workspace_dir.join(".workbuddy").join("steps.jsonl")
+    workspace_dir.join(".xi").join("steps.jsonl")
 }
 
 fn artifact_file_path(workspace_dir: &Path) -> PathBuf {
-    workspace_dir.join(".workbuddy").join("artifacts.jsonl")
+    workspace_dir.join(".xi").join("artifacts.jsonl")
 }
 
 fn default_run_file_path() -> PathBuf {
     dirs::home_dir()
-        .map(|home| home.join(".workbuddy").join("runs.jsonl"))
-        .unwrap_or_else(|| PathBuf::from(".workbuddy").join("runs.jsonl"))
+        .map(|home| home.join(".xi").join("runs.jsonl"))
+        .unwrap_or_else(|| PathBuf::from(".xi").join("runs.jsonl"))
 }
 
 fn default_step_file_path() -> PathBuf {
     dirs::home_dir()
-        .map(|home| home.join(".workbuddy").join("steps.jsonl"))
-        .unwrap_or_else(|| PathBuf::from(".workbuddy").join("steps.jsonl"))
+        .map(|home| home.join(".xi").join("steps.jsonl"))
+        .unwrap_or_else(|| PathBuf::from(".xi").join("steps.jsonl"))
 }
 
 fn default_artifact_file_path() -> PathBuf {
     dirs::home_dir()
-        .map(|home| home.join(".workbuddy").join("artifacts.jsonl"))
-        .unwrap_or_else(|| PathBuf::from(".workbuddy").join("artifacts.jsonl"))
+        .map(|home| home.join(".xi").join("artifacts.jsonl"))
+        .unwrap_or_else(|| PathBuf::from(".xi").join("artifacts.jsonl"))
 }
 
 /// Export a complete run record including steps and artifacts
@@ -1210,7 +1210,7 @@ mod tests {
     fn temp_workspace() -> PathBuf {
         let id = NEXT_DIR_ID.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!(
-            "workbuddy-run-export-test-{}-{}",
+            "xi-run-export-test-{}-{}",
             std::process::id(),
             id
         ))
@@ -1220,7 +1220,7 @@ mod tests {
         let run = RunRecord {
             run_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string(),
             timestamp: 1700000000000,
-            command: "workbuddy".to_string(),
+            command: "xi".to_string(),
             args: vec!["run".to_string(), "test".to_string()],
             working_dir: workspace.to_string_lossy().to_string(),
             status: RunStatus::Completed,
@@ -1655,7 +1655,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use uuid::Uuid;
-use workbuddy_core::store::RunStore;
+use xi_core::store::RunStore;
 use workspace::{RunRecord, StepRecord};
 
 /// Export a run to a JSON file
@@ -1828,7 +1828,7 @@ fn parse_log_line(line: &str) -> Result<LogEntry> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
-    use workbuddy_core::store::RunStore;
+    use xi_core::store::RunStore;
     use workspace::{RunRecord, RunStatus, StepRecord, StepStatus, TokenUsage};
     use std::sync::Arc;
     use chrono::Utc;

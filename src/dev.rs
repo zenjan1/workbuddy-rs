@@ -100,9 +100,9 @@ fn save_backlog(path: &Path, tasks: &[DevTask]) -> Result<()> {
 
 /// 调用 LLM 生成 N 个新的开发任务(用于 backlog 耗尽时自补给,支撑长期运行)。
 async fn generate_tasks(llm: &Arc<dyn Llm>, repo: &Path, n: usize, done_titles: &[String]) -> Result<Vec<DevTask>> {
-    // 对齐"完整 workbuddy"目标:把仓库根 VISION.md 路线图注入,让 backlog 耗尽后的自补给持续朝目标推进
+    // 对齐"完整 xi"目标:把仓库根 VISION.md 路线图注入,让 backlog 耗尽后的自补给持续朝目标推进
     let vision = std::fs::read_to_string(repo.join("VISION.md")).unwrap_or_default();
-    let base = "你是 WorkBuddy 的任务生成器。为 workbuddy-rs 这个 Rust 多智能体 CLI 项目\
+    let base = "你是 Xi 的任务生成器。为 xi 这个 Rust 多智能体 CLI 项目\
     (模块: main/dev/edits/executor/llm/plan/planner/agents/workspace/config/util)生成持续的开发任务,\
     要求:每个任务小而独立、可验证(用 cargo test 或编译)、不破坏现有功能、优先补测试/文档/CLI 子命令/性能/健壮性,\
     禁止安全敏感操作。\n";
@@ -257,7 +257,7 @@ pub struct DevState {
 }
 
 fn state_path(repo: &Path) -> std::path::PathBuf {
-    repo.join(".workbuddy/state.json")
+    repo.join(".xi/state.json")
 }
 
 fn load_state(repo: &Path) -> DevState {
@@ -309,12 +309,12 @@ fn git(repo: &Path, args: &[&str]) -> Result<String> {
 }
 
 fn git_has_changes(repo: &Path) -> bool {
-    // 只看 .workbuddy/ 之外的改动:笔记/状态文件不算"源码改动"
-    // (否则 LLM 只写 .workbuddy/autodev_note.md 也能骗过假成功守卫)
+    // 只看 .xi/ 之外的改动:笔记/状态文件不算"源码改动"
+    // (否则 LLM 只写 .xi/autodev_note.md 也能骗过假成功守卫)
     std::process::Command::new("git")
         .arg("-C")
         .arg(repo)
-        .args(["status", "--porcelain", "--", ".", ":(exclude).workbuddy"])
+        .args(["status", "--porcelain", "--", ".", ":(exclude).xi"])
         .output()
         .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
         .unwrap_or(false)
@@ -325,11 +325,11 @@ fn git_commit(repo: &Path, message: &str) -> Result<Option<String>> {
     if !git_has_changes(repo) {
         return Ok(None);
     }
-    // .workbuddy/ 下的文件不进 git(状态/笔记噪声,且不能充当"源码改动")
+    // .xi/ 下的文件不进 git(状态/笔记噪声,且不能充当"源码改动")
     let _ = std::process::Command::new("git")
         .arg("-C")
         .arg(repo)
-        .args(["add", "-A", "--", ".", ":(exclude).workbuddy"])
+        .args(["add", "-A", "--", ".", ":(exclude).xi"])
         .status();
 
     // --- 提交前本地自评审 ---
@@ -354,7 +354,7 @@ fn git_commit(repo: &Path, message: &str) -> Result<Option<String>> {
 }
 
 /// 列出仓库内实际文件(供 planner 约束 path 引用,减少幻觉路径);
-/// 跳过 .git/target/node_modules/.workbuddy,上限 300 个。
+/// 跳过 .git/target/node_modules/.xi,上限 300 个。
 pub fn list_repo_files(repo: &Path) -> String {
     let mut out = Vec::new();
     let mut stack = vec![repo.to_path_buf()];
@@ -367,7 +367,7 @@ pub fn list_repo_files(repo: &Path) -> String {
             let p = e.path();
             if p.is_dir() {
                 let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
-                if matches!(name, ".git" | "target" | "node_modules" | ".workbuddy") {
+                if matches!(name, ".git" | "target" | "node_modules" | ".xi") {
                     continue;
                 }
                 stack.push(p);
@@ -444,7 +444,7 @@ async fn repair(
         files_ctx.push_str("\n== 最近改动(git diff) ==\n");
         files_ctx.push_str(&clip(&git(&cfg.repo_dir, &["diff"]).unwrap_or_default(), 8000));
     }
-    let system = "你是 WorkBuddy 的修复工程师。验证命令失败了,请找出问题并直接修复代码。\n\
+    let system = "你是 Xi 的修复工程师。验证命令失败了,请找出问题并直接修复代码。\n\
      只输出一个 JSON 对象: {\"edits\": [ ... ]},每个 edit: {\"path\": 仓库相对路径, \"old_string\": 精确原文, \"new_string\": 修复后内容, \"replace_all\": 布尔}。\n\
      old_string 必须与下面\"当前文件内容\"里的真实代码逐字符一致(含缩进);为空表示在文件末尾追加(文件不存在则新建)。不要 markdown 围栏,不要额外文字,最多 5 个 edits。";
     let user = format!(
@@ -879,7 +879,7 @@ fn mark_task_failed(
     let _ = std::process::Command::new("git")
         .arg("-C")
         .arg(repo)
-        .args(["clean", "-fd", "-e", ".workbuddy"])
+        .args(["clean", "-fd", "-e", ".xi"])
         .status();
     failed.push(title.to_string());
     state.failed.push(task_id.to_string());
@@ -937,7 +937,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("wb-devloop-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::create_dir_all(dir.join(".workbuddy")).unwrap();
+        std::fs::create_dir_all(dir.join(".xi")).unwrap();
         let g = |args: &[&str]| -> std::process::Output {
             std::process::Command::new("git")
                 .arg("-C")
@@ -954,7 +954,7 @@ mod tests {
         g(&["commit", "-m", "init"]);
 
         std::fs::write(
-            dir.join(".workbuddy/backlog.json"),
+            dir.join(".xi/backlog.json"),
             r#"{"tasks":[{"title":"任务一","description":"mock"},{"title":"任务二","description":"mock"}]}"#,
         )
         .unwrap();
@@ -983,7 +983,7 @@ mod tests {
             cfg,
             DevOptions {
                 task: None,
-                backlog_path: dir.join(".workbuddy/backlog.json"),
+                backlog_path: dir.join(".xi/backlog.json"),
                 verify: Some("echo verify-ok".into()),
                 max_tasks: Some(2),
                 extend: None,
@@ -1104,7 +1104,7 @@ mod dev_skip_tests {
 
     #[test]
     fn backlog_parses_skip_field() {
-        let dir = std::env::temp_dir().join(format!("workbuddy_devskip_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("xi_devskip_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("backlog.json");
         std::fs::write(&path, r#"{"tasks":[{"title":"skip me","skip":true},{"title":"normal"}]}"#).unwrap();

@@ -306,7 +306,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("workbuddy_reviewer_test_{}.log", unique));
+        let path = std::env::temp_dir().join(format!("xi_reviewer_test_{}.log", unique));
         let _ = std::fs::remove_file(&path);
         let review = ReviewResult {
             risk_level: "medium".into(),

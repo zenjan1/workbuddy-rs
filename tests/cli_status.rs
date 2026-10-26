@@ -8,7 +8,7 @@ fn make_temp_dir() -> PathBuf {
         .expect("clock before unix epoch")
         .as_nanos();
     let dir = std::env::temp_dir().join(format!(
-        "workbuddy-status-test-{}-{}",
+        "xi-status-test-{}-{}",
         std::process::id(),
         unique
     ));
@@ -28,15 +28,15 @@ fn write_mock_state(dir: &Path) {
     fs::write(dir.join("failed.txt"), "271828\n").unwrap();
     fs::write(dir.join("failed"), "271828\n").unwrap();
     fs::write(
-        dir.join("workbuddy.log"),
+        dir.join("xi.log"),
         "OLD_LOG_0\nLOG_UNIQUE_ALPHA\nLOG_UNIQUE_BETA\nLOG_UNIQUE_GAMMA\nLOG_UNIQUE_DELTA\nLOG_UNIQUE_EPSILON\n",
     )
     .unwrap();
 
     // Structured state file used by the status command. The recent log lines
     // intentionally omit OLD_LOG_0 so the summary only contains recent entries.
-    let state_dir = dir.join(".workbuddy");
-    fs::create_dir_all(&state_dir).expect("create .workbuddy state dir");
+    let state_dir = dir.join(".xi");
+    fs::create_dir_all(&state_dir).expect("create .xi state dir");
     fs::write(
         state_dir.join("status.json"),
         r#"{
@@ -61,12 +61,12 @@ fn status_command_succeeds_offline_and_prints_summary() {
     let dir = make_temp_dir();
     write_mock_state(&dir);
 
-    let bin = env!("CARGO_BIN_EXE_workbuddy");
+    let bin = env!("CARGO_BIN_EXE_xi");
     let output = Command::new(bin)
         .current_dir(&dir)
         .arg("status")
         .output()
-        .expect("failed to run workbuddy status");
+        .expect("failed to run xi status");
 
     assert!(output.status.success(), "status exited with {:?}", output.status);
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -133,8 +133,8 @@ fn status_parses_mock_state_and_formats_summary() {
     let dir = make_temp_dir();
     write_mock_state(&dir);
 
-    let report = workbuddy_rs::status::parse_status(&dir).expect("parse_status should succeed");
-    let output = workbuddy_rs::status::format_status(&report);
+    let report = xi_rs::status::parse_status(&dir).expect("parse_status should succeed");
+    let output = xi_rs::status::format_status(&report);
 
     let output_lower = output.to_lowercase();
     assert!(
@@ -171,7 +171,7 @@ fn status_parses_mock_state_and_formats_summary() {
 fn status_missing_metadata_returns_friendly_default() {
     let dir = make_temp_dir();
 
-    let summary = workbuddy_rs::status::parse_status(&dir)
+    let summary = xi_rs::status::parse_status(&dir)
         .expect("missing metadata should fall back to zero counts");
     assert_eq!(summary.completed_runs, 0);
     assert_eq!(summary.failed_runs, 0);
@@ -189,7 +189,7 @@ fn status_corrupt_metadata_returns_friendly_error() {
     // Corrupt the structured JSON state too so parsers that prefer it
     // also observe invalid metadata.
     fs::write(
-        dir.join(".workbuddy").join("status.json"),
+        dir.join(".xi").join("status.json"),
         r#"{
   "supervisor_running": false,
   "completed": "not-a-number",
@@ -206,7 +206,7 @@ fn status_corrupt_metadata_returns_friendly_error() {
     )
     .unwrap();
 
-    let err = workbuddy_rs::status::parse_status(&dir).expect_err("corrupt metadata should fail");
+    let err = xi_rs::status::parse_status(&dir).expect_err("corrupt metadata should fail");
     let msg = err.to_string().to_lowercase();
 
     assert!(
@@ -220,8 +220,8 @@ fn status_corrupt_metadata_returns_friendly_error() {
 }
 
 fn write_status_state(dir: &Path, completed: u64, failed: u64, recent_logs: &[&str]) {
-    let state_dir = dir.join(".workbuddy");
-    fs::create_dir_all(&state_dir).expect("create .workbuddy state dir");
+    let state_dir = dir.join(".xi");
+    fs::create_dir_all(&state_dir).expect("create .xi state dir");
     let logs = if recent_logs.is_empty() {
         String::new()
     } else {
@@ -251,12 +251,12 @@ fn status_command_with_no_history_reports_zero_counts_offline() {
     let dir = make_temp_dir();
     write_status_state(&dir, 0, 0, &[]);
 
-    let bin = env!("CARGO_BIN_EXE_workbuddy");
+    let bin = env!("CARGO_BIN_EXE_xi");
     let output = Command::new(bin)
         .current_dir(&dir)
         .arg("status")
         .output()
-        .expect("failed to run workbuddy status");
+        .expect("failed to run xi status");
 
     assert!(output.status.success(), "status exited with {:?}", output.status);
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -275,12 +275,12 @@ fn status_with_mixed_success_and_failure_counts_accurately() {
     let dir = make_temp_dir();
     write_status_state(&dir, 424242, 434343, &["alpha-success", "beta-failure", "gamma-success"]);
 
-    let bin = env!("CARGO_BIN_EXE_workbuddy");
+    let bin = env!("CARGO_BIN_EXE_xi");
     let output = Command::new(bin)
         .current_dir(&dir)
         .arg("status")
         .output()
-        .expect("failed to run workbuddy status");
+        .expect("failed to run xi status");
 
     assert!(output.status.success(), "status exited with {:?}", output.status);
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -314,8 +314,8 @@ fn status_format_truncates_recent_logs_to_latest_five() {
         ],
     );
 
-    let report = workbuddy_rs::status::parse_status(&dir).expect("state with many logs should parse");
-    let output = workbuddy_rs::status::format_status(&report);
+    let report = xi_rs::status::parse_status(&dir).expect("state with many logs should parse");
+    let output = xi_rs::status::format_status(&report);
 
     for keep in [
         "RECENT_LOG_1",
@@ -338,8 +338,8 @@ fn status_report_paths_are_fully_offline() {
 
     // These functions only read local state and format text; they must not
     // construct an LLM client or make network calls.
-    let report = workbuddy_rs::status::parse_status(&dir).expect("parse_status should work offline");
-    let output = workbuddy_rs::status::format_status(&report);
+    let report = xi_rs::status::parse_status(&dir).expect("parse_status should work offline");
+    let output = xi_rs::status::format_status(&report);
     assert!(output.contains("offline-log"));
 }
 
@@ -352,12 +352,12 @@ fn status_degrades_to_legacy_files_and_log_aggregation_when_no_state_json() {
     fs::write(dir.join("failed.txt"), "456\n").unwrap();
     fs::write(dir.join("failed"), "456\n").unwrap();
     fs::write(
-        dir.join("workbuddy.log"),
+        dir.join("xi.log"),
         "OLD_1\nRECENT_1\nRECENT_2\nRECENT_3\nRECENT_4\nRECENT_5\n",
     )
     .unwrap();
 
-    let report = workbuddy_rs::status::parse_status(&dir)
+    let report = xi_rs::status::parse_status(&dir)
         .expect("legacy state and log aggregation should succeed");
 
     assert_eq!(report.completed_runs, 123);

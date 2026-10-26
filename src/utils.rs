@@ -51,7 +51,7 @@ pub fn write_failure_report(validation_output: &str, fix_attempts: &str, title: 
         .to_string();
 
     // 创建目录结构
-    let dir_path = ".workbuddy/failures/";
+    let dir_path = ".xi/failures/";
     fs::create_dir_all(dir_path)?;
 
     // 构建文件路径

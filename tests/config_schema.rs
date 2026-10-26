@@ -2,7 +2,7 @@ use serde_json::Value;
 use std::fs;
 use std::process::Command;
 
-const BINARY_NAME: &str = env!("CARGO_BIN_EXE_workbuddy");
+const BINARY_NAME: &str = env!("CARGO_BIN_EXE_xi");
 
 fn run_schema_command(args: &[&str]) -> Value {
     let output = Command::new(BINARY_NAME)

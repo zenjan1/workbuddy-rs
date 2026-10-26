@@ -117,9 +117,9 @@ fn version_gt(a: &str, b: &str) -> bool {
 
 /// Workspace migration - migrates from single-project config to multi-workspace structure.
 /// This migration:
-/// 1. Detects old config files (~/.workbuddy/config.toml, agents.toml, backlog/, runs/)
+/// 1. Detects old config files (~/.xi/config.toml, agents.toml, backlog/, runs/)
 /// 2. Creates a 'default' workspace
-/// 3. Moves all files to ~/.workbuddy/workspaces/default/
+/// 3. Moves all files to ~/.xi/workspaces/default/
 /// 4. Creates workspaces.toml registry and current file
 /// 5. Marks migration as complete
 pub struct WorkspaceMigration;
@@ -141,16 +141,16 @@ impl Migration for WorkspaceMigration {
 /// Performs the full workspace migration on the filesystem.
 /// Returns true if migration was performed, false if already migrated or not needed.
 pub fn migrate_to_workspace() -> Result<bool> {
-    let workbuddy_dir = dirs::home_dir()
+    let xi_dir = dirs::home_dir()
         .context("Could not find home directory")?
-        .join(".workbuddy");
+        .join(".xi");
     
-    let config_file = workbuddy_dir.join("config.toml");
-    let agents_file = workbuddy_dir.join("agents.toml");
-    let backlog_dir = workbuddy_dir.join("backlog");
-    let runs_dir = workbuddy_dir.join("runs");
-    let workspaces_file = workbuddy_dir.join("workspaces.toml");
-    let current_file = workbuddy_dir.join("current");
+    let config_file = xi_dir.join("config.toml");
+    let agents_file = xi_dir.join("agents.toml");
+    let backlog_dir = xi_dir.join("backlog");
+    let runs_dir = xi_dir.join("runs");
+    let workspaces_file = xi_dir.join("workspaces.toml");
+    let current_file = xi_dir.join("current");
     
     // Check if already migrated (workspaces.toml exists)
     if workspaces_file.exists() {
@@ -165,7 +165,7 @@ pub fn migrate_to_workspace() -> Result<bool> {
     }
     
     // Create workspaces directory
-    let workspaces_dir = workbuddy_dir.join("workspaces");
+    let workspaces_dir = xi_dir.join("workspaces");
     let default_workspace_dir = workspaces_dir.join("default");
     fs::create_dir_all(&default_workspace_dir).context("Failed to create default workspace directory")?;
     
@@ -349,16 +349,16 @@ mod tests {
     #[test]
     fn test_workspace_migration() {
         let temp_dir = tempdir().unwrap();
-        let workbuddy_dir = temp_dir.path().join(".workbuddy");
-        fs::create_dir_all(&workbuddy_dir).unwrap();
+        let xi_dir = temp_dir.path().join(".xi");
+        fs::create_dir_all(&xi_dir).unwrap();
         
         // Create old config files
-        fs::write(workbuddy_dir.join("config.toml"), "version = \"2\"\neditor = \"code\"").unwrap();
-        fs::write(workbuddy_dir.join("agents.toml"), "[[agents]]\nname = \"test\"\nmodel = \"gpt-4\"").unwrap();
-        fs::create_dir_all(workbuddy_dir.join("backlog")).unwrap();
-        fs::write(workbuddy_dir.join("backlog").join("task1.md"), "# Task 1").unwrap();
-        fs::create_dir_all(workbuddy_dir.join("runs")).unwrap();
-        fs::write(workbuddy_dir.join("runs").join("run1.json"), "{}").unwrap();
+        fs::write(xi_dir.join("config.toml"), "version = \"2\"\neditor = \"code\"").unwrap();
+        fs::write(xi_dir.join("agents.toml"), "[[agents]]\nname = \"test\"\nmodel = \"gpt-4\"").unwrap();
+        fs::create_dir_all(xi_dir.join("backlog")).unwrap();
+        fs::write(xi_dir.join("backlog").join("task1.md"), "# Task 1").unwrap();
+        fs::create_dir_all(xi_dir.join("runs")).unwrap();
+        fs::write(xi_dir.join("runs").join("run1.json"), "{}").unwrap();
         
         // We can't easily test migrate_to_workspace() without mocking the home directory,
         // but we can test the WorkspaceMigration struct

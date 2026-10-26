@@ -585,7 +585,7 @@ mod tests {
 
     fn create_test_workspace() -> (PathBuf, String) {
         let workspace_dir = std::env::temp_dir().join(format!(
-            "workbuddy-serve-test-{}",
+            "xi-serve-test-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -891,7 +891,7 @@ mod serve_readonly_extra_tests {
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
         let unique = format!(
-            "workbuddy-serve-{}-{}-{}",
+            "xi-serve-{}-{}-{}",
             tag,
             std::process::id(),
             SystemTime::now()

@@ -1200,7 +1200,7 @@ mod executor_read_tests {
             .unwrap()
             .as_nanos();
         let dir = std::env::temp_dir().join(format!(
-            "workbuddy-executor-{}-{}-{}",
+            "xi-executor-{}-{}-{}",
             test,
             std::process::id(),
             nanos
@@ -1265,7 +1265,7 @@ mod executor_read_tests {
         {
             use std::os::unix::fs::symlink;
             let outside = std::env::temp_dir().join(format!(
-                "workbuddy-read-outside-{}.txt",
+                "xi-read-outside-{}.txt",
                 std::process::id()
             ));
             fs::write(&outside, "outside").unwrap();

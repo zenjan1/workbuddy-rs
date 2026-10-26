@@ -1,4 +1,4 @@
-//! Tool implementations for WorkBuddy executor.
+//! Tool implementations for Xi executor.
 
 pub mod shell;
 

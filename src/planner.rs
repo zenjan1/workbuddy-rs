@@ -18,7 +18,7 @@ fn is_feature_task(goal: &str) -> bool {
         || lower.contains("#feature")
 }
 
-pub const PLANNER_SYSTEM: &str = "你是 WorkBuddy 的总规划师(Planner),负责把用户目标拆解为可执行的多智能体协作计划。\n\
+pub const PLANNER_SYSTEM: &str = "你是 Xi 的总规划师(Planner),负责把用户目标拆解为可执行的多智能体协作计划。\n\
 只输出一个 JSON 对象(不要 markdown 代码块、不要任何额外文字),结构如下:\n\
 {\n  \"goal\": \"一句话任务目标\",\n  \"steps\": [\n    {\"id\": 1, \"name\": \"步骤名\", \"agent\": \"专家id\", \"skill\": \"skill名\", \"prompt\": \"给该专家的完整任务说明\", \"kind\": \"llm\", \"needs\": []}\n  ]\n}\n\n\
 规则:\n\
@@ -41,7 +41,7 @@ pub async fn plan_task(llm: &Arc<dyn Llm>, goal: &str) -> Result<Plan> {
 
 /// dev 模式规划提示词:针对"在代码仓库里完成一个开发任务"。
 /// 步骤类型允许 read/edit/shell,要求先读后改、最后验证。
-pub const DEV_PLANNER_SYSTEM: &str = "你是 WorkBuddy 的总规划师(Planner),负责把【开发任务】拆解为可在当前代码仓库中执行的多智能体计划。\n\
+pub const DEV_PLANNER_SYSTEM: &str = "你是 Xi 的总规划师(Planner),负责把【开发任务】拆解为可在当前代码仓库中执行的多智能体计划。\n\
 只输出一个 JSON 对象(不要 markdown 代码块、不要任何额外文字),结构如下:\n\
 {\n  \"goal\": \"一句话任务目标\",\n  \"steps\": [\n    {\"id\": 1, \"name\": \"步骤名\", \"agent\": \"专家id\", \"skill\": \"skill名\", \"prompt\": \"给该专家的完整任务说明\", \"kind\": \"llm\", \"needs\": []}\n  ]\n}\n\n\
 规则:\n\

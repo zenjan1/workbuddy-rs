@@ -4,7 +4,7 @@ use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use workbuddy_rs::serve::{serve, serve_readonly};
+use xi_rs::serve::{serve, serve_readonly};
 
 struct TestWorkspace {
     path: PathBuf,
@@ -13,7 +13,7 @@ struct TestWorkspace {
 impl TestWorkspace {
     fn new() -> Self {
         let unique = format!(
-            "workbuddy_serve_readonly_{}_{}",
+            "xi_serve_readonly_{}_{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -169,7 +169,7 @@ fn seed_mock_run_history(temp: &TestWorkspace, run_ids: &[&str]) {
         })
         .collect();
 
-    for root in [temp.path().join(".workbuddy"), temp.path().to_path_buf()] {
+    for root in [temp.path().join(".xi"), temp.path().to_path_buf()] {
         fs::create_dir_all(&root).expect("failed to create run storage directory");
 
         fs::write(
@@ -194,8 +194,8 @@ fn serve_readonly_run_lookup_uses_mock_history_and_returns_404_for_unknown_id() 
     let run_ids = ["mock-run-id", "run-2", "run-3", "run-4", "run-5"];
     seed_mock_run_history(&temp, &run_ids);
 
-    let runs_json_path = temp.path().join(".workbuddy").join("runs.json");
-    let runs_jsonl_path = temp.path().join(".workbuddy").join("runs.jsonl");
+    let runs_json_path = temp.path().join(".xi").join("runs.json");
+    let runs_jsonl_path = temp.path().join(".xi").join("runs.jsonl");
     let original_runs_json = fs::read(&runs_json_path).expect("failed to read runs.json");
     let original_runs_jsonl = fs::read(&runs_jsonl_path).expect("failed to read runs.jsonl");
 

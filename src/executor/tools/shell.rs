@@ -1,11 +1,11 @@
-//! Shell tool implementation for WorkBuddy executor.
+//! Shell tool implementation for Xi executor.
 //! Provides controlled command execution capability with safety restrictions.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::time::timeout;
-use workbuddy_core::{Tool, ToolError, ToolResult, ToolSchema};
+use xi_core::{Tool, ToolError, ToolResult, ToolSchema};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use async_trait::async_trait;
@@ -275,7 +275,7 @@ impl Tool for ShellTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use workbuddy_core::Tool;
+    use xi_core::Tool;
     use serde_json::json;
 
     #[tokio::test]

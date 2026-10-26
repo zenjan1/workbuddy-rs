@@ -1,12 +1,12 @@
 [package]
-name = "workbuddy-rs"
+name = "xi"
 version = "0.1.1"
 edition = "2021"
-description = "WorkBuddy 非官方 Rust 复刻:多专家 AI 智能体工作台(规划 -> 并行执行 -> 综合报告)"
+description = "Xi 非官方 Rust 复刻:多专家 AI 智能体工作台(规划 -> 并行执行 -> 综合报告)"
 license = "MIT"
 
 [[bin]]
-name = "workbuddy"
+name = "xi"
 path = "src/main.rs"
 
 [dependencies]

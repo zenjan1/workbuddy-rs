@@ -346,7 +346,7 @@ const MOCK_DEV_PLAN: &str = r#"{"goal":"(mock) 开发任务","steps":[
 ]}"#;
 
 /// Mock 的 edits 输出:在仓库根的 autodev_note.md 追加一行(始终唯一/存在)。
-/// 注意:必须写在 .workbuddy/ 之外——该目录下的文件不算"源码改动"(假成功守卫)。
+/// 注意:必须写在 .xi/ 之外——该目录下的文件不算"源码改动"(假成功守卫)。
 const MOCK_EDITS: &str = r#"{"edits":[{"path":"autodev_note.md","old_string":"","new_string":"(mock) 自主开发步骤完成","replace_all":false}]}"#;
 
 /// Mock 的任务生成输出:一个可重复执行的安全 mock 任务。

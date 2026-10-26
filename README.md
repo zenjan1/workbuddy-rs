@@ -1,8 +1,8 @@
-# WorkBuddy (Rust 复刻)
+# Xi (Rust 复刻)
 
-> WorkBuddy 的非官方 Rust 复刻版:一个**多专家 AI 智能体工作台**。
+> Xi 的非官方 Rust 复刻版:一个**多专家 AI 智能体工作台**。
 > 复刻其核心范式 —— "说出目标 → 规划师拆解 → 多专家智能体并行执行 → 终审综合交付"。
-> 与原项目(腾讯 WorkBuddy 桌面客户端)无任何关联,独立实现。
+> 与原项目(腾讯 Xi 桌面客户端)无任何关联,独立实现。
 
 ## 它做什么
 
@@ -37,14 +37,14 @@
 
 ```bash
 cargo build --release
-# 二进制位于 target/release/workbuddy
+# 二进制位于 target/release/xi
 # 可选:安装到 PATH
-install -m755 target/release/workbuddy ~/.local/bin/workbuddy
+install -m755 target/release/xi ~/.local/bin/xi
 ```
 
 ### 配置
 
-优先级:**命令行 > 环境变量 > 配置文件(`workbuddy.toml` / `~/.config/workbuddy/config.toml`)**。
+优先级:**命令行 > 环境变量 > 配置文件(`xi.toml` / `~/.config/xi/config.toml`)**。
 
 | 环境变量 | 说明 | 默认 |
 |---|---|---|
@@ -52,13 +52,13 @@ install -m755 target/release/workbuddy ~/.local/bin/workbuddy
 | `DASHSCOPE_BASE_URL` | OpenAI 兼容端点 | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
 | `DASHSCOPE_MODEL` | 模型名 | `qwen-plus` |
 
-配置文件示例 `~/.config/workbuddy/config.toml`:
+配置文件示例 `~/.config/xi/config.toml`:
 
 ```toml
 model = "qwen-plus"
 base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 max_parallel = 4
-workspace_dir = "/home/a/.local/share/workbuddy"
+workspace_dir = "/home/a/.local/share/xi"
 request_timeout_secs = 120
 ```
 
@@ -66,33 +66,33 @@ request_timeout_secs = 120
 
 ```bash
 # 执行一个任务(真实 LLM)
-workbuddy run "调研一下 Rust 与 Go 在并发模型上的差异,写一份对比简报"
+xi run "调研一下 Rust 与 Go 在并发模型上的差异,写一份对比简报"
 
 # 自主开发循环(在 git 仓库里持续改代码,详见下文 dev 一节)
-workbuddy dev --tasks 5 --verify "cargo test"
+xi dev --tasks 5 --verify "cargo test"
 
 # 离线演练(不调用 API,用内置 Mock,验证全链路)
-workbuddy run --mock "随便一个任务"
+xi run --mock "随便一个任务"
 
 # 指定模型 / 并行度
-workbuddy run --model qwen-max --parallel 2 "..."
+xi run --model qwen-max --parallel 2 "..."
 
 # 列出历史任务
-workbuddy list
+xi list
 
 # 查看某次任务的计划、步骤产出与报告
-workbuddy show <任务ID>
+xi show <任务ID>
 
 # 查看内置专家目录
-workbuddy agents
+xi agents
 
 # 查看当前生效配置(API key 已脱敏)
-workbuddy config
+xi config
 ```
 
 ## 工作区
 
-每次 `run` 在 `workspace_dir`(默认 `~/.local/share/workbuddy`)下生成一个任务目录:
+每次 `run` 在 `workspace_dir`(默认 `~/.local/share/xi`)下生成一个任务目录:
 
 ```
 <run-id>/
@@ -137,23 +137,23 @@ cargo test        # 33 个单元测试:计划解析/校验、Mock 端到端、de
 
 ## 自主开发模式(dev)
 
-让 WorkBuddy 在**一个 git 仓库**里长期自主开发:从任务清单(backlog)取任务 →
+让 Xi 在**一个 git 仓库**里长期自主开发:从任务清单(backlog)取任务 →
 LLM 规划(read/edit/shell 步骤)→ 修改代码 → 运行验证命令 → 失败自动修复(≤3 次)→
 git 提交 → 下一个任务。支持中断恢复与长期运行(月级)。
 
 ```bash
 cd your-repo            # dev 模式在"当前目录"(或 --repo 指定)的 git 仓库中操作
 
-workbuddy dev --tasks 1 --verify "cargo test"   # 跑 1 个任务,验证命令 cargo test
-workbuddy dev --minutes 43200 --extend 10       # 跑满 30 天;backlog 耗尽时每轮自动生成 10 个新任务
-workbuddy dev --mock                              # 离线演练(内置 Mock LLM,不消耗 API)
+xi dev --tasks 1 --verify "cargo test"   # 跑 1 个任务,验证命令 cargo test
+xi dev --minutes 43200 --extend 10       # 跑满 30 天;backlog 耗尽时每轮自动生成 10 个新任务
+xi dev --mock                              # 离线演练(内置 Mock LLM,不消耗 API)
 ```
 
 ### 参数
 
 | 参数 | 说明 |
 |---|---|
-| `--backlog <path>` | 任务清单文件(默认 `<repo>/.workbuddy/backlog.json`) |
+| `--backlog <path>` | 任务清单文件(默认 `<repo>/.xi/backlog.json`) |
 | `--verify <cmd>` | 全局验证命令(任务未指定自己的 `verify` 时使用) |
 | `--tasks N` | 本次最多完成 N 个任务 |
 | `--minutes M` | 本次最多运行 M 分钟 |
@@ -161,7 +161,7 @@ workbuddy dev --mock                              # 离线演练(内置 Mock LLM
 | `--extend N` | backlog 耗尽时,每轮调用 LLM 生成 N 个新任务并追加进 backlog(可重复补给,支撑月级运行) |
 | `--mock` | 使用内置 Mock LLM(离线演练) |
 
-### backlog 格式(`<repo>/.workbuddy/backlog.json`)
+### backlog 格式(`<repo>/.xi/backlog.json`)
 
 ```json
 {
@@ -186,17 +186,17 @@ workbuddy dev --mock                              # 离线演练(内置 Mock LLM
 - 失败任务自动 `git checkout` + `git clean` 回滚脏改动,不污染下一个任务;
 - 规划器对 LLM 幻觉有容忍修复:未知专家回退、read 缺 path 从 prompt 提取、
   shell 缺 command 从 prompt 提取或降级、文件路径按 basename 唯一匹配兜底;
-- 进度持久化在 `.workbuddy/state.json`(不进 git),中断后重启自动从断点继续;
+- 进度持久化在 `.xi/state.json`(不进 git),中断后重启自动从断点继续;
 - shell 步骤有安全护栏:拒绝 `git push`/`sudo`/`rm -rf /` 等危险命令。
 
 ### 长期运行(supervisor)
 
-`.workbuddy/dev-supervisor.sh` 提供带崩溃自动重启的后台运行:
+`.xi/dev-supervisor.sh` 提供带崩溃自动重启的后台运行:
 
 ```bash
-setsid bash .workbuddy/dev-supervisor.sh > /dev/null 2>&1 &   # 启动(30 天预算 + 自补给)
-tail -f .workbuddy/dev.log                                     # 监控
-kill -- -$(cat .workbuddy/dev.pid)                             # 停止(杀整个进程组)
+setsid bash .xi/dev-supervisor.sh > /dev/null 2>&1 &   # 启动(30 天预算 + 自补给)
+tail -f .xi/dev.log                                     # 监控
+kill -- -$(cat .xi/dev.pid)                             # 停止(杀整个进程组)
 ```
 
 > 注意:dev 模式会**直接修改仓库代码并产生本地提交**。启动前请确认仓库状态干净、
