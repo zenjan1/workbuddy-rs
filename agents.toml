@@ -47,6 +47,9 @@ safety = { path_restrictions = ["**"], require_confirmation = false, max_file_si
 # Agent configurations
 # Each agent defines a model and optional consensus group for critical tasks
 
+[agents]
+reviewer = "reviewer"
+
 [agents.default]
 model = "gpt-4o"
 # Consensus group for critical tasks (exactly 3 models: primary + 2 fallbacks)
