@@ -1,0 +1,224 @@
+use std::collections::BTreeMap;
+use std::env;
+use std::fs;
+use std::io;
+use std::path::PathBuf;
+
+use anyhow::{bail, Context, Result};
+use clap::Subcommand;
+use serde::{Deserialize, Serialize};
+
+const DEFAULT_MEMORY_DIR: &str = ".workbuddy";
+const DEFAULT_MEMORY_FILE: &str = "memory.json";
+
+/// 持久化到磁盘的 JSON 结构。使用 BTreeMap 保证输出稳定。
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct MemoryData {
+    #[serde(default)]
+    memory: BTreeMap<String, String>,
+}
+
+/// 本地记忆库，负责加载、查询和持久化键值对。
+#[derive(Debug)]
+pub struct MemoryStore {
+    path: PathBuf,
+    data: MemoryData,
+}
+
+impl MemoryStore {
+    /// 打开(不存在则创建空数据)指定路径的记忆库。
+    pub fn new(path: impl Into<PathBuf>) -> Result<Self> {
+        let path = path.into();
+        let data = match fs::read_to_string(&path) {
+            Ok(contents) if contents.trim().is_empty() => MemoryData::default(),
+            Ok(contents) => serde_json::from_str(&contents)
+                .with_context(|| format!("failed to parse memory file {}", path.display()))?,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => MemoryData::default(),
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("failed to read memory file {}", path.display()))
+            }
+        };
+        Ok(Self { path, data })
+    }
+
+    /// 添加或更新一条记忆，并立即持久化。
+    pub fn add(&mut self, key: &str, value: String) -> Result<()> {
+        if key.trim().is_empty() {
+            bail!("memory key must not be empty");
+        }
+        self.data.memory.insert(key.to_string(), value);
+        self.save()
+    }
+
+    /// 查询一条记忆；未命中或 key 为空时返回错误。
+    pub fn get(&self, key: &str) -> Result<String> {
+        if key.trim().is_empty() {
+            bail!("memory key must not be empty");
+        }
+        self.data
+            .memory
+            .get(key)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("memory key not found: {key}"))
+    }
+
+    /// 列出所有记忆（按 key 排序）。
+    pub fn list(&self) -> Vec<(String, String)> {
+        self.data
+            .memory
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    fn save(&self) -> Result<()> {
+        if let Some(parent) = self.path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create directory {}", parent.display()))?;
+            }
+        }
+
+        let contents = serde_json::to_string_pretty(&self.data)
+            .context("failed to serialize memory data")?;
+        fs::write(&self.path, contents)
+            .with_context(|| format!("failed to write memory file {}", self.path.display()))
+    }
+}
+
+/// 默认记忆文件路径：优先环境变量 WORKBUDDY_MEMORY_PATH，否则 ~/.workbuddy/memory.json。
+/// 若无法取得家目录，回退到当前目录 .workbuddy/memory.json。
+pub fn default_memory_path() -> PathBuf {
+    if let Some(path) = env::var_os("WORKBUDDY_MEMORY_PATH") {
+        return PathBuf::from(path);
+    }
+
+    let home = env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    home.join(DEFAULT_MEMORY_DIR).join(DEFAULT_MEMORY_FILE)
+}
+
+#[derive(Debug, Subcommand)]
+pub enum MemoryCommand {
+    /// 添加或更新一条记忆
+    Add {
+        /// 记忆键
+        key: String,
+        /// 记忆值
+        value: String,
+    },
+    /// 列出全部记忆
+    List,
+    /// 查询一条记忆
+    Get {
+        /// 记忆键
+        key: String,
+    },
+}
+
+pub fn run(cmd: MemoryCommand) -> Result<()> {
+    let mut store = MemoryStore::new(default_memory_path())?;
+    match cmd {
+        MemoryCommand::Add { key, value } => {
+            store.add(&key, value)?;
+            println!("stored {key}");
+        }
+        MemoryCommand::List => {
+            let entries = store.list();
+            if entries.is_empty() {
+                println!("(empty)");
+            } else {
+                for (key, value) in entries {
+                    println!("{key}={value}");
+                }
+            }
+        }
+        MemoryCommand::Get { key } => {
+            let value = store.get(&key)?;
+            println!("{value}");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_memory_path(label: &str) -> PathBuf {
+        let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "workbuddy-memory-test-{}-{}",
+            std::process::id(),
+            id
+        ));
+        dir.join(format!("{label}.json"))
+    }
+
+    #[test]
+    fn add_updates_and_get_roundtrip() {
+        let path = temp_memory_path("roundtrip");
+        let mut store = MemoryStore::new(&path).unwrap();
+        store.add("project", "workbuddy".to_string()).unwrap();
+        assert_eq!(store.get("project").unwrap(), "workbuddy");
+
+        store.add("project", "workbuddy-v2".to_string()).unwrap();
+        assert_eq!(store.get("project").unwrap(), "workbuddy-v2");
+    }
+
+    #[test]
+    fn list_returns_sorted_entries() {
+        let path = temp_memory_path("list");
+        let mut store = MemoryStore::new(&path).unwrap();
+        store.add("b", "2".to_string()).unwrap();
+        store.add("a", "1".to_string()).unwrap();
+        let entries = store.list();
+        assert_eq!(entries, vec![("a".to_string(), "1".to_string()), ("b".to_string(), "2".to_string())]);
+    }
+
+    #[test]
+    fn persists_to_disk() {
+        let path = temp_memory_path("persist");
+        {
+            let mut store = MemoryStore::new(&path).unwrap();
+            store.add("key", "value".to_string()).unwrap();
+        }
+        let store = MemoryStore::new(&path).unwrap();
+        assert_eq!(store.get("key").unwrap(), "value");
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn missing_file_starts_empty() {
+        let path = temp_memory_path("missing");
+        let store = MemoryStore::new(&path).unwrap();
+        assert!(store.list().is_empty());
+        assert!(store.get("missing").is_err());
+    }
+
+    #[test]
+    fn corrupted_json_returns_error() {
+        let path = temp_memory_path("corrupted");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "{not valid json").unwrap();
+        let err = MemoryStore::new(&path).unwrap_err();
+        assert!(err.to_string().contains("failed to parse memory file"));
+    }
+
+    #[test]
+    fn empty_key_is_rejected() {
+        let path = temp_memory_path("empty-key");
+        let mut store = MemoryStore::new(&path).unwrap();
+        let err = store.add("", "value".to_string()).unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
+
+        let err = store.get("   ").unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
+    }
+}

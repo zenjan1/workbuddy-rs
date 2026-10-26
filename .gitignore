@@ -8,3 +8,10 @@
 .workbuddy/backlog.json.tmp
 .workbuddy/llm.env
 .workbuddy/.fuse_hidden*
+.xi/llm.env
+.xi/llm.env.*.bak
+.xi/state.json
+.xi/dev.pid
+.xi/dev.log
+.xi/memory.json
+.xi/memory.rs.orphan.bak
