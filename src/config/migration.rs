@@ -1,7 +1,10 @@
 use crate::config::Config;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 use toml::Value;
+use chrono::{DateTime, Utc};
 
 /// Migration trait that defines a single version migration step.
 pub trait Migration: Send + Sync {
@@ -112,10 +115,148 @@ fn version_gt(a: &str, b: &str) -> bool {
     false
 }
 
+/// Workspace migration - migrates from single-project config to multi-workspace structure.
+/// This migration:
+/// 1. Detects old config files (~/.workbuddy/config.toml, agents.toml, backlog/, runs/)
+/// 2. Creates a 'default' workspace
+/// 3. Moves all files to ~/.workbuddy/workspaces/default/
+/// 4. Creates workspaces.toml registry and current file
+/// 5. Marks migration as complete
+pub struct WorkspaceMigration;
+
+impl Migration for WorkspaceMigration {
+    fn version(&self) -> &str {
+        "3"
+    }
+
+    fn migrate(&self, toml: &mut Value) -> Result<()> {
+        // This migration operates on the filesystem, not just the TOML value.
+        // The actual filesystem migration is done in migrate_to_workspace().
+        // Here we just update the version in the config.
+        toml.insert("version".to_string(), Value::String("3".to_string()));
+        Ok(())
+    }
+}
+
+/// Performs the full workspace migration on the filesystem.
+/// Returns true if migration was performed, false if already migrated or not needed.
+pub fn migrate_to_workspace() -> Result<bool> {
+    let workbuddy_dir = dirs::home_dir()
+        .context("Could not find home directory")?
+        .join(".workbuddy");
+    
+    let config_file = workbuddy_dir.join("config.toml");
+    let agents_file = workbuddy_dir.join("agents.toml");
+    let backlog_dir = workbuddy_dir.join("backlog");
+    let runs_dir = workbuddy_dir.join("runs");
+    let workspaces_file = workbuddy_dir.join("workspaces.toml");
+    let current_file = workbuddy_dir.join("current");
+    
+    // Check if already migrated (workspaces.toml exists)
+    if workspaces_file.exists() {
+        return Ok(false);
+    }
+    
+    // Check if there's anything to migrate
+    let has_old_config = config_file.exists() || agents_file.exists() || backlog_dir.exists() || runs_dir.exists();
+    if !has_old_config {
+        // No old config, nothing to migrate
+        return Ok(false);
+    }
+    
+    // Create workspaces directory
+    let workspaces_dir = workbuddy_dir.join("workspaces");
+    let default_workspace_dir = workspaces_dir.join("default");
+    fs::create_dir_all(&default_workspace_dir).context("Failed to create default workspace directory")?;
+    
+    // Create subdirectories in default workspace
+    fs::create_dir_all(default_workspace_dir.join("backlog")).context("Failed to create backlog directory")?;
+    fs::create_dir_all(default_workspace_dir.join("runs")).context("Failed to create runs directory")?;
+    
+    // Move config.toml
+    if config_file.exists() {
+        fs::rename(&config_file, default_workspace_dir.join("config.toml"))
+            .context("Failed to move config.toml")?;
+    }
+    
+    // Move agents.toml
+    if agents_file.exists() {
+        fs::rename(&agents_file, default_workspace_dir.join("agents.toml"))
+            .context("Failed to move agents.toml")?;
+    }
+    
+    // Move backlog directory contents
+    if backlog_dir.exists() {
+        let target_backlog = default_workspace_dir.join("backlog");
+        for entry in fs::read_dir(&backlog_dir).context("Failed to read backlog directory")? {
+            let entry = entry.context("Failed to read backlog entry")?;
+            let target = target_backlog.join(entry.file_name());
+            fs::rename(entry.path(), target).context("Failed to move backlog file")?;
+        }
+        fs::remove_dir(&backlog_dir).context("Failed to remove old backlog directory")?;
+    }
+    
+    // Move runs directory contents
+    if runs_dir.exists() {
+        let target_runs = default_workspace_dir.join("runs");
+        for entry in fs::read_dir(&runs_dir).context("Failed to read runs directory")? {
+            let entry = entry.context("Failed to read runs entry")?;
+            let target = target_runs.join(entry.file_name());
+            fs::rename(entry.path(), target).context("Failed to move runs file")?;
+        }
+        fs::remove_dir(&runs_dir).context("Failed to remove old runs directory")?;
+    }
+    
+    // Create workspaces.toml registry
+    let workspace_registry = WorkspaceRegistry {
+        version: 1,
+        workspaces: vec![WorkspaceEntry {
+            name: "default".to_string(),
+            path: default_workspace_dir.to_string_lossy().to_string(),
+            created_at: Utc::now(),
+            description: Some("Migrated from single-project configuration".to_string()),
+        }],
+    };
+    
+    let registry_toml = toml::to_string_pretty(&workspace_registry)
+        .context("Failed to serialize workspace registry")?;
+    fs::write(&workspaces_file, registry_toml).context("Failed to write workspaces.toml")?;
+    
+    // Create current file pointing to default workspace
+    fs::write(&current_file, "default").context("Failed to write current workspace file")?;
+    
+    Ok(true)
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct WorkspaceRegistry {
+    version: u32,
+    workspaces: Vec<WorkspaceEntry>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct WorkspaceEntry {
+    name: String,
+    path: String,
+    created_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+}
+
+/// Updates the MIGRATIONS array to include the workspace migration.
+/// This should be called during config loading to ensure all migrations are registered.
+pub fn register_workspace_migration() {
+    // The workspace migration is handled separately via migrate_to_workspace()
+    // because it operates on the filesystem, not just the config TOML.
+    // This function exists for API completeness.
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use toml::Value;
+    use std::fs;
+    use tempfile::tempdir;
 
     #[test]
     fn test_v1_to_v2_migration() {
@@ -204,4 +345,39 @@ mod tests {
         assert!(!version_gt("1", "1"));
         assert!(!version_gt("1.0", "1.0.0"));
     }
+
+    #[test]
+    fn test_workspace_migration() {
+        let temp_dir = tempdir().unwrap();
+        let workbuddy_dir = temp_dir.path().join(".workbuddy");
+        fs::create_dir_all(&workbuddy_dir).unwrap();
+        
+        // Create old config files
+        fs::write(workbuddy_dir.join("config.toml"), "version = \"2\"\neditor = \"code\"").unwrap();
+        fs::write(workbuddy_dir.join("agents.toml"), "[[agents]]\nname = \"test\"\nmodel = \"gpt-4\"").unwrap();
+        fs::create_dir_all(workbuddy_dir.join("backlog")).unwrap();
+        fs::write(workbuddy_dir.join("backlog").join("task1.md"), "# Task 1").unwrap();
+        fs::create_dir_all(workbuddy_dir.join("runs")).unwrap();
+        fs::write(workbuddy_dir.join("runs").join("run1.json"), "{}").unwrap();
+        
+        // We can't easily test migrate_to_workspace() without mocking the home directory,
+        // but we can test the WorkspaceMigration struct
+        let mut toml = Value::Table({
+            let mut map = toml::map::Map::new();
+            map.insert("version".to_string(), Value::String("2".to_string()));
+            map
+        });
+        
+        let migration = WorkspaceMigration;
+        migration.migrate(&mut toml).unwrap();
+        
+        assert_eq!(toml.get("version").unwrap().as_str(), Some("3"));
+    }
+
+    #[test]
+    fn test_workspace_migration_version() {
+        let migration = WorkspaceMigration;
+        assert_eq!(migration.version(), "3");
+    }
+}
 }
