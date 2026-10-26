@@ -352,6 +352,11 @@ enum Cmd {
         #[arg(long)]
         uninstall: bool,
     },
+    /// 列出所有已安装的扩展
+    Extensions,
+    /// 外部扩展(内核驱动模块):扫描 ~/.xi/bin/ 下 xi-* 可执行文件
+    #[command(external_subcommand)]
+    Ext(Vec<String>),
 }
 
 fn resolve_task_run<'a>(
@@ -720,7 +725,112 @@ async fn main() -> Result<()> {
             }
             hooks::install_hooks(pre_commit, pre_push, uninstall, &cfg.repo_dir)
         },
+        Cmd::Extensions => {
+            let ext_dir = extensions_dir();
+            if !ext_dir.is_dir() {
+                println!("尚无已安装扩展(目录 {} 不存在)", ext_dir.display());
+                return Ok(());
+            }
+            let mut found = false;
+            for entry in std::fs::read_dir(&ext_dir)? {
+                let entry = entry?;
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with("xi-") && entry.path().is_file() {
+                    let desc = read_extension_desc(&entry.path());
+                    println!("  {}  {}", name, desc);
+                    found = true;
+                }
+            }
+            if !found {
+                println!("目录 {} 下无 xi-* 可执行文件", ext_dir.display());
+            }
+            Ok(())
+        }
+        Cmd::Ext(args) => {
+            if args.is_empty() {
+                anyhow::bail!("缺少扩展子命令");
+            }
+            let cmd_name = &args[0];
+            let ext_path = find_extension(cmd_name);
+            match ext_path {
+                Some(path) => {
+                    let status = std::process::Command::new(&path)
+                        .args(&args[1..])
+                        .env("XI_HOME", extensions_dir())
+                        .env("XI_BIN", std::env::current_exe().unwrap_or_default())
+                        .status()?;
+                    if !status.success() {
+                        std::process::exit(status.code().unwrap_or(1));
+                    }
+                    Ok(())
+                }
+                None => {
+                    let ext_dir = extensions_dir();
+                    let available: Vec<String> = if ext_dir.is_dir() {
+                        std::fs::read_dir(&ext_dir)?
+                            .filter_map(|e| e.ok())
+                            .map(|e| e.file_name().to_string_lossy().to_string())
+                            .filter(|n| n.starts_with("xi-") && n != "xi-hello.toml" && n != "xi-echo.toml")
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    anyhow::bail!(
+                        "未知子命令 '{}'。可用扩展: {}(用 `xi extensions` 列出)",
+                        cmd_name,
+                        if available.is_empty() { "无".to_string() } else { available.join(", ") }
+                    )
+                }
+            }
+        }
     }
+}
+
+/// 扩展目录: ~/.xi/bin/(可用 XI_HOME 覆盖)
+fn extensions_dir() -> PathBuf {
+    if let Ok(home) = std::env::var("XI_HOME") {
+        return PathBuf::from(home);
+    }
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".xi").join("bin")
+}
+
+/// 查找扩展可执行文件: xi-<name>
+fn find_extension(name: &str) -> Option<PathBuf> {
+    let ext_dir = extensions_dir();
+    let bin_name = format!("xi-{}", name);
+    let path = ext_dir.join(&bin_name);
+    if path.is_file() {
+        return Some(path);
+    }
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in path_var.split(':') {
+            let p = PathBuf::from(dir).join(&bin_name);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// 读取扩展的 manifest.toml 描述(如果存在)
+fn read_extension_desc(bin_path: &std::path::Path) -> String {
+    let manifest = bin_path.with_extension("toml");
+    if manifest.is_file() {
+        if let Ok(content) = std::fs::read_to_string(&manifest) {
+            for line in content.lines() {
+                if let Some(val) = line.strip_prefix("description") {
+                    if let Some(val) = val.strip_prefix("=") {
+                        return val.trim().trim_matches('"').to_string();
+                    }
+                }
+            }
+        }
+    }
+    String::new()
 }
 
 fn run_memory_command(action: MemoryAction, cfg: &Config) -> Result<()> {
