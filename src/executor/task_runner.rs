@@ -326,8 +326,10 @@ impl Default for TimeoutGuardBuilder {
 /// Budget tracker for task-level LLM call budget enforcement
 #[derive(Debug, Clone, Default)]
 pub struct BudgetTracker {
-    /// Cumulative tokens used so far
-    pub total_tokens: u32,
+    /// Cumulative input tokens used so far
+    pub total_input_tokens: u32,
+    /// Cumulative output tokens used so far
+    pub total_output_tokens: u32,
     /// Cumulative cost in USD so far
     pub total_cost_usd: f64,
     /// Token budget limit (None = unlimited)
@@ -340,7 +342,8 @@ impl BudgetTracker {
     /// Create a new BudgetTracker from TaskSpec budget limits
     pub fn from_task_spec(spec: &TaskSpec) -> Self {
         Self {
-            total_tokens: 0,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
             total_cost_usd: 0.0,
             max_tokens: spec.max_tokens,
             max_cost_usd: spec.max_cost_usd,
@@ -349,9 +352,10 @@ impl BudgetTracker {
 
     /// Check if adding the given tokens/cost would exceed budget
     /// Returns BudgetError if budget would be exceeded
-    pub fn check_budget(&self, additional_tokens: u32, additional_cost_usd: f64) -> Result<(), BudgetError> {
+    pub fn check_budget(&self, additional_input_tokens: u32, additional_output_tokens: u32, additional_cost_usd: f64) -> Result<(), BudgetError> {
+        let additional_tokens = additional_input_tokens.saturating_add(additional_output_tokens);
         if let Some(limit) = self.max_tokens {
-            let projected = self.total_tokens.saturating_add(additional_tokens);
+            let projected = self.total_input_tokens.saturating_add(self.total_output_tokens).saturating_add(additional_tokens);
             if projected > limit {
                 return Err(BudgetError::TokenBudgetExceeded {
                     used: projected,
@@ -374,14 +378,25 @@ impl BudgetTracker {
     }
 
     /// Record actual consumption from an LLM call
-    pub fn record_consumption(&mut self, tokens: u32, cost_usd: f64) {
-        self.total_tokens = self.total_tokens.saturating_add(tokens);
+    pub fn record_consumption(&mut self, input_tokens: u32, output_tokens: u32, cost_usd: f64) {
+        self.total_input_tokens = self.total_input_tokens.saturating_add(input_tokens);
+        self.total_output_tokens = self.total_output_tokens.saturating_add(output_tokens);
         self.total_cost_usd += cost_usd;
     }
 
-    /// Get current cumulative tokens
+    /// Get current cumulative input tokens
+    pub fn total_input_tokens(&self) -> u32 {
+        self.total_input_tokens
+    }
+
+    /// Get current cumulative output tokens
+    pub fn total_output_tokens(&self) -> u32 {
+        self.total_output_tokens
+    }
+
+    /// Get current cumulative total tokens (input + output)
     pub fn total_tokens(&self) -> u32 {
-        self.total_tokens
+        self.total_input_tokens.saturating_add(self.total_output_tokens)
     }
 
     /// Get current cumulative cost
@@ -409,8 +424,12 @@ pub struct TaskArtifact {
     pub exit_code: Option<i32>,
     /// Path to any output files generated
     pub output_files: Vec<PathBuf>,
-    /// Token usage statistics
+    /// Total tokens used (input + output)
     pub tokens_used: u32,
+    /// Input tokens used
+    pub input_tokens: u32,
+    /// Output tokens used
+    pub output_tokens: u32,
     /// Cost in USD
     pub cost_usd: f64,
 }
@@ -460,7 +479,7 @@ impl TaskRunner {
 
         // Record budget consumption if any
         if artifact.tokens_used > 0 || artifact.cost_usd > 0.0 {
-            self.budget_tracker.record_consumption(artifact.tokens_used, artifact.cost_usd);
+            self.budget_tracker.record_consumption(artifact.input_tokens, artifact.output_tokens, artifact.cost_usd);
         }
 
         Ok(artifact)
@@ -470,12 +489,18 @@ impl TaskRunner {
     async fn load_cached_artifact(&self, step: &StepRecord) -> TaskArtifact {
         // In a real implementation, this would load from the artifact directory
         // For now, reconstruct from StepRecord fields
+        let total_tokens = step.tokens_used.unwrap_or(0);
+        // For backward compatibility, if input/output tokens not stored, split evenly
+        let input_tokens = step.input_tokens.unwrap_or(total_tokens / 2);
+        let output_tokens = step.output_tokens.unwrap_or(total_tokens - input_tokens);
         TaskArtifact {
             stdout: step.stdout.clone().unwrap_or_default(),
             stderr: step.stderr.clone().unwrap_or_default(),
             exit_code: step.exit_code,
             output_files: step.output_files.clone().unwrap_or_default(),
-            tokens_used: step.tokens_used.unwrap_or(0),
+            tokens_used: total_tokens,
+            input_tokens,
+            output_tokens,
             cost_usd: step.cost_usd.unwrap_or(0.0),
         }
     }
@@ -498,6 +523,8 @@ impl TaskRunner {
             step.exit_code = artifact.exit_code;
             step.output_files = Some(artifact.output_files.clone());
             step.tokens_used = Some(artifact.tokens_used);
+            step.input_tokens = Some(artifact.input_tokens);
+            step.output_tokens = Some(artifact.output_tokens);
             step.cost_usd = Some(artifact.cost_usd);
             artifacts.push(artifact);
         }
