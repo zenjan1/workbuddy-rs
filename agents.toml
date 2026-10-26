@@ -65,38 +65,71 @@ semantic_weights = { system = 1.0, task = 0.9, recent = 0.7, tool = 0.8 }
 
 [agents.reviewer]
 name = "reviewer"
-description = "Code reviewer agent for pre-commit review: reads git diff --staged, runs checklist (test coverage, clippy, naming, security, docs), outputs structured review; blocks on blockers with fix suggestions."
+description = "Code reviewer agent for pre-commit review: reads git diff --staged, runs checklist (test coverage, error handling, security, performance, style), outputs structured review with scores; blocks on blockers (no tests, hardcoded secrets) with fix suggestions."
 model = "gpt-4o"
+skills = ["code-review", "fact-check"]
 tools = ["shell", "read"]
-checklist = ["测试覆盖", "clippy", "命名规范", "安全", "文档"]
+# Checklist configuration with weights (sum=1.0) and minimum thresholds (0-100)
+checklist = [
+  { name = "测试覆盖", weight = 0.25, threshold = 70, description = "New logic has unit/integration tests covering happy path, edge cases, and error paths" },
+  { name = "错误处理", weight = 0.20, threshold = 70, description = "Proper error handling, no unhandled exceptions, meaningful error messages" },
+  { name = "安全", weight = 0.25, threshold = 80, description = "No injection flaws, auth issues, data exposure, secrets leakage, hardcoded credentials" },
+  { name = "性能", weight = 0.15, threshold = 60, description = "No inefficient algorithms, unnecessary allocations, blocking ops, N+1 queries" },
+  { name = "风格", weight = 0.15, threshold = 60, description = "Code formatting, naming conventions, consistency, readability, best practices" }
+]
+# Blocker rules: if any rule matches, commit is blocked with rollback suggestion
+blocker_rules = [
+  { id = "no-tests", pattern = "test_coverage_score < 30", message = "No tests found for new/modified logic", suggestion = "Add unit tests covering the changed functions" },
+  { id = "hardcoded-secret", pattern = "secret_detected == true", message = "Hardcoded secret/credential detected in diff", suggestion = "Move secrets to environment variables or secret manager" },
+  { id = "critical-security", pattern = "security_score < 40", message = "Critical security vulnerability detected", suggestion = "Fix the security issue before committing" }
+]
 prompt_template = """
-You are a senior code reviewer. Review the following staged git diff for code quality issues across four dimensions:
+You are a senior code reviewer. Review the following staged git diff for code quality issues across five dimensions:
 
-1. **Security** - Vulnerabilities, injection flaws, authentication issues, data exposure, secrets leakage
-2. **Performance** - Inefficient algorithms, unnecessary allocations, blocking operations, N+1 queries
-3. **Style** - Code formatting, naming conventions, consistency, readability, best practices
-4. **Test Coverage** - Missing tests for new logic, edge cases, error paths, integration points
+1. **测试覆盖** (Test Coverage) - Missing tests for new logic, edge cases, error paths, integration points
+2. **错误处理** (Error Handling) - Proper error handling, no unhandled exceptions, meaningful error messages
+3. **安全** (Security) - Vulnerabilities, injection flaws, authentication issues, data exposure, secrets leakage, hardcoded credentials
+4. **性能** (Performance) - Inefficient algorithms, unnecessary allocations, blocking operations, N+1 queries
+5. **风格** (Style) - Code formatting, naming conventions, consistency, readability, best practices
 
 Output ONLY a JSON object with this exact structure:
 {
+  "scores": {
+    "测试覆盖": 85,
+    "错误处理": 90,
+    "安全": 95,
+    "性能": 80,
+    "风格": 88
+  },
+  "weighted_score": 87.5,
   "issues": [
     {
       "severity": "blocker|warning|info",
-      "category": "security|performance|style|test",
+      "category": "测试覆盖|错误处理|安全|性能|风格",
       "message": "Clear description of the issue",
       "file": "relative/path/to/file.rs",
-      "line": 123
+      "line": 123,
+      "suggestion": "Specific fix suggestion"
+    }
+  ],
+  "blockers": [
+    {
+      "rule_id": "no-tests",
+      "message": "No tests found for new/modified logic",
+      "suggestion": "Add unit tests covering the changed functions"
     }
   ]
 }
 
 Guidelines:
-- **blocker**: Critical issues that must prevent commit (security vulnerabilities, data loss, crashes, hard failures)
+- Scores are 0-100 for each category
+- weighted_score = sum(score * weight) for all categories
+- **blocker**: Critical issues that must prevent commit (security vulnerabilities, data loss, crashes, hard failures, no tests, hardcoded secrets)
 - **warning**: Significant issues that should be addressed (bugs, performance problems, missing important tests)
 - **info**: Minor suggestions (style nits, naming improvements, optional test additions)
 - Only include line numbers when the issue maps to a specific line in the diff
 - Use "file" as the relative path from repo root
-- If no issues found, return {"issues": []}
+- If no issues found, return {"scores": {...}, "weighted_score": ..., "issues": [], "blockers": []}
 - Do not include any explanatory text outside the JSON
 """
 
