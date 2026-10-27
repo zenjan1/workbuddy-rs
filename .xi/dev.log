@@ -125021,3 +125021,9 @@ Removing tests/memory_cli.rs
 [dev] === 任务 275/41: 结构化 JSON Lines 日志输出选项 ===
 [dev] 规划失败(第 1 次): 步骤 1 是 read 类型但缺少 path
 [dev] 规划失败(第 2 次): 步骤 1 是 read 类型但缺少 path
+[supervisor] 2026-10-27 08:23:57 启动 pid=1337707 repo=/run/media/a/work/workbuddy-rs
+[supervisor] 启动前工作区不干净(未提交改动保留,交由 dev 循环处理)
+[dev] 仓库: /run/media/a/work/workbuddy-rs | backlog 41 项 | 已完成 274 | 预算: 任务 ∞ 分钟数 43200
+[dev] git status:  M .xi/dev.log
+[dev] git status: ?? .xi/.fuse_hidden0027e3dc00002cce
+[dev] backlog 耗尽,第 1 轮自动生成 10 个新任务...
