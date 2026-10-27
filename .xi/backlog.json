@@ -1,6 +1,76 @@
 {
   "tasks": [
     {
+      "title": "模块 API 规范: manifest.toml schema + 校验",
+      "description": "定义模块 manifest.toml 完整 schema:name/version/description/author/binary(可执行文件名)/requires_xi_version(semver range)/dependencies(模块名[])/permissions(文件访问/网络/子进程)/events(订阅的事件[])/provides(提供的事件[])。实现 `xi module validate` 校验所有已安装模块的 manifest。参考 Linux kernel module 的 MODULE_LICENSE/MODULE_INFO 机制。加单测(有效/无效 manifest)。",
+      "priority": 90,
+      "skip": false,
+      "verify": "cargo test"
+    },
+    {
+      "title": "xi install --update: 内核自更新",
+      "description": "实现 `xi install --update` 子命令:1) 查 GitHub API 获取 latest release 2) 与当前版本比较 3) 下载新二进制 4) 原子替换(rm+cp,防 Text file busy) 5) 重启守护进程(如果有)。参考 rustup self-update 机制。加单测(mock GitHub API)。",
+      "priority": 91,
+      "skip": false,
+      "verify": "cargo test"
+    },
+    {
+      "title": "GitHub Actions: 自动构建多平台 Release",
+      "description": "配置 .github/workflows/release.yml:push tag 时自动构建 x86_64+aarch64, Linux+macOS 二进制。用 cross(cross-compilation)或 GitHub 多 runner。产物:xi-<os>-<arch>.tar.gz + sha256sum。自动创建 GitHub Release + 上传附件。参考 rustup/cargo 的 release 流程。需配置:rust toolchain、cross、signing。",
+      "priority": 92,
+      "skip": false,
+      "verify": "cargo test"
+    },
+    {
+      "title": "一键安装脚本: curl -sL xi.sh/install | sh",
+      "description": "编写 install.sh 安装脚本:1) 检测 OS(Linux/macOS)+架构(x86_64/aarch64) 2) 从 GitHub Releases 下载 xi 内核二进制 3) 创建 ~/.xi/ 目录 4) 注册 xi 到 PATH(symlink 到 ~/.local/bin/) 5) 下载预置模型(可选 --no-model) 6) 初始化配置(检测已有 LLM key) 7) 验证(xi health)。参考 rustup/curl 安装模式。加 CI 测试。",
+      "priority": 93,
+      "skip": false,
+      "verify": "bash install.sh --test"
+    },
+    {
+      "title": "预置小模型: Qwen2.5-1.5B 内核智能",
+      "description": "实现内核智能(Kernel Intelligence):安装时自动下载 Qwen2.5-1.5B-Instruct-GGUF(Q4_K_M,~1GB)到 ~/.xi/models/。提供 xi::intelligence 模块:简单任务分类/优先级判断/摘要/健康检查。离线可用(不依赖网络)。接口:xi::intelligence::classify(task) -> Priority, xi::intelligence::summarize(text) -> String。参考 Ollama 的默认模型机制。",
+      "priority": 94,
+      "skip": false,
+      "verify": "cargo test"
+    },
+    {
+      "title": "xi model providers: 云端提供商管理",
+      "description": "实现 `xi model providers` 子命令组:list(列出已配置提供商)/add(添加)/remove(删除)/test(测试连通性)/set-default(设默认)。预置:OpenRouter/DeepSeek/火山方舟/GitCode。配置存 ~/.xi/providers.toml。每个 provider 含:name/base_url/api_key_env/model_prefix。参考 Ollama 的 registry 机制。加单测。",
+      "priority": 95,
+      "skip": false,
+      "verify": "cargo test"
+    },
+    {
+      "title": "xi model serve: 本地推理服务(Ollama 兼容 API)",
+      "description": "实现 `xi model serve <name>` 子命令:启动本地 HTTP 推理服务,兼容 Ollama API(/api/generate、/api/chat)。底层调用 llama.cpp(C FFI)或 candle(Rust 原生)做推理。支持:多模型并发、流式输出(SSE)、上下文窗口配置。参考 Ollama server + vLLM 架构。加集成测试(mock 模型加载)。",
+      "priority": 96,
+      "skip": false,
+      "verify": "cargo test"
+    },
+    {
+      "title": "xi model pull: 从 HuggingFace/ModelScope 下载模型",
+      "description": "实现 `xi model pull <name>` 子命令:从 HuggingFace(https://huggingface.co)或 ModelScope(国内镜像)下载 GGUF/Safetensors 模型到 ~/.xi/models/。支持:断点续传(Range header)、进度条(indicatif)、SHA256 校验、自动解压。模型名格式:owner/repo:tag(如 Qwen/Qwen2.5-1.5B-Instruct-GGUF:Q4_K_M)。参考 Ollama 的 pull 机制。加单测(mock HTTP)。",
+      "priority": 97,
+      "skip": false,
+      "verify": "cargo test"
+    },
+    {
+      "title": "xi model list: 列出已下载+可用模型",
+      "description": "实现 `xi model list` 子命令:扫描 ~/.xi/models/ 列出已下载模型(名称/大小/架构/参数量)+ 列出云端可用模型(从 provider API 查询)。输出表格格式。参考 Ollama 的 `ollama list`。模型目录结构:~/.xi/models/<provider>/<name>/model.gguf + config.json。加单测(mock 目录结构)。",
+      "priority": 98,
+      "skip": false,
+      "verify": "cargo test"
+    },
+    {
+      "title": "事件总线: 模块间 pub/sub 解耦通信",
+      "description": "实现内核事件总线(EventBus):发布/订阅模式,JSON 消息格式。模块注册 handler(event_name, callback),其他模块 publish(event_name, payload)。参考 Linux netlink/udev 机制。需支持:同步/异步发布、通配符匹配(*、dev.*)、事件过滤器。内核提供 xi::event::{Bus, Handler} API。加单测:发布→订阅收到/通配符/过滤。",
+      "priority": 99,
+      "skip": false,
+      "verify": "cargo test"
+    },
+    {
       "description": "在 src/main.rs 的 Run 分支结束后,打印一行 `完整报告: {workspace_dir}/{run_id}/report.md`(workspace_dir 来自 cfg,run_id 来自 RunRecord.id),方便用户查看。不改变退出码语义。加/调整单测确保 Run 分支行为不变。",
       "priority": 100,
       "skip": false,
