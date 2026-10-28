@@ -263,20 +263,6 @@ impl Llm for OpenAiCompat {
                         continue;
                     }
                 };
-                {
-                // 2) 读响应体(已在上一步完成,此处保留结构兼容)
-                let text = match Ok::<String, reqwest::Error>(text) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        last_err = format!("读取响应体失败(传输): {e}");
-                        eprintln!(
-                            "[llm] 第 {} 次读体失败: {}",
-                            attempt + 1,
-                            clip(&last_err, 120)
-                        );
-                        continue;
-                    }
-                };
                 // 3) 非 2xx:429/5xx 可重试,其余(4xx 业务错误,如 401/400)直接返回
                 if !status.is_success() {
                     if matches!(status.as_u16(), 429 | 500 | 502 | 503) {
