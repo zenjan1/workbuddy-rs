@@ -228,17 +228,23 @@ impl Llm for OpenAiCompat {
                     eprintln!("[llm] 第 {attempt} 次重试,等待 {backoff}s...");
                     tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
                 }
-                // 1) 发送(传输错误可重试)
-                let resp = match self
-                    .client
-                    .post(&url)
-                    .bearer_auth(&key)
-                    .json(&payload)
-                    .send()
-                    .await
-                {
-                    Ok(r) => r,
-                    Err(e) => {
+                // 1) 发送 + 读响应体(硬超时,防校园网半开 TCP 连接无限挂起)
+                let timeout_dur = std::time::Duration::from_secs(self.cfg.request_timeout_secs);
+                let body_fut = async {
+                    let resp = self
+                        .client
+                        .post(&url)
+                        .bearer_auth(&key)
+                        .json(&payload)
+                        .send()
+                        .await?;
+                    let status = resp.status();
+                    let text = resp.text().await?;
+                    Ok::<(reqwest::StatusCode, String), reqwest::Error>((status, text))
+                };
+                let (status, text) = match tokio::time::timeout(timeout_dur, body_fut).await {
+                    Ok(Ok(st_text)) => st_text,
+                    Ok(Err(e)) => {
                         last_err = format!("LLM 请求失败(传输): {e}");
                         eprintln!(
                             "[llm] 第 {} 次请求失败: {}",
@@ -247,10 +253,19 @@ impl Llm for OpenAiCompat {
                         );
                         continue;
                     }
+                    Err(_) => {
+                        last_err = format!("LLM 请求超时({}s)", self.cfg.request_timeout_secs);
+                        eprintln!(
+                            "[llm] 第 {} 次请求超时: {}",
+                            attempt + 1,
+                            clip(&last_err, 120)
+                        );
+                        continue;
+                    }
                 };
-                let status = resp.status();
-                // 2) 读响应体(传输错误可重试)
-                let text = match resp.text().await {
+                {
+                // 2) 读响应体(已在上一步完成,此处保留结构兼容)
+                let text = match Ok::<String, reqwest::Error>(text) {
                     Ok(t) => t,
                     Err(e) => {
                         last_err = format!("读取响应体失败(传输): {e}");
