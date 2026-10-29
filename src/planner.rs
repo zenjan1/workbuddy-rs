@@ -70,7 +70,10 @@ pub async fn plan_dev_task(llm: &Arc<dyn Llm>, goal: &str, filelist: &str) -> Re
         .replace("{catalog}", &agents::catalog_text(None));
     let user = format!("开发任务(在当前代码仓库中完成):\n{}\n\n请输出 JSON 计划。", goal);
     let raw = llm.chat(&system, &user).await?;
-    Plan::from_llm(goal, &raw.text)
+    let mut p = Plan::parse_from_llm(goal, &raw.text)?;
+    repair_dev_plan(&mut p)?;
+    p.validate()?;
+    Ok(p)
 }
 
 /// 根据步骤描述中的关键词自动注入 tool 字段。
