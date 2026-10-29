@@ -561,26 +561,14 @@ pub async fn run_dev_loop(
 
     // done_set 同时含 done 与 failed:重启后不重复跑已失败任务(省 token);
     // 确需重试时用 --retry-failed 从 failed 移回待办。
-    // 兼容旧版本 state.json 中纯数字 backlog[0] 记录:统一解析为 slug id。
+    // 旧版本 state.json 中 backlog[N] 格式:不再映射到当前 task_ids(N 指向旧 backlog
+    // 位置,backlog 再生成后索引已错位,映射会导致新任务被误标为已完成)。
+    // 直接保留原字符串,不会匹配任何当前任务 slug。
     let mut done_set: HashSet<String> = state
         .done
         .iter()
         .chain(state.failed.iter())
-        .map(|id| {
-            let raw = id.as_str();
-            if let Some(idx) = raw
-                .strip_prefix("backlog[")
-                .and_then(|s| s.strip_suffix(']'))
-                .and_then(|s| s.parse::<usize>().ok())
-            {
-                task_ids
-                    .get(idx)
-                    .cloned()
-                    .unwrap_or_else(|| id.clone())
-            } else {
-                id.clone()
-            }
-        })
+        .cloned()
         .collect();
 
     loop {
