@@ -352,6 +352,8 @@ enum Cmd {
         #[arg(long)]
         uninstall: bool,
     },
+    /// 系统信息:内核版本/架构/组件状态/已加载模块/模型配置
+    Sysinfo,
     /// 列出所有已安装的扩展
     Extensions,
     /// 外部扩展(内核驱动模块):扫描 ~/.xi/bin/ 下 xi-* 可执行文件
@@ -725,6 +727,7 @@ async fn main() -> Result<()> {
             }
             hooks::install_hooks(pre_commit, pre_push, uninstall, &cfg.repo_dir)
         },
+        Cmd::Sysinfo => cmd_sysinfo(&cfg),
         Cmd::Extensions => {
             let ext_dir = extensions_dir();
             if !ext_dir.is_dir() {
@@ -1239,6 +1242,94 @@ fn find_config_path() -> Result<std::path::PathBuf> {
     }
     let cwd = std::env::current_dir()?;
     Ok(cwd.join("config.toml"))
+}
+
+fn cmd_sysinfo(cfg: &Config) -> Result<()> {
+    let version = env!("CARGO_PKG_VERSION");
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+    let home = std::env::var("HOME").unwrap_or_else(|_| "~".into());
+    let xi_home = format!("{home}/.xi");
+
+    println!("xi (羲) — AI 原生微内核操作系统");
+    println!("====================================");
+    println!();
+    println!("内核版本:    v{version}");
+    println!("平台:        {os}/{arch}");
+    println!("XI_HOME:     {xi_home}");
+    println!();
+    println!("内核组件:");
+    println!("  [✓] 进程调度   (Task SCHED)    — 任务队列/优先级/并发控制");
+    println!("  [✓] 模块加载   (Module LOADER) — ~/.xi/bin/ 扫描+分发");
+    println!("  [✓] LLM 运行时 (LLM RT)        — 多 provider 路由/token 计量");
+    println!("  [ ] 事件总线   (Event BUS)     — 模块间 pub/sub (M0 待完成)");
+    println!("  [✓] 文件抽象   (Workspace FS)  — 统一命名空间/持久化");
+    println!();
+    println!("模型配置:");
+    println!("  Provider:   {}", cfg.base_url);
+    println!("  Model:      {}", cfg.model);
+    let key_preview = cfg
+        .api_key
+        .as_deref()
+        .map(|k| format!("{}****", &k[..k.len().min(8)]))
+        .unwrap_or_else(|| "(未设置)".into());
+    println!("  API Key:    {key_preview}");
+    println!("  Timeout:    {}s", cfg.request_timeout_secs);
+    println!();
+    println!("已加载模块:");
+    let ext_dir = format!("{xi_home}/bin");
+    if std::path::Path::new(&ext_dir).is_dir() {
+        let mut count = 0u32;
+        if let Ok(entries) = std::fs::read_dir(&ext_dir) {
+            for e in entries.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if name.starts_with("xi-") {
+                    let module = name.trim_start_matches("xi-");
+                    println!("  [M] {module}  ({})", e.path().display());
+                    count += 1;
+                }
+            }
+        }
+        if count == 0 {
+            println!("  (无外部模块)");
+        }
+    } else {
+        println!("  (无外部模块)");
+    }
+    println!("  [M] dev       (自进化开发循环)");
+    println!("  [M] run       (任务执行引擎)");
+    println!("  [M] serve     (HTTP API)");
+    println!("  [M] memory    (持久记忆)");
+    println!("  [M] config    (配置管理)");
+    println!();
+    println!("工作区:");
+    println!("  Repo:       {}", cfg.repo_dir.display());
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["log", "--oneline", "-1"])
+        .current_dir(&cfg.repo_dir)
+        .output()
+    {
+        let head = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !head.is_empty() {
+            println!("  HEAD:       {head}");
+        }
+    }
+    let state_path = cfg.repo_dir.join(".xi/state.json");
+    if state_path.is_file() {
+        if let Ok(content) = std::fs::read_to_string(&state_path) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                let done = v
+                    .get("done")
+                    .and_then(|d| d.as_object())
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                println!("  Tasks done: {done}");
+            }
+        }
+    }
+    println!();
+    println!("状态: 运行中 (self-evolving)");
+    Ok(())
 }
 
 fn cmd_validate() -> Result<()> {
