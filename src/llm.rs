@@ -303,6 +303,7 @@ impl Llm for OpenAiCompat {
                 let reasoning = v
                     .pointer("/choices/0/message/reasoning_content")
                     .and_then(|c| c.as_str())
+                    .or_else(|| v.pointer("/choices/0/message/reasoning").and_then(|c| c.as_str()))
                     .unwrap_or("")
                     .to_string();
                 if !reasoning.trim().is_empty() {
